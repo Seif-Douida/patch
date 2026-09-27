@@ -20,7 +20,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $SubscriptionId,
-    [string] $Location = 'northeurope',
+    # North Europe, West Europe and UK South restrict new SQL servers on this subscription (ADR-002).
+    [string] $Location = 'germanywestcentral',
     [string] $ResourceGroup = 'rg-patchpulse',
     [string] $GitHubRepo = 'Seif-Douida/patch',
     [string] $AppName = 'patchpulse-github-deploy'
@@ -29,7 +30,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Windows PowerShell does not stop when a native command fails, so check every az exit code.
-# Note: az is a .cmd file, so never put '|' or '&' inside an argument (cmd.exe would act on them).
+# az is az.cmd, which forwards arguments through cmd.exe inside an IF (...) block, so an argument
+# must never contain ( ) & | < > ^ : cmd.exe acts on them (e.g. 'length(@)' breaks the call).
+# Count results in PowerShell instead. tests/infra/test_bootstrap_script.py enforces this.
 function Invoke-Az {
     $output = & az @args
     if ($LASTEXITCODE -ne 0) { throw "az $($args -join ' ') failed (exit code $LASTEXITCODE)" }
@@ -47,9 +50,12 @@ foreach ($namespace in $namespaces) {
 }
 
 Write-Host "[2/5] Checking that $Location offers serverless SQL and Container Apps..."
-$serverless = Invoke-Az sql db list-editions --location $Location --edition GeneralPurpose `
-    --service-objective GP_S_Gen5_2 --available --query 'length(@)' -o tsv
-if ([int]$serverless -lt 1) { throw "Serverless GP_S_Gen5_2 is not available in $Location." }
+$editions = @(Invoke-Az sql db list-editions --location $Location --edition GeneralPurpose `
+    --service-objective GP_S_Gen5_2 --available --query '[].name' -o tsv | Where-Object { $_ })
+if ($editions.Count -eq 0) {
+    throw ("Serverless SQL (GP_S_Gen5_2) can't be provisioned in $Location for this subscription; " +
+        "Azure restricts some regions for new subscriptions. Re-run with -Location <another region>.")
+}
 $displayName = Invoke-Az account list-locations --query "[?name=='$Location'].displayName" -o tsv
 $appRegions = Invoke-Az provider show --namespace Microsoft.App `
     --query "resourceTypes[?resourceType=='managedEnvironments'].locations[]" -o tsv
@@ -87,9 +93,9 @@ $assignments = @(
     @{ Role = 'Cost Management Reader'; Scope = "/subscriptions/$SubscriptionId" }
 )
 foreach ($assignment in $assignments) {
-    $count = Invoke-Az role assignment list --assignee $principalId --role $assignment.Role `
-        --scope $assignment.Scope --query 'length(@)' -o tsv
-    if ([int]$count -eq 0) {
+    $existing = @(Invoke-Az role assignment list --assignee $principalId --role $assignment.Role `
+        --scope $assignment.Scope --query '[].id' -o tsv | Where-Object { $_ })
+    if ($existing.Count -eq 0) {
         Invoke-Az role assignment create --assignee-object-id $principalId `
             --assignee-principal-type ServicePrincipal --role $assignment.Role `
             --scope $assignment.Scope -o none
