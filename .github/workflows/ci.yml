@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# `shell: bash` runs with -eo pipefail, so a failing command piped into tee fails the step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  BICEP_VERSION: v0.47.16
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.19"
+          enable-cache: true
+
+      - name: Install Bicep CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/bicep" \
+            "https://github.com/Azure/bicep/releases/download/${BICEP_VERSION}/bicep-linux-x64"
+          chmod +x "$RUNNER_TEMP/bin/bicep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+      - name: Bicep lint (any warning fails the build)
+        run: |
+          bicep lint infra/main.bicep 2>&1 | tee bicep-lint.txt
+          if grep -Eq "Warning|Error" bicep-lint.txt; then exit 1; fi
+
+      - name: Tests, including the $0 infra guard
+        run: uv run pytest

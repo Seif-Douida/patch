@@ -1,0 +1,125 @@
+name: infra
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "tests/infra/**"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+    inputs:
+      what_if_only:
+        description: "Preview the changes (what-if) without deploying"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+# `shell: bash` runs with -eo pipefail, so a failed deployment piped into tee fails the step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  BICEP_VERSION: v0.47.16
+  RG: rg-patchpulse
+
+jobs:
+  # The $0 guard must pass before anything is deployed (ADR-017, layer 2).
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.19"
+
+      - name: Install Bicep CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/bicep" \
+            "https://github.com/Azure/bicep/releases/download/${BICEP_VERSION}/bicep-linux-x64"
+          chmod +x "$RUNNER_TEMP/bin/bicep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - run: uv sync --locked
+
+      - name: Bicep lint (any warning fails)
+        run: |
+          bicep lint infra/main.bicep 2>&1 | tee bicep-lint.txt
+          if grep -Eq "Warning|Error" bicep-lint.txt; then exit 1; fi
+
+      - name: $0 guard test
+        run: uv run pytest tests/infra -q
+
+  deploy:
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Choose the API image (keep the running one; else require a public :latest)
+        run: |
+          # `list` returns empty only when pp-api is absent, and fails on real Azure errors.
+          id=$(az containerapp list -g "$RG" --query "[?name=='pp-api'].id | [0]" -o tsv)
+          if [ -n "$id" ]; then
+            image=$(az containerapp show --ids "$id" --query "properties.template.containers[0].image" -o tsv)
+          else
+            image=ghcr.io/seif-douida/patchpulse-api:latest
+            if ! docker manifest inspect "$image" > /dev/null 2>&1; then
+              echo "::error::pp-api does not exist yet and $image is not publicly pullable. Wait for api-image to finish, make the package public (runbook step 11), then re-run infra."
+              exit 1
+            fi
+          fi
+          echo "API_IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: What-if (preview of every change)
+        env:
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+          SQL_ENTRA_ADMIN_LOGIN: ${{ secrets.SQL_ENTRA_ADMIN_LOGIN }}
+          SQL_ENTRA_ADMIN_OBJECT_ID: ${{ secrets.SQL_ENTRA_ADMIN_OBJECT_ID }}
+          DEV_IP_ADDRESS: ${{ secrets.DEV_IP_ADDRESS }}
+        run: |
+          az deployment group what-if -g "$RG" --name "infra-$GITHUB_RUN_ID" \
+            --parameters infra/main.bicepparam
+
+      - name: Deploy
+        if: github.event_name != 'workflow_dispatch' || !inputs.what_if_only
+        env:
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+          SQL_ENTRA_ADMIN_LOGIN: ${{ secrets.SQL_ENTRA_ADMIN_LOGIN }}
+          SQL_ENTRA_ADMIN_OBJECT_ID: ${{ secrets.SQL_ENTRA_ADMIN_OBJECT_ID }}
+          DEV_IP_ADDRESS: ${{ secrets.DEV_IP_ADDRESS }}
+        run: |
+          az deployment group create -g "$RG" --name "infra-$GITHUB_RUN_ID" \
+            --parameters infra/main.bicepparam \
+            --query properties.outputs -o json | tee outputs.json
+          {
+            echo "## Deployment outputs"
+            echo '```json'
+            cat outputs.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
