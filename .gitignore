@@ -17,7 +17,7 @@ build/
 !.env.example
 
 # Local-only implementation plans
-docs/plans/
+docs/
 
 # Compiled Bicep
 infra/**/*.json
