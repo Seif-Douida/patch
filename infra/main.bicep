@@ -7,8 +7,8 @@ targetScope = 'resourceGroup'
 @description('Region for everything except the Static Web App.')
 param location string = resourceGroup().location
 
-@description('The SWA Free plan is offered in few regions; its content is served globally anyway.')
-param staticWebAppLocation string = 'westeurope'
+@description('SWA is offered in five regions and West Europe rejects new customers on this subscription (ADR-002). The location only hosts the unused managed API; static content is served globally.')
+param staticWebAppLocation string = 'eastus2'
 
 @description('Image for pp-api. infra.yml passes the image that is already running, so an infra deploy never rolls the app back.')
 param apiImage string
