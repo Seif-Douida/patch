@@ -9,6 +9,9 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.scripts]
+patchpulse-pipeline = "patchpulse.pipeline.cli:main"
+
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13"]
 build-backend = "uv_build"
@@ -26,7 +29,8 @@ extend-exclude = ["*.md"]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "N", "S", "PT", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "S607"]
+# Tests may assert, run subprocesses, use throwaway passwords and build SQL from constants.
+"tests/**" = ["S101", "S105", "S106", "S603", "S607", "S608"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["patchpulse"]
@@ -34,18 +38,42 @@ known-first-party = ["patchpulse"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = "src"
+# tests/support holds shared test helpers (fake Steam) importable by test modules.
+mypy_path = "src,tests/support"
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["mssql_python", "mssql_python.*", "statsmodels", "statsmodels.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
+pythonpath = ["tests/support"]
+markers = [
+    "integration: needs the SQL Server container (skipped locally without it, required in CI)",
+]
 
 [dependency-groups]
+# The API image syncs without groups; the jobs image syncs `pipeline`; dev gets everything.
 dev = [
+    { include-group = "pipeline" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
+    "python-dotenv>=1.2.3",
     "ruff>=0.16.9",
+    "statsmodels>=0.15.0",
+    "types-pyyaml>=6.0.12.20260906",
+]
+pipeline = [
+    "alembic>=1.20.0",
+    "dbt-core~=1.12.5",
+    "dbt-sqlserver[mssql]~=1.12.0",
+    "httpx2>=2.13.1",
+    "mssql-python>=1.15.0",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6",
+    "sqlalchemy>=2.1.1",
 ]

@@ -1,0 +1,23 @@
+# Local SQL Server for development and integration tests (spec §0: named volumes, never bind
+# mounts). The same image runs as a service container in CI. Never point development at Azure SQL:
+# every wake-up costs at least 1,800 of its 100,000 free vCore-seconds a month.
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2025-CU9-ubuntu-24.04
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${PP_TEST_SA_PASSWORD:?set PP_TEST_SA_PASSWORD in .env}
+    ports:
+      - "1433:1433"
+    volumes:
+      - patchpulse-sql:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  patchpulse-sql:

@@ -19,6 +19,7 @@ defaults:
 
 env:
   BICEP_VERSION: v0.47.16
+  SQL_IMAGE: mcr.microsoft.com/mssql/server:2025-CU9-ubuntu-24.04
 
 jobs:
   checks:
@@ -33,6 +34,10 @@ jobs:
         with:
           version: "0.12.19"
           enable-cache: true
+
+      # mssql-python's documented Linux requirements.
+      - name: Install SQL driver libraries
+        run: sudo apt-get install -y --no-install-recommends libltdl7 libkrb5-3 libgssapi-krb5-2
 
       - name: Install Bicep CLI
         run: |
@@ -53,4 +58,44 @@ jobs:
           if grep -Eq "Warning|Error" bicep-lint.txt; then exit 1; fi
 
       - name: Tests, including the $0 infra guard
-        run: uv run pytest
+        run: uv run pytest -m "not integration"
+
+  # Integration tests against SQL Server on the runner. This is a throwaway container; CI never
+  # connects to Azure SQL (spec §5).
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+          enable-cache: true
+
+      - name: Install SQL driver libraries
+        run: sudo apt-get install -y --no-install-recommends libltdl7 libkrb5-3 libgssapi-krb5-2
+
+      - name: Start SQL Server (password generated for this run)
+        run: |
+          password="Ci1-$(openssl rand -hex 16)"
+          echo "::add-mask::$password"
+          echo "PP_TEST_SA_PASSWORD=$password" >> "$GITHUB_ENV"
+          docker run -d --name sql -p 1433:1433 \
+            -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e "MSSQL_SA_PASSWORD=$password" \
+            --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"\$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null" \
+            --health-interval 10s --health-retries 12 --health-start-period 20s \
+            "$SQL_IMAGE"
+          for attempt in $(seq 1 30); do
+            if [ "$(docker inspect -f '{{.State.Health.Status}}' sql)" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs sql | tail -20
+          exit 1
+
+      - run: uv sync --locked
+      - run: uv run pytest -m integration
