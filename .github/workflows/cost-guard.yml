@@ -54,14 +54,16 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Month-to-date cost (Cost Management, lags up to 72 hours)
+      - name: Month-to-date cost of rg-patchpulse (Cost Management, lags up to 72 hours)
         id: cost
         continue-on-error: true
         env:
           SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
+          # Scoped to PatchPulse's resource group: the kill switch can only stop pp-api, so it only
+          # counts PatchPulse's spending. Other spending in the subscription is the $1 budget's job.
           az rest --method post \
-            --url "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/providers/Microsoft.CostManagement/query?api-version=2023-11-01" \
+            --url "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.CostManagement/query?api-version=2023-11-01" \
             --body '{"type":"ActualCost","timeframe":"MonthToDate","dataset":{"granularity":"None","aggregation":{"totalCost":{"name":"Cost","function":"Sum"}}}}' \
             > cost.json
 

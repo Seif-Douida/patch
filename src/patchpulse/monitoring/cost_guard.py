@@ -2,7 +2,7 @@
 
 `.github/workflows/cost-guard.yml` saves three Azure responses as JSON files, then runs this module:
 
-* a Cost Management query for month-to-date actual cost (lags up to 72 hours on pay-as-you-go),
+* a Cost Management query for rg-patchpulse's month-to-date actual cost (lags up to 72 hours),
 * the pp-api `Replicas` metric, Total per hour, which is replica-minutes (near real time),
 * the pp-api `Requests` metric, Total per hour.
 
