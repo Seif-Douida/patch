@@ -31,6 +31,34 @@ def test_cost_query_is_scoped_to_the_patchpulse_resource_group() -> None:
     assert re.search(r"^\s+RG: rg-patchpulse$", text, flags=re.MULTILINE)
 
 
+def test_guard_is_scheduled_every_15_minutes_off_the_hour() -> None:
+    # GitHub ran 2 of ~19 hourly schedules on 2026-09-28: scheduled runs may be dropped under
+    # load, and the start of the hour is the busiest time.
+    (minutes,) = re.findall(r'^\s+- cron: "(\S+) \* \* \* \*"$', read("cost-guard.yml"), re.M)
+    slots = sorted(int(minute) for minute in minutes.split(","))
+    assert 0 not in slots
+    next_slots = [*slots[1:], slots[0] + 60]  # the last slot wraps to the next hour's first
+    gaps = [later - earlier for earlier, later in zip(slots, next_slots, strict=True)]
+    assert max(gaps) <= 15, slots
+
+
+def test_alert_issue_is_not_recommented_while_pp_api_stays_stopped() -> None:
+    # Every 15 minutes a persisting trip would otherwise add ~100 comments a day.
+    text = read("cost-guard.yml")
+    assert "already_stopped=" in text
+    issue_step = text.split("- name: Open or update the alert issue", 1)[1]
+    assert "steps.trip.outputs.already_stopped" in issue_step
+
+
+def test_cost_query_is_retried_when_throttled() -> None:
+    # Cost Management answered 429 "Too many requests" on 2026-09-28, which blinded the cost check.
+    text = read("cost-guard.yml")
+    step = text.split("id: cost\n", 1)[1].split("\n      - name:", 1)[0]
+    assert "CostManagement/query" in step
+    assert re.search(r"for attempt in [\d ]+; do", step)
+    assert "sleep" in step
+
+
 def test_replicas_are_read_as_per_minute_averages() -> None:
     # Azure samples Replicas about twice a minute, so hourly Totals double-count.
     (query,) = [line for line in shell_lines("cost-guard.yml") if "az monitor metrics list" in line]

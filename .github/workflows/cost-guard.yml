@@ -1,12 +1,14 @@
 name: cost-guard
 
-# $0 kill switch (ADR-017). Every hour: read month-to-date cost and pp-api usage; if a limit is
+# $0 kill switch (ADR-017). Every 15 min: read month-to-date cost and pp-api usage; if a limit is
 # crossed, stop pp-api (ingress off, app stopped, 0 replicas) and open or update a GitHub issue
 # labelled `alert` (ADR-013). Azure lookups fail closed: an Azure error fails the run instead of
 # looking like zero usage.
 on:
+  # GitHub drops scheduled runs under load (2 of ~19 hourly runs happened on 2026-09-28), so ask
+  # four times an hour, away from the busy top of the hour.
   schedule:
-    - cron: "17 * * * *"
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -63,10 +65,20 @@ jobs:
         run: |
           # Scoped to PatchPulse's resource group: the kill switch can only stop pp-api, so it only
           # counts PatchPulse's spending. Other spending in the subscription is the $1 budget's job.
-          az rest --method post \
-            --url "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.CostManagement/query?api-version=2023-11-01" \
-            --body '{"type":"ActualCost","timeframe":"MonthToDate","dataset":{"granularity":"None","aggregation":{"totalCost":{"name":"Cost","function":"Sum"}}}}' \
-            > cost.json
+          # Cost Management throttles (429 "Too many requests"), so retry before giving up.
+          for attempt in 1 2 3; do
+            if az rest --method post \
+              --url "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.CostManagement/query?api-version=2023-11-01" \
+              --body '{"type":"ActualCost","timeframe":"MonthToDate","dataset":{"granularity":"None","aggregation":{"totalCost":{"name":"Cost","function":"Sum"}}}}' \
+              > cost.json; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "attempt $attempt failed; retrying in $((attempt * 30)) s"
+              sleep $((attempt * 30))
+            fi
+          done
+          exit 1
 
       - name: pp-api replica-minutes this month (Azure Monitor metrics, near real time)
         run: |
@@ -105,9 +117,16 @@ jobs:
             echo "action=pp-api does not exist; nothing to stop." >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          fqdn=$(az containerapp show --ids "$id" --query properties.configuration.ingress.fqdn -o tsv)
+          status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+          # A trip that persists finds pp-api already off every run; the issue step then stays quiet.
+          if [ -z "$fqdn" ] && [ "$status" = "Stopped" ]; then
+            echo "already_stopped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_stopped=false" >> "$GITHUB_OUTPUT"
+          fi
           # Disabling ingress alone restarted pp-api and left a replica running for 4.5 hours
           # (drill, 2026-09-28), so ingress goes first and the app-level stop comes after it.
-          fqdn=$(az containerapp show --ids "$id" --query properties.configuration.ingress.fqdn -o tsv)
           if [ -n "$fqdn" ]; then
             az containerapp ingress disable -g "$RG" -n "$APP" -o none
           fi
@@ -140,6 +159,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TRIP_OUTCOME: ${{ steps.trip.outcome }}
           TRIP_ACTION: ${{ steps.trip.outputs.action }}
+          ALREADY_STOPPED: ${{ steps.trip.outputs.already_stopped }}
         run: |
           case "$TRIP_OUTCOME" in
             success) action="$TRIP_ACTION" ;;
@@ -151,7 +171,9 @@ jobs:
           gh label create alert --color B60205 --description "Automated alert (ADR-013)" --force
           number=$(gh issue list --label alert --state open --search "\"$title\" in:title" \
             --json number --jq '.[0].number // empty')
-          if [ -n "$number" ]; then
+          if [ -n "$number" ] && [ "$TRIP_OUTCOME" = "success" ] && [ "$ALREADY_STOPPED" = "true" ]; then
+            echo "pp-api was already stopped and issue #$number is open; not commenting again."
+          elif [ -n "$number" ]; then
             gh issue comment "$number" --body-file issue-body.md
           else
             gh issue create --title "$title" --label alert --body-file issue-body.md
