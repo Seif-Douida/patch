@@ -67,6 +67,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production
+    # Shared with api-image's deploy: this job reads pp-api's running image and redeploys it, so an
+    # image roll in between would be undone.
+    concurrency:
+      group: pp-api-deploy
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -123,3 +128,27 @@ jobs:
             cat outputs.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Recovery after a cost-guard trip (ADR-017): Deploy restored ingress; now start the app.
+      - name: Start pp-api if cost-guard stopped it
+        if: github.event_name != 'workflow_dispatch' || !inputs.what_if_only
+        run: |
+          id=$(az containerapp list -g "$RG" --query "[?name=='pp-api'].id | [0]" -o tsv)
+          status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+          if [ "$status" != "Stopped" ]; then
+            echo "pp-api runningStatus=$status; nothing to start."
+            exit 0
+          fi
+          az rest --method post \
+            --url "https://management.azure.com$id/start?api-version=2025-07-01" -o none
+          for attempt in $(seq 1 16); do
+            status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+            echo "attempt $attempt: runningStatus=$status"
+            if [ "$status" = "Running" ]; then break; fi
+            sleep 15
+          done
+          if [ "$status" != "Running" ]; then
+            echo "::error::pp-api did not start: runningStatus=$status"
+            exit 1
+          fi
+          echo "::notice::pp-api started again after a cost-guard stop."

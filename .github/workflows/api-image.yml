@@ -73,6 +73,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: production
+    # Shared with infra's deploy, which redeploys pp-api's running image (see infra.yml).
+    concurrency:
+      group: pp-api-deploy
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -92,6 +96,12 @@ jobs:
             echo "::notice::pp-api does not exist yet. Image pushed; run infra.yml to create the app."
             echo "deployed=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # A stopped app means cost-guard tripped (ADR-017); only infra.yml brings it back.
+          status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+          if [ "$status" = "Stopped" ]; then
+            echo "::error::pp-api is stopped by cost-guard. Fix the cause, run infra (what_if_only unticked) to start it, then re-run this workflow; the image is already pushed."
+            exit 1
           fi
           az containerapp update -g "$RG" -n "$APP" --image "$IMAGE:$GITHUB_SHA" -o none
           fqdn=$(az containerapp show -g "$RG" -n "$APP" --query properties.configuration.ingress.fqdn -o tsv)

@@ -1,15 +1,16 @@
 name: cost-guard
 
 # $0 kill switch (ADR-017). Every hour: read month-to-date cost and pp-api usage; if a limit is
-# crossed, disable pp-api ingress and open or update a GitHub issue labelled `alert` (ADR-013).
-# Azure lookups fail closed: an Azure error fails the run instead of looking like zero usage.
+# crossed, stop pp-api (ingress off, app stopped, 0 replicas) and open or update a GitHub issue
+# labelled `alert` (ADR-013). Azure lookups fail closed: an Azure error fails the run instead of
+# looking like zero usage.
 on:
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Evaluate and open the issue, but never disable ingress"
+        description: "Evaluate and open the issue, but never stop pp-api"
         type: boolean
         default: true
       cost_threshold:
@@ -67,7 +68,7 @@ jobs:
             --body '{"type":"ActualCost","timeframe":"MonthToDate","dataset":{"granularity":"None","aggregation":{"totalCost":{"name":"Cost","function":"Sum"}}}}' \
             > cost.json
 
-      - name: pp-api usage this month (Azure Monitor metrics, near real time)
+      - name: pp-api replica-minutes this month (Azure Monitor metrics, near real time)
         run: |
           # Both ends are required: with only --start-time, az queries start + 1h (--offset default).
           start=$(date -u +%Y-%m-01T00:00:00+00:00)
@@ -76,13 +77,12 @@ jobs:
           id=$(az containerapp list -g "$RG" --query "[?name=='$APP'].id | [0]" -o tsv)
           if [ -z "$id" ]; then
             echo '{"value": []}' > replicas.json
-            echo '{"value": []}' > requests.json
             exit 0
           fi
-          az monitor metrics list --resource "$id" --metrics Replicas --aggregation Total \
-            --interval 1h --start-time "$start" --end-time "$end" -o json > replicas.json
-          az monitor metrics list --resource "$id" --metrics Requests --aggregation Total \
-            --interval 1h --start-time "$start" --end-time "$end" -o json > requests.json
+          # Azure samples Replicas about twice a minute, so the per-minute Average is the replica
+          # count and a Total would double-count. A 1m query spans up to 31 days: a whole month.
+          az monitor metrics list --resource "$id" --metrics Replicas --aggregation Average \
+            --interval 1m --start-time "$start" --end-time "$end" -o json > replicas.json
 
       - name: Evaluate
         id: guard
@@ -93,30 +93,45 @@ jobs:
           cost_args=()
           if [ "$COST_OK" = "true" ]; then cost_args=(--cost cost.json); fi
           uv run --no-dev python -m patchpulse.monitoring.cost_guard "${cost_args[@]}" \
-            --replicas replicas.json --requests requests.json \
-            --vcpu-per-replica 0.5 --cost-threshold "$THRESHOLD"
+            --replicas replicas.json --vcpu-per-replica 0.5 --cost-threshold "$THRESHOLD"
           cat cost-guard-summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Trip - disable pp-api ingress
+      - name: Trip - stop pp-api
         id: trip
         if: steps.guard.outputs.tripped == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
         run: |
           id=$(az containerapp list -g "$RG" --query "[?name=='$APP'].id | [0]" -o tsv)
           if [ -z "$id" ]; then
-            echo "action=pp-api does not exist; nothing to disable." >> "$GITHUB_OUTPUT"
+            echo "action=pp-api does not exist; nothing to stop." >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Disabling ingress alone restarted pp-api and left a replica running for 4.5 hours
+          # (drill, 2026-09-28), so ingress goes first and the app-level stop comes after it.
           fqdn=$(az containerapp show --ids "$id" --query properties.configuration.ingress.fqdn -o tsv)
           if [ -n "$fqdn" ]; then
             az containerapp ingress disable -g "$RG" -n "$APP" -o none
           fi
+          status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+          if [ "$status" != "Stopped" ]; then
+            az rest --method post \
+              --url "https://management.azure.com$id/stop?api-version=2025-07-01" -o none
+          fi
+          # The stop is asynchronous: wait until the app is Stopped and no revision has replicas.
+          for attempt in $(seq 1 16); do
+            status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+            busy=$(az containerapp revision list -g "$RG" -n "$APP" \
+              --query 'length([?properties.replicas > `0`])' -o tsv)
+            echo "attempt $attempt: runningStatus=$status, revisions with replicas=$busy"
+            if [ "$status" = "Stopped" ] && [ "$busy" = "0" ]; then break; fi
+            sleep 15
+          done
           after=$(az containerapp show --ids "$id" --query properties.configuration.ingress.fqdn -o tsv)
-          if [ -n "$after" ]; then
-            echo "::error::pp-api ingress is still enabled after the disable call"
+          if [ "$status" != "Stopped" ] || [ "$busy" != "0" ] || [ -n "$after" ]; then
+            echo "::error::pp-api is not fully off: runningStatus=$status, revisions with replicas=$busy, ingress fqdn='$after'"
             exit 1
           fi
-          echo "action=pp-api ingress is disabled." >> "$GITHUB_OUTPUT"
-          echo "::warning::pp-api ingress disabled by cost-guard"
+          echo "action=pp-api is stopped (0 replicas) and its ingress is disabled." >> "$GITHUB_OUTPUT"
+          echo "::warning::pp-api stopped by cost-guard"
 
       - name: Open or update the alert issue
         if: always() && steps.guard.outputs.tripped == 'true'
@@ -128,8 +143,8 @@ jobs:
         run: |
           case "$TRIP_OUTCOME" in
             success) action="$TRIP_ACTION" ;;
-            skipped) action="Dry run: ingress left enabled." ;;
-            *) action="FAILED to disable pp-api ingress. Check the run log and disable it by hand." ;;
+            skipped) action="Dry run: pp-api left running." ;;
+            *) action="FAILED to stop pp-api. Check the run log and stop it by hand." ;;
           esac
           { cat cost-guard-summary.md; echo; echo "**Action:** $action"; echo; echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"; } > issue-body.md
           title="cost-guard tripped"
