@@ -1,0 +1,114 @@
+# Games PatchPulse tracks (spec §6.2). Names, genres, studios and release dates are from Steam's
+# appdetails on 2026-09-28. Volumes and the reasons for each pick: docs/plans/phase-1.md, Decision 6.
+#
+# backfill_start: how far back the nightly job fills history, a little each night (default
+# 2024-10-01, or the launch day for later games). role: tracked | donor | both (donors feed
+# synthetic control in Phase 4).
+games:
+  - appid: 553850
+    name: Helldivers 2
+    genres: [Action]
+    role: tracked
+    backfill_start: 2024-10-01
+    release_date: 2024-02-08
+    developer: Arrowhead Game Studios
+    publisher: PlayStation Publishing LLC
+
+  - appid: 949230
+    name: "Cities: Skylines II"
+    genres: [Simulation]
+    role: tracked
+    backfill_start: 2023-10-24  # since launch: the launch-performance incident is in scope
+    release_date: 2023-10-24
+    developer: Iceflake Studios
+    publisher: Paradox Interactive
+
+  - appid: 1091500
+    name: Cyberpunk 2077
+    genres: [RPG]
+    role: tracked
+    backfill_start: 2024-10-01
+    release_date: 2020-12-09
+    developer: CD PROJEKT RED
+    publisher: CD PROJEKT RED
+
+  - appid: 2246340
+    name: Monster Hunter Wilds
+    genres: [Action, Adventure, RPG]
+    role: tracked
+    backfill_start: 2025-02-27
+    release_date: 2025-02-27
+    developer: CAPCOM Co., Ltd.
+    publisher: CAPCOM Co., Ltd.
+
+  - appid: 1903340
+    name: "Clair Obscur: Expedition 33"
+    genres: [Action, RPG]
+    role: tracked
+    backfill_start: 2025-04-24
+    release_date: 2025-04-24
+    developer: Sandfall Interactive
+    publisher: Kepler Interactive
+
+  - appid: 1086940
+    name: Baldur's Gate 3
+    genres: [Adventure, RPG, Strategy]
+    role: tracked
+    backfill_start: 2024-10-01
+    release_date: 2023-08-03
+    developer: Larian Studios
+    publisher: Larian Studios
+
+  - appid: 275850
+    name: No Man's Sky
+    genres: [Action, Adventure]
+    role: tracked
+    backfill_start: 2024-10-01
+    release_date: 2016-08-12
+    developer: Hello Games
+    publisher: Hello Games
+
+  - appid: 548430
+    name: Deep Rock Galactic
+    genres: [Action]
+    role: tracked
+    backfill_start: 2024-10-01
+    release_date: 2020-05-13
+    developer: Ghost Ship Games
+    publisher: Coffee Stain Publishing
+
+  - appid: 1145350
+    name: Hades II
+    genres: [Action, Indie, RPG]
+    role: tracked
+    backfill_start: 2024-10-01  # Steam lists the 1.0 date; early access ran before it
+    release_date: 2025-09-25
+    developer: Supergiant Games
+    publisher: Supergiant Games
+
+  - appid: 1363080
+    name: Manor Lords
+    genres: [Simulation, Strategy]
+    role: tracked
+    backfill_start: 2024-10-01
+    release_date: 2024-04-26
+    developer: Slavic Magic
+    publisher: Hooded Horse
+
+  - appid: 292030
+    name: "The Witcher 3: Wild Hunt"
+    genres: [RPG]
+    role: tracked
+    backfill_start: 2024-10-01  # a long stable pre-period before "Remastered" (2026-09-29)
+    release_date: 2015-05-18
+    developer: CD PROJEKT RED
+    publisher: CD PROJEKT RED
+
+  - appid: 3751260
+    name: The Blood of Dawnwalker
+    genres: [Action, Adventure, RPG]
+    role: tracked
+    backfill_start: 2026-09-02  # since launch
+    release_date: 2026-09-02
+    developer: Rebel Wolves
+    publisher: Bandai Namco Entertainment
