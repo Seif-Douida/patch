@@ -72,10 +72,19 @@ if (-not $appId) { $appId = Invoke-Az ad app create --display-name $AppName --qu
 $principalId = Invoke-Az ad sp list --filter "appId eq '$appId'" --query '[0].id' -o tsv
 if (-not $principalId) { $principalId = Invoke-Az ad sp create --id $appId --query id -o tsv }
 
-$subject = "repo:${GitHubRepo}:environment:production"
-$existing = Invoke-Az ad app federated-credential list --id $appId `
-    --query "[?subject=='$subject'].name" -o tsv
-if (-not $existing) {
+# Repos created after 2026-07-15 get GitHub's immutable OIDC subject, which embeds the owner and
+# repo IDs: repo:<owner>@<owner_id>/<repo>@<repo_id>:... A name-only subject never matches their
+# tokens (AADSTS700213), and trusting the IDs means a recreated repo with the same name can't match.
+$repoInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$GitHubRepo" `
+    -Headers @{ 'User-Agent' = 'patchpulse-bootstrap' }
+$owner = $repoInfo.owner.login
+$ownerId = $repoInfo.owner.id
+$repo = $repoInfo.name
+$repoId = $repoInfo.id
+$subject = "repo:${owner}@${ownerId}/${repo}@${repoId}:environment:production"
+$current = Invoke-Az ad app federated-credential list --id $appId `
+    --query "[?name=='github-production'].subject" -o tsv
+if ($current -ne $subject) {
     $credentialFile = New-TemporaryFile
     @{
         name      = 'github-production'
@@ -83,9 +92,16 @@ if (-not $existing) {
         subject   = $subject
         audiences = @('api://AzureADTokenExchange')
     } | ConvertTo-Json | Set-Content -Path $credentialFile -Encoding ascii
-    Invoke-Az ad app federated-credential create --id $appId --parameters "@$credentialFile" | Out-Null
+    if ($current) {
+        # Replace the old subject in place, so no trust in it remains.
+        Invoke-Az ad app federated-credential update --id $appId `
+            --federated-credential-id github-production --parameters "@$credentialFile" | Out-Null
+    } else {
+        Invoke-Az ad app federated-credential create --id $appId --parameters "@$credentialFile" | Out-Null
+    }
     Remove-Item $credentialFile
 }
+Write-Host "    OIDC subject trusted: $subject"
 
 Write-Host '[5/5] Role assignments...'
 $assignments = @(

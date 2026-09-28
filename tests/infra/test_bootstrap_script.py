@@ -40,6 +40,18 @@ def test_az_arguments_contain_no_cmd_metacharacters() -> None:
     assert not offenders, f"cmd.exe would act on these az arguments: {offenders}"
 
 
+def test_federated_subject_uses_githubs_immutable_ids() -> None:
+    # Repos created after 2026-07-15 present `repo:<owner>@<owner_id>/<repo>@<repo_id>:...`;
+    # a name-only subject never matches their tokens (AADSTS700213) and can be recycled.
+    script = BOOTSTRAP.read_text(encoding="utf-8")
+    (subject,) = re.findall(r"^\$subject = \"(.*)\"$", script, flags=re.MULTILINE)
+    placeholder = r"\$\{?\w+\}?"
+    immutable = (
+        rf"repo:{placeholder}@{placeholder}/{placeholder}@{placeholder}:environment:production"
+    )
+    assert re.fullmatch(immutable, subject), subject
+
+
 def test_scan_catches_the_query_that_broke_bootstrap() -> None:
     (call,) = az_calls("$n = Invoke-Az sql db list-editions `\n    --query 'length(@)' -o tsv")
     assert unsafe_literals(call) == ["'length(@)'"]
