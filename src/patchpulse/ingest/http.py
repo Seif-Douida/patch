@@ -1,0 +1,129 @@
+"""Polite HTTP for Steam's public endpoints (spec C4).
+
+At most one request a second across every Steam host (one shared `RateLimiter`), a descriptive
+User-Agent, and retries with capped exponential backoff that honours `Retry-After` on 429s, 5xx
+responses and network errors. Other 4xx responses are not retried.
+"""
+
+from __future__ import annotations
+
+import random
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from importlib.metadata import version
+from typing import Any
+
+import httpx2
+
+REPO_URL = "https://github.com/Seif-Douida/patch"
+USER_AGENT = f"PatchPulse/{version('patchpulse')} (+{REPO_URL})"
+REQUEST_TIMEOUT_S = 30.0
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+class SteamError(RuntimeError):
+    """Base class for Steam request failures."""
+
+
+class SteamRequestError(SteamError):
+    """A request Steam rejected (4xx other than 429) or answered with something unusable."""
+
+
+class SteamUnavailableError(SteamError):
+    """Steam kept failing (429, 5xx, network errors) after every retry."""
+
+
+@dataclass
+class RateLimiter:
+    """Spaces requests at least `min_interval_s` apart. Share one instance for all of Steam."""
+
+    min_interval_s: float = 1.0
+    clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+    _last: float | None = field(default=None, init=False, repr=False)
+
+    def wait(self) -> None:
+        if self._last is not None:
+            remaining = self._last + self.min_interval_s - self.clock()
+            if remaining > 0:
+                self.sleep(remaining)
+        self._last = self.clock()
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_attempts: int = 6
+    base_s: float = 2.0
+    cap_s: float = 120.0
+
+    def delay(self, attempt: int, *, retry_after: float | None, jitter: float) -> float:
+        """Seconds to wait after failed attempt `attempt` (1-based); jitter is in [0, 1]."""
+        if retry_after is not None:
+            return min(retry_after, self.cap_s)
+        full = min(self.cap_s, self.base_s * 2.0 ** (attempt - 1))
+        return full / 2 + full / 2 * jitter  # "equal jitter": at least half the full delay
+
+
+def _retry_after(response: httpx2.Response) -> float | None:
+    try:
+        return float(response.headers["Retry-After"])
+    except (KeyError, ValueError):
+        return None  # absent, or an HTTP date (not used by Steam)
+
+
+class SteamHttp:
+    def __init__(
+        self,
+        client: httpx2.Client,
+        *,
+        limiter: RateLimiter,
+        policy: RetryPolicy | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[], float] = random.random,
+    ) -> None:
+        self.client = client
+        self.limiter = limiter
+        self.policy = policy or RetryPolicy()
+        self.sleep = sleep
+        self.jitter = jitter
+
+    def get_json(self, url: str, params: Mapping[str, str | int]) -> tuple[dict[str, Any], int]:
+        """GET a JSON object; returns (payload, HTTP status)."""
+        problem = "no attempt made"
+        for attempt in range(1, self.policy.max_attempts + 1):
+            self.limiter.wait()
+            retry_after: float | None = None
+            try:
+                response = self.client.get(
+                    url,
+                    params=dict(params),
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=REQUEST_TIMEOUT_S,
+                )
+            except httpx2.TransportError as error:  # includes timeouts
+                problem = type(error).__name__
+            else:
+                if response.status_code in _RETRYABLE_STATUS:
+                    problem = f"HTTP {response.status_code}"
+                    retry_after = _retry_after(response)
+                elif response.is_error:
+                    raise SteamRequestError(f"HTTP {response.status_code} from {url}")
+                else:
+                    return _json_object(response, url), response.status_code
+            if attempt < self.policy.max_attempts:
+                jitter = self.jitter()
+                self.sleep(self.policy.delay(attempt, retry_after=retry_after, jitter=jitter))
+        raise SteamUnavailableError(
+            f"{url}: gave up after {self.policy.max_attempts} attempts (last: {problem})"
+        )
+
+
+def _json_object(response: httpx2.Response, url: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise SteamRequestError(f"invalid JSON from {url}") from error
+    if not isinstance(payload, dict):
+        raise SteamRequestError(f"expected a JSON object from {url}")
+    return payload

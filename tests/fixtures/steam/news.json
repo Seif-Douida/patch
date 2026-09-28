@@ -1,0 +1,79 @@
+{
+  "appnews": {
+    "appid": 1363080,
+    "newsitems": [
+      {
+        "gid": "1844751498228714",
+        "title": "New BETA version is available for testing (0.8.110)",
+        "url": "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/1844751498228714",
+        "is_external_url": true,
+        "author": "Slavic Magic",
+        "contents": "[p]Hi gang,[/p][p]We're ready to present you the Beta version of the next update. Our focus was Perks, but when analyzing your Steam reviews we found that your issues are, by priority: \n\n1. Save corruption / crash on load (hopefully all fixed, as long as you're not loading from a very old build).\n2.",
+        "feedlabel": "Community Announcements",
+        "date": 1790496713,
+        "feedname": "steam_community_announcements",
+        "feed_type": 1,
+        "appid": 1363080
+      },
+      {
+        "gid": "1842846814443638",
+        "title": "Save 35% on Manor Lords",
+        "url": "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/1842846814443638",
+        "is_external_url": true,
+        "author": "Patrick (HoodedHorse)",
+        "contents": "The weather may change, seasons may pass, and cities may rise and fall – but these lands are yours to rule.\n\nManor Lords is 35% off right now during its Steam Weekend Deal.\n\nManage in-depth city building, command large-scale tactical battles, and watch complex economic and social simulations unfold ",
+        "feedlabel": "Community Announcements",
+        "date": 1788447638,
+        "feedname": "steam_community_announcements",
+        "feed_type": 1,
+        "appid": 1363080,
+        "tags": [
+          "hide_store"
+        ]
+      },
+      {
+        "gid": "1842212951300796",
+        "title": "Manor Lords celebrates 4 million copies sold with a new major update which gives players the chance to become 'a cow-herding mogul'",
+        "url": "https://steamstore-a.akamaihd.net/news/externalpost/PC Gamer/1842212951300796",
+        "is_external_url": true,
+        "author": "Elie Gould",
+        "contents": "<img src=\"https://cdn.mos.cms.futurecdn.net/39RV38Swd4km7KFgto3EUE-1280-80.jpg\"/><br><br>\n                <a href=\"https://www.pcgamer.com/uk/manor-lords/\">Manor Lords</a> is on a roll—with the medieval management sim celebrating the monumental milestone of over 4 million copies sold across all stor",
+        "feedlabel": "PC Gamer",
+        "date": 1787850222,
+        "feedname": "PC Gamer",
+        "feed_type": 0,
+        "appid": 1363080
+      },
+      {
+        "gid": "1842212951300554",
+        "title": "Major Update #8: Wide Valley, Cows, Cider, Advanced Construction & More",
+        "url": "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/1842212951300554",
+        "is_external_url": true,
+        "author": "Matt (Hooded Horse)",
+        "contents": "Hey everyone, \n\nThe latest update has successfully went through all the community Beta testing and is now ready for the main branch.\n\nFor a summary of what we worked on, you can check out the previously published preview here: [url=\"https://store.steampowered.com/news/app/1363080/view/67737835143587",
+        "feedlabel": "Community Announcements",
+        "date": 1787846517,
+        "feedname": "steam_community_announcements",
+        "feed_type": 1,
+        "appid": 1363080,
+        "tags": [
+          "workshop"
+        ]
+      },
+      {
+        "gid": "1841579228671091",
+        "title": "Beta localization and crashfixes",
+        "url": "https://steamstore-a.akamaihd.net/news/externalpost/steam_community_announcements/1841579228671091",
+        "is_external_url": true,
+        "author": "Slavic Magic",
+        "contents": "[p]Hello everyone,[/p][p][/p][p]We fixed some more bugs and crashes and finished the next batch of localization in the current Beta.[/p][p] [/p][h3]How to Access the Beta[/h3][hr][/hr][p][b]Saves:[/b] To avoid any potential issues, it’s recommended that you back up your saved files before switching ",
+        "feedlabel": "Community Announcements",
+        "date": 1787391602,
+        "feedname": "steam_community_announcements",
+        "feed_type": 1,
+        "appid": 1363080
+      }
+    ],
+    "count": 244
+  }
+}

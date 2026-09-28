@@ -1,0 +1,92 @@
+{
+  "success": 1,
+  "query_summary": {
+    "num_reviews": 96,
+    "review_score": 8,
+    "review_score_desc": "Very Positive",
+    "total_positive": 84,
+    "total_negative": 12,
+    "total_reviews": 96
+  },
+  "reviews": [
+    {
+      "recommendationid": "236427876",
+      "author": {
+        "num_games_owned": 66,
+        "num_reviews": 5,
+        "playtime_forever": 3522,
+        "playtime_last_two_weeks": 409,
+        "playtime_at_review": 3522
+      },
+      "language": "portuguese",
+      "review": "(review text omitted: the public repo stores no review text, spec C4)",
+      "timestamp_created": 1790631189,
+      "timestamp_updated": 1790631189,
+      "voted_up": true,
+      "votes_up": 0,
+      "votes_funny": 0,
+      "weighted_vote_score": 0.5,
+      "comment_count": 0,
+      "steam_purchase": false,
+      "received_for_free": false,
+      "refunded": false,
+      "written_during_early_access": true,
+      "primarily_steam_deck": false,
+      "app_release_date": "1714136367",
+      "reactions": []
+    },
+    {
+      "recommendationid": "236424542",
+      "author": {
+        "num_games_owned": 0,
+        "num_reviews": 14,
+        "playtime_forever": 1505,
+        "playtime_last_two_weeks": 1505,
+        "playtime_at_review": 1505
+      },
+      "language": "english",
+      "review": "(review text omitted: the public repo stores no review text, spec C4)",
+      "timestamp_created": 1790627270,
+      "timestamp_updated": 1790627270,
+      "voted_up": false,
+      "votes_up": 0,
+      "votes_funny": 0,
+      "weighted_vote_score": 0.5,
+      "comment_count": 0,
+      "steam_purchase": true,
+      "received_for_free": false,
+      "refunded": false,
+      "written_during_early_access": true,
+      "primarily_steam_deck": false,
+      "app_release_date": "1714136367",
+      "reactions": []
+    },
+    {
+      "recommendationid": "236421733",
+      "author": {
+        "num_games_owned": 0,
+        "num_reviews": 3,
+        "playtime_forever": 1687,
+        "playtime_last_two_weeks": 1603,
+        "playtime_at_review": 1687
+      },
+      "language": "english",
+      "review": "(review text omitted: the public repo stores no review text, spec C4)",
+      "timestamp_created": 1790624251,
+      "timestamp_updated": 1790624251,
+      "voted_up": true,
+      "votes_up": 0,
+      "votes_funny": 0,
+      "weighted_vote_score": 0.5,
+      "comment_count": 0,
+      "steam_purchase": true,
+      "received_for_free": false,
+      "refunded": false,
+      "written_during_early_access": true,
+      "primarily_steam_deck": false,
+      "app_release_date": "1714136367",
+      "reactions": []
+    }
+  ],
+  "cursor": "AoJ4w+Lw76ADe+iohQc="
+}
