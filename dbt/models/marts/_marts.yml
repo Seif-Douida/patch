@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: daily_game_sentiment
+    description: One row per game per day with the positive share and its Wilson 90% interval.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [game_key, date_key]
+    columns:
+      - name: n_reviews
+        data_tests:
+          - not_null
+          - daily_volume_anomaly
+      - name: pos_share
+        data_tests: [between_0_and_1]
+      - name: pos_lo90
+        data_tests: [between_0_and_1]
+      - name: pos_hi90
+        data_tests: [between_0_and_1]
+      - name: share_new_players
+        data_tests: [between_0_and_1]
+
+  - name: patch_window
+    description: Descriptive before/after aggregates per treatment candidate (not causal).
+    columns:
+      - name: patch_id
+        data_tests: [unique, not_null]

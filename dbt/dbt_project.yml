@@ -1,0 +1,45 @@
+# PatchPulse dbt project (spec §6.4). dbt owns stg, core and mart; Alembic owns raw and ops.
+# The schemas exist before dbt runs (migration 0001), so the writer never needs CREATE SCHEMA.
+name: patchpulse
+version: "1.0.0"
+config-version: 2
+profile: patchpulse
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target"]
+
+vars:
+  # The patch classifier version whose labels feed core.fact_patch.
+  classifier_version: rules-v1
+
+models:
+  patchpulse:
+    staging:
+      +schema: stg
+      +materialized: view
+    core:
+      +schema: core
+      +materialized: table
+    marts:
+      +schema: mart
+      +materialized: table
+
+seeds:
+  patchpulse:
+    +schema: core
+    steam_sale_calendar:
+      +column_types:
+        sale_name: nvarchar(100)
+        start_date: date
+        end_date: date
+        source_url: nvarchar(300)
+    languages:
+      +column_types:
+        code: nvarchar(32)
+        name: nvarchar(64)
+
+flags:
+  send_anonymous_usage_stats: false

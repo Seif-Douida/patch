@@ -1,0 +1,20 @@
+# One target for every environment: the connection comes from the same PP_ environment variables
+# the pipeline uses (the container locally and in CI, Azure SQL as pp_writer in the nightly job).
+patchpulse:
+  target: default
+  outputs:
+    default:
+      type: sqlserver
+      backend: mssql-python
+      host: "{{ env_var('PP_DB_HOST') }}"
+      port: "{{ env_var('PP_DB_PORT', '1433') | as_number }}"
+      database: "{{ env_var('PP_DB_NAME') }}"
+      # dbt-sqlserver runs each data test through a temporary view in this schema. stg is where
+      # the writer may create views; dbo holds alembic_version, which the writer must not touch.
+      schema: stg
+      user: "{{ env_var('PP_DB_USER') }}"
+      password: "{{ env_var('PP_DB_PASSWORD') }}"
+      encrypt: "{{ env_var('PP_DB_ENCRYPT', 'True') | as_bool }}"
+      trust_cert: "{{ env_var('PP_DB_TRUST_CERT', 'False') | as_bool }}"
+      threads: 2
+      retries: 3

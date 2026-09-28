@@ -1,0 +1,73 @@
+version: 2
+
+models:
+  - name: dim_game
+    columns:
+      - name: game_key
+        data_tests: [unique, not_null]
+
+  - name: dim_date
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+
+  - name: dim_language
+    columns:
+      - name: language_key
+        data_tests: [unique, not_null]
+
+  - name: fact_review
+    description: One row per review (its latest version). Incremental; never full-refreshed.
+    columns:
+      - name: review_id
+        data_tests: [unique, not_null]
+      - name: game_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_key
+      - name: date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: language_key
+        data_tests:
+          # Steam may add a language before the seed does: warn, don't fail the night.
+          - relationships:
+              arguments:
+                to: ref('dim_language')
+                field: language_key
+              config:
+                severity: warn
+
+  - name: review_text
+    columns:
+      - name: review_id
+        data_tests: [unique, not_null]
+
+  - name: fact_patch
+    columns:
+      - name: patch_id
+        data_tests: [unique, not_null]
+      - name: game_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_key
+      - name: patch_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [major_update, patch, hotfix, event, marketing, other]
+
+  - name: fact_price_snapshot
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [game_key, date_key]

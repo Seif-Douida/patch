@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Landing tables written by the pipeline (Alembic migration 0001).
+    schema: raw
+    tables:
+      - name: game
+      - name: steam_review
+        description: One row per review version (recommendation_id, timestamp_updated).
+      - name: steam_news
+      - name: news_classification
+      - name: steam_price
+      - name: steam_page
+        description: Raw Steam responses, personal fields removed, kept 30 days.
+        config:
+          # Pipeline freshness (spec §14: data at most 36 hours old).
+          loaded_at_field: fetched_at
+          freshness:
+            warn_after: {count: 36, period: hour}
+            error_after: {count: 48, period: hour}
