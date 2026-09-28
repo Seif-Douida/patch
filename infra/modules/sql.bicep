@@ -44,7 +44,8 @@ resource database 'Microsoft.Sql/servers/databases@2025-01-01' = {
   properties: {
     useFreeLimit: true
     freeLimitExhaustionBehavior: 'AutoPause'
-    autoPauseDelay: 15
+    // Azure only accepts the default delay (60 min) on a free database with AutoPause; 15 is rejected.
+    autoPauseDelay: 60
     minCapacity: json('0.5')
     maxSizeBytes: 34359738368
     requestedBackupStorageRedundancy: 'Local'

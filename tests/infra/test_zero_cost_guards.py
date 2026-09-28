@@ -107,7 +107,9 @@ def test_sql_database_is_free_offer_that_pauses_when_exhausted(
     assert database["sku"]["name"] == "GP_S_Gen5"
     assert literal_number(database["sku"]["capacity"]) <= 2
     assert literal_number(props["minCapacity"]) == 0.5
-    assert literal_number(props["autoPauseDelay"]) == 15
+    # Azure only allows the default delay (60 min) on a free database with AutoPause
+    # (ProvisioningDisabled on 2026-09-28 with 15). Each wake costs >= 60 x 0.5 = 1,800 vCore-s.
+    assert literal_number(props["autoPauseDelay"]) == 60
     assert literal_number(props["maxSizeBytes"]) <= 32 * 1024**3
     assert props["requestedBackupStorageRedundancy"] == "Local"
     assert props["zoneRedundant"] is False
