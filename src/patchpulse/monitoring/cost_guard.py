@@ -6,11 +6,15 @@
 * the pp-api `Replicas` metric from the 1st of the month, Average per minute (near real time).
   Azure samples it about twice a minute, so the per-minute Average is the replica count and the
   sum of the Averages is replica-minutes; summing Totals would double-count.
+* the executions of the Container Apps Jobs (pp-nightly, pp-migrate), which share the grant
+  (ADR-009). Each execution runs one replica; its start and end times give its run time.
 
-The guard trips on cost, on 80% of the monthly vCPU grant, or on a replica that ran for most of
-the last hour (a request flood or a stuck replica; Azure's `Requests` metric has no data for
-pp-api, so it can't be counted directly). The workflow then stops pp-api and opens a GitHub
-issue. This module only reads files and does arithmetic, so it is fully unit-tested.
+The guard trips on cost, on 80% of the monthly vCPU grant (pp-api and the jobs together), or on a
+pp-api replica that ran for most of the last hour (a request flood or a stuck replica; Azure's
+`Requests` metric has no data for pp-api, so it can't be counted directly). Every workload has
+2 GiB per vCPU, so the memory grant (360,000 GiB-s) runs out exactly when the vCPU one does.
+The workflow then stops pp-api, deletes pp-nightly and opens a GitHub issue. This module only
+reads files and does arithmetic, so it is fully unit-tested.
 """
 
 from __future__ import annotations
@@ -18,9 +22,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -35,6 +39,9 @@ BURN_WINDOW = timedelta(minutes=60)
 BURN_TRIP_REPLICA_MINUTES = Decimal(45)
 # Names Cost Management uses for the summed cost column, depending on API version and offer.
 _COST_COLUMNS = ("totalCost", "Cost", "PreTaxCost")
+# The most a job replica may use (tests/infra/test_zero_cost_guards.py); assumed when an
+# execution doesn't say.
+MAX_JOB_VCPU = Decimal(1)
 
 
 def month_to_date_cost(query_response: Mapping[str, Any]) -> Decimal:
@@ -70,12 +77,39 @@ def count_replica_minutes(
     return minutes
 
 
+def job_vcpu_seconds(
+    executions: Iterable[Mapping[str, Any]], *, month_start: datetime, now: datetime
+) -> Decimal:
+    """vCPU-seconds of job executions inside [month_start, now]; a running one counts until now."""
+    total = Decimal(0)
+    for item in executions:
+        properties = item["properties"]
+        start = max(datetime.fromisoformat(properties["startTime"]), month_start)
+        end_time = properties.get("endTime")
+        end = min(datetime.fromisoformat(end_time), now) if end_time else now
+        if end <= start:
+            continue
+        containers = properties.get("template", {}).get("containers", [])
+        vcpu = sum(
+            (
+                Decimal(str(container["resources"]["cpu"]))
+                if "cpu" in container.get("resources", {})
+                else MAX_JOB_VCPU
+                for container in containers
+            ),
+            Decimal(0),
+        )
+        total += Decimal(str((end - start).total_seconds())) * (vcpu or MAX_JOB_VCPU)
+    return total
+
+
 @dataclass(frozen=True)
 class GuardDecision:
     cost: Decimal | None  # None when the Cost Management query failed
-    vcpu_seconds: Decimal
+    vcpu_seconds: Decimal  # pp-api's
     recent_replica_minutes: Decimal
     reasons: tuple[str, ...]
+    job_vcpu_seconds: Decimal = Decimal(0)
 
     @property
     def tripped(self) -> bool:
@@ -89,6 +123,7 @@ def evaluate(
     recent_replica_minutes: Decimal,
     vcpu_per_replica: Decimal,
     cost_threshold: Decimal,
+    job_vcpu_seconds: Decimal = Decimal(0),
 ) -> GuardDecision:
     """Compare month-to-date usage and the last hour's usage with the $0 limits."""
     vcpu_seconds = replica_minutes * 60 * vcpu_per_replica
@@ -96,9 +131,10 @@ def evaluate(
     reasons: list[str] = []
     if cost is not None and cost > cost_threshold:
         reasons.append(f"month-to-date cost {cost} is above the {cost_threshold} threshold")
-    if vcpu_seconds > vcpu_limit:
+    if vcpu_seconds + job_vcpu_seconds > vcpu_limit:
         reasons.append(
-            f"pp-api used about {vcpu_seconds:.0f} vCPU-s, over {vcpu_limit:.0f} "
+            f"pp-api and the jobs used about {vcpu_seconds + job_vcpu_seconds:.0f} vCPU-s "
+            f"(pp-api {vcpu_seconds:.0f}, jobs {job_vcpu_seconds:.0f}), over {vcpu_limit:.0f} "
             "(80% of the free grant)"
         )
     if recent_replica_minutes >= BURN_TRIP_REPLICA_MINUTES:
@@ -106,7 +142,9 @@ def evaluate(
             f"pp-api ran a replica for {recent_replica_minutes:.0f} of the last 60 minutes "
             f"(limit {BURN_TRIP_REPLICA_MINUTES}): sustained traffic or a stuck replica"
         )
-    return GuardDecision(cost, vcpu_seconds, recent_replica_minutes, tuple(reasons))
+    return GuardDecision(
+        cost, vcpu_seconds, recent_replica_minutes, tuple(reasons), job_vcpu_seconds
+    )
 
 
 def render_summary(decision: GuardDecision) -> str:
@@ -117,6 +155,7 @@ def render_summary(decision: GuardDecision) -> str:
         "",
         f"- Month-to-date cost: {cost}",
         f"- pp-api vCPU-seconds this month (from replica-minutes): {decision.vcpu_seconds:.0f}",
+        f"- Jobs' vCPU-seconds this month: {decision.job_vcpu_seconds:.0f}",
         f"- pp-api replica-minutes in the last 60 minutes: {decision.recent_replica_minutes:.0f}",
         "",
     ]
@@ -126,7 +165,9 @@ def render_summary(decision: GuardDecision) -> str:
         lines += [
             "",
             "Recovery: fix the cause, then re-run `infra.yml` (what_if_only unticked), which "
-            "restores pp-api ingress and starts the app again. "
+            "restores pp-api ingress, starts the app again and recreates pp-nightly. "
+            "After a vCPU trip, wait for the next month: pp-nightly's execution history is "
+            "deleted with the job, so a recreated job's usage this month would be under-counted. "
             "A cost trip repeats every run until the month ends, because month-to-date cost "
             "stays above the threshold; raising the `COST_GUARD_THRESHOLD` variable is a "
             "deliberate decision to accept that cost.",
@@ -143,17 +184,46 @@ def _load(path: Path | None) -> Mapping[str, Any] | None:
     return loaded
 
 
+def _executions(path: Path) -> list[Mapping[str, Any]]:
+    """A job's executions: the CLI prints a list; the REST API wraps it as {"value": [...]}."""
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(loaded, dict):
+        loaded = loaded["value"]
+    if not isinstance(loaded, list):
+        raise TypeError(f"expected a list of executions, got {type(loaded).__name__}")
+    return loaded
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PatchPulse $0 guard (ADR-017).")
     parser.add_argument("--cost", type=Path, help="Cost Management query response; omit if failed")
     parser.add_argument("--replicas", type=Path, required=True, help="Replicas metric, 1m Average")
     parser.add_argument("--vcpu-per-replica", type=Decimal, default=Decimal("0.5"))
     parser.add_argument("--cost-threshold", type=Decimal, default=Decimal(0))
+    parser.add_argument(
+        "--job-executions",
+        type=Path,
+        action="append",
+        default=[],
+        help="`az containerapp job execution list` output; once per job",
+    )
+    parser.add_argument("--now", type=datetime.fromisoformat, help="for tests; default: now")
     parser.add_argument("--summary", type=Path, default=Path("cost-guard-summary.md"))
     args = parser.parse_args(argv)
-    # The metrics step always writes the file, so a missing one is a bug, not zero usage.
-    if not args.replicas.exists():
-        parser.error(f"metrics file not found: {args.replicas}")
+    # The workflow always writes these files, so a missing one is a bug, not zero usage.
+    for path in (args.replicas, *args.job_executions):
+        if not path.exists():
+            parser.error(f"usage file not found: {path}")
+    now: datetime = args.now or datetime.now(UTC)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    jobs = Decimal(0)
+    for path in args.job_executions:
+        try:
+            executions = _executions(path)
+            jobs += job_vcpu_seconds(executions, month_start=month_start, now=now)
+        except (KeyError, TypeError, ValueError) as error:
+            # Unlike cost, job usage has no other source: guessing zero would under-count.
+            parser.error(f"unreadable job executions in {path}: {error!r}")
 
     cost: Decimal | None = None
     cost_response = _load(args.cost)
@@ -170,6 +240,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         recent_replica_minutes=count_replica_minutes(replicas, last=BURN_WINDOW),
         vcpu_per_replica=args.vcpu_per_replica,
         cost_threshold=args.cost_threshold,
+        job_vcpu_seconds=jobs,
     )
     summary = render_summary(decision)
     args.summary.write_text(summary, encoding="utf-8")

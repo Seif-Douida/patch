@@ -1,0 +1,187 @@
+name: deploy
+
+# Build the API and jobs images, migrate the database, then roll pp-api and the jobs (spec §13).
+# Replaces Phase 0's api-image.yml. The order matters:
+#   1. pp-migrate runs this commit's migrations and must succeed (migrations stay backward
+#      compatible, so the running API keeps working against the new schema).
+#   2. pp-api moves to this commit's image and must report its SHA on /health, else it is rolled
+#      back to the image it ran before.
+#   3. pp-nightly picks up this commit's image for its next scheduled run.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "dbt/**"
+      - "config/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - "Dockerfile.jobs"
+      - ".dockerignore"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+# `shell: bash` runs with -eo pipefail.
+defaults:
+  run:
+    shell: bash
+
+env:
+  API_IMAGE: ghcr.io/seif-douida/patchpulse-api
+  JOBS_IMAGE: ghcr.io/seif-douida/patchpulse-jobs
+  RG: rg-patchpulse
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: patchpulse-api
+            dockerfile: Dockerfile
+          - image: patchpulse-jobs
+            dockerfile: Dockerfile.jobs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/seif-douida/${{ matrix.image }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    # Shared with infra's deploy, which redeploys the running images (see infra.yml).
+    concurrency:
+      group: pp-api-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Check pp-api and the jobs exist and pp-api is not stopped
+        id: api
+        run: |
+          # `list` returns empty only when a resource is absent, and fails on real Azure errors.
+          id=$(az containerapp list -g "$RG" --query "[?name=='pp-api'].id | [0]" -o tsv)
+          jobs=$(az containerapp job list -g "$RG" --query "[?name=='pp-migrate' || name=='pp-nightly'] | length(@)" -o tsv)
+          if [ -z "$id" ] || [ "$jobs" != "2" ]; then
+            echo "::notice::pp-api or the jobs do not exist yet. Images pushed; make both packages public, run infra.yml, then re-run this workflow."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A stopped app means cost-guard tripped (ADR-017); only infra.yml brings it back.
+          status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+          if [ "$status" = "Stopped" ]; then
+            echo "::error::pp-api is stopped by cost-guard. Fix the cause, run infra (what_if_only unticked) to start it, then re-run this workflow; the images are already pushed."
+            exit 1
+          fi
+          previous=$(az containerapp show --ids "$id" --query "properties.template.containers[0].image" -o tsv)
+          fqdn=$(az containerapp show --ids "$id" --query properties.configuration.ingress.fqdn -o tsv)
+          {
+            echo "ready=true"
+            echo "previous_image=$previous"
+            echo "fqdn=$fqdn"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run migrations (pp-migrate) and wait for them
+        if: steps.api.outputs.ready == 'true'
+        run: |
+          az containerapp job update -g "$RG" -n pp-migrate --image "$JOBS_IMAGE:$GITHUB_SHA" -o none
+          execution=$(az containerapp job start -g "$RG" -n pp-migrate --query name -o tsv)
+          echo "started $execution"
+          # 60 x 15 s = the job's own 15 min timeout; a paused database takes about a minute to wake.
+          for attempt in $(seq 1 60); do
+            status=$(az containerapp job execution show -g "$RG" -n pp-migrate \
+              --job-execution-name "$execution" --query properties.status -o tsv)
+            echo "attempt $attempt: $status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded)
+                echo "::error::pp-migrate execution $execution ended $status. Its logs are in Log Analytics (ContainerAppConsoleLogs_CL, ContainerJobName_s == 'pp-migrate'). pp-api was not changed."
+                exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::pp-migrate execution $execution did not finish in 15 minutes. pp-api was not changed."
+          exit 1
+
+      - name: Point pp-api at this commit's image
+        id: update
+        if: steps.api.outputs.ready == 'true'
+        run: az containerapp update -g "$RG" -n pp-api --image "$API_IMAGE:$GITHUB_SHA" -o none
+
+      - name: Smoke test /health reports this commit
+        id: smoke
+        if: steps.api.outputs.ready == 'true'
+        env:
+          FQDN: ${{ steps.api.outputs.fqdn }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 30 "https://$FQDN/health" -o health.json \
+              && grep -q "\"version\":\"$GITHUB_SHA\"" health.json; then
+              cat health.json
+              exit 0
+            fi
+            echo "attempt $attempt: not ready yet"
+            sleep 20
+          done
+          echo "::error::/health did not report version $GITHUB_SHA"
+          exit 1
+
+      - name: Roll back pp-api to the image it ran before
+        if: failure() && (steps.update.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        env:
+          PREVIOUS_IMAGE: ${{ steps.api.outputs.previous_image }}
+        run: |
+          az containerapp update -g "$RG" -n pp-api --image "$PREVIOUS_IMAGE" -o none
+          echo "::error::pp-api was rolled back to $PREVIOUS_IMAGE; pp-nightly keeps its image. The migrations stay applied."
+
+      - name: Point pp-nightly at this commit's image
+        if: steps.api.outputs.ready == 'true'
+        run: az containerapp job update -g "$RG" -n pp-nightly --image "$JOBS_IMAGE:$GITHUB_SHA" -o none

@@ -67,8 +67,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production
-    # Shared with api-image's deploy: this job reads pp-api's running image and redeploys it, so an
-    # image roll in between would be undone.
+    # Shared with deploy.yml: this job reads the running images and redeploys them, so an image roll
+    # in between would be undone.
     concurrency:
       group: pp-api-deploy
       cancel-in-progress: false
@@ -86,20 +86,49 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Choose the API image (keep the running one; else require a public :latest)
+      - name: Require the pipeline secrets
+        env:
+          SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
+          AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
         run: |
-          # `list` returns empty only when pp-api is absent, and fails on real Azure errors.
-          id=$(az containerapp list -g "$RG" --query "[?name=='pp-api'].id | [0]" -o tsv)
-          if [ -n "$id" ]; then
-            image=$(az containerapp show --ids "$id" --query "properties.template.containers[0].image" -o tsv)
-          else
-            image=ghcr.io/seif-douida/patchpulse-api:latest
-            if ! docker manifest inspect "$image" > /dev/null 2>&1; then
-              echo "::error::pp-api does not exist yet and $image is not publicly pullable. Wait for api-image to finish, make the package public (runbook step 11), then re-run infra."
+          # An empty secret would reach Azure as an empty pp_writer password or hash salt.
+          missing=""
+          [ -n "$SQL_WRITER_PASSWORD" ] || missing="$missing SQL_WRITER_PASSWORD"
+          [ -n "$AUTHOR_HASH_SALT" ] || missing="$missing AUTHOR_HASH_SALT"
+          if [ -n "$missing" ]; then
+            echo "::error::Add these secrets to the GitHub environment 'production':$missing"
+            exit 1
+          fi
+
+      - name: Choose the images (keep the running ones; else require a public :latest)
+        run: |
+          # A public :latest is the only image infra may introduce; deploy.yml rolls images.
+          require_public() {
+            if ! docker manifest inspect "$1" > /dev/null 2>&1; then
+              echo "::error::$2 does not exist yet and $1 is not publicly pullable. Wait for deploy to finish, make the package public (runbook step 11), then re-run infra."
               exit 1
             fi
+          }
+          # `list` returns empty only when the resource is absent, and fails on real Azure errors.
+          id=$(az containerapp list -g "$RG" --query "[?name=='pp-api'].id | [0]" -o tsv)
+          if [ -n "$id" ]; then
+            api=$(az containerapp show --ids "$id" --query "properties.template.containers[0].image" -o tsv)
+          else
+            api=ghcr.io/seif-douida/patchpulse-api:latest
+            require_public "$api" pp-api
           fi
-          echo "API_IMAGE=$image" >> "$GITHUB_ENV"
+          # pp-nightly is updated last by deploy.yml, so its image is the one both jobs should run.
+          id=$(az containerapp job list -g "$RG" --query "[?name=='pp-nightly'].id | [0]" -o tsv)
+          if [ -n "$id" ]; then
+            jobs=$(az containerapp job show --ids "$id" --query "properties.template.containers[0].image" -o tsv)
+          else
+            jobs=ghcr.io/seif-douida/patchpulse-jobs:latest
+            require_public "$jobs" pp-nightly
+          fi
+          {
+            echo "API_IMAGE=$api"
+            echo "JOBS_IMAGE=$jobs"
+          } >> "$GITHUB_ENV"
 
       - name: What-if (preview of every change)
         env:
@@ -107,6 +136,8 @@ jobs:
           SQL_ENTRA_ADMIN_LOGIN: ${{ secrets.SQL_ENTRA_ADMIN_LOGIN }}
           SQL_ENTRA_ADMIN_OBJECT_ID: ${{ secrets.SQL_ENTRA_ADMIN_OBJECT_ID }}
           DEV_IP_ADDRESS: ${{ secrets.DEV_IP_ADDRESS }}
+          SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
+          AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
         run: |
           az deployment group what-if -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam
@@ -118,6 +149,8 @@ jobs:
           SQL_ENTRA_ADMIN_LOGIN: ${{ secrets.SQL_ENTRA_ADMIN_LOGIN }}
           SQL_ENTRA_ADMIN_OBJECT_ID: ${{ secrets.SQL_ENTRA_ADMIN_OBJECT_ID }}
           DEV_IP_ADDRESS: ${{ secrets.DEV_IP_ADDRESS }}
+          SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
+          AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
         run: |
           az deployment group create -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam \

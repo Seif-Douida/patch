@@ -7,6 +7,9 @@ disabled pp-api over another project's NAT gateway on 2026-09-28.
 The calibration and drill of 2026-09-28 pinned the rest: the Replicas metric must be read as
 per-minute averages, and a trip must stop pp-api, because disabling ingress alone left a replica
 running for 4.5 hours.
+
+deploy.yml (Phase 1, replacing api-image.yml) must never undo a trip, and must migrate the
+database before the code that needs the new schema runs.
 """
 
 import re
@@ -22,6 +25,11 @@ def read(workflow: str) -> str:
 def shell_lines(workflow: str) -> list[str]:
     """The workflow's lines, with shell backslash continuations joined."""
     return read(workflow).replace("\\\n", " ").splitlines()
+
+
+def step(workflow: str, name: str) -> str:
+    """The text of the step called `name`, up to the next step."""
+    return read(workflow).split(f"- name: {name}", 1)[1].split("\n      - name:", 1)[0]
 
 
 def test_cost_query_is_scoped_to_the_patchpulse_resource_group() -> None:
@@ -84,17 +92,100 @@ def test_infra_deploy_restarts_a_stopped_pp_api() -> None:
     assert text.index("az deployment group create") < text.index("/start?api-version=")
 
 
-def test_infra_and_api_image_deploys_never_overlap() -> None:
-    # infra.yml reads the image pp-api is running, then deploys it again a few minutes later; an
-    # api-image roll in between would be silently undone.
-    for workflow in ("infra.yml", "api-image.yml"):
+def test_infra_and_deploy_share_the_pp_api_deploy_group() -> None:
+    # infra.yml reads the images pp-api and the jobs are running, then deploys them again a few
+    # minutes later; a deploy.yml roll in between would be silently undone.
+    for workflow in ("infra.yml", "deploy.yml"):
         deploy_job = read(workflow).split("\n  deploy:\n", 1)[1]
         assert re.search(r"^    concurrency:\n      group: pp-api-deploy\n", deploy_job, re.M), (
             workflow
         )
 
 
-def test_api_image_refuses_to_update_a_stopped_pp_api() -> None:
+def test_deploy_refuses_a_stopped_pp_api() -> None:
     # Recovery is infra's job; updating the image of a stopped app could restart it unguarded.
-    text = read("api-image.yml")
+    text = read("deploy.yml")
     assert text.index("properties.runningStatus") < text.index("az containerapp update")
+    assert text.index("properties.runningStatus") < text.index("az containerapp job start")
+
+
+def test_api_image_workflow_is_replaced_by_deploy() -> None:
+    # Two workflows rolling pp-api would race each other.
+    assert not (WORKFLOWS / "api-image.yml").exists()
+
+
+def test_deploy_builds_both_images_for_this_commit() -> None:
+    text = read("deploy.yml")
+    assert "Dockerfile.jobs" in text
+    assert "patchpulse-jobs" in text
+    assert "patchpulse-api" in text
+    assert "type=sha,format=long,prefix=" in text
+
+
+def test_deploy_runs_migrations_before_updating_the_api() -> None:
+    text = read("deploy.yml")
+    migrate = step("deploy.yml", "Run migrations")
+    assert 'az containerapp job update -g "$RG" -n pp-migrate' in migrate
+    assert 'az containerapp job start -g "$RG" -n pp-migrate' in migrate
+    assert "Succeeded) exit 0" in migrate
+    assert re.search(r"Failed\|", migrate)
+    assert text.index("- name: Run migrations") < text.index("az containerapp update")
+
+
+def test_deploy_rolls_back_the_api_on_a_failed_smoke_test() -> None:
+    rollback = step("deploy.yml", "Roll back pp-api")
+    assert "failure()" in rollback
+    assert "steps.smoke.outcome == 'failure'" in rollback
+    assert "steps.api.outputs.previous_image" in rollback
+    assert "az containerapp update" in rollback
+
+
+def test_nightly_job_gets_the_new_image_only_after_the_api_is_healthy() -> None:
+    text = read("deploy.yml")
+    assert text.index("- name: Smoke test") < text.index("-n pp-nightly --image")
+
+
+def test_infra_keeps_the_running_jobs_image() -> None:
+    text = read("infra.yml")
+    assert "az containerapp job show" in text
+    assert "JOBS_IMAGE=" in text
+    assert "patchpulse-jobs:latest" in text
+
+
+def test_infra_refuses_to_deploy_without_the_pipeline_secrets() -> None:
+    # An empty secret would reach Azure as an empty pp_writer password or hash salt.
+    text = read("infra.yml")
+    check = step("infra.yml", "Require the pipeline secrets")
+    for secret in ("SQL_WRITER_PASSWORD", "AUTHOR_HASH_SALT"):
+        assert f"secrets.{secret}" in check
+    assert "exit 1" in check
+    assert text.index("- name: Require the pipeline secrets") < text.index(
+        "az deployment group what-if"
+    )
+
+
+def test_guard_counts_both_jobs_executions() -> None:
+    # The jobs share pp-api's vCPU grant (ADR-009); leaving them out would under-count the month.
+    reading = step("cost-guard.yml", "Job executions this month")
+    assert "az containerapp job execution list" in reading
+    for job in ("pp-nightly", "pp-migrate"):
+        assert job in reading
+    evaluate = step("cost-guard.yml", "Evaluate")
+    assert evaluate.count("--job-executions") == 2
+
+
+def test_trip_deletes_the_nightly_job_and_verifies_it_is_gone() -> None:
+    # A scheduled job can't be stopped, only deleted; infra.yml recreates it.
+    trip = step("cost-guard.yml", "Trip - delete pp-nightly")
+    assert "steps.guard.outputs.tripped == 'true'" in trip
+    assert "inputs.dry_run" in trip
+    assert 'az containerapp job delete -g "$RG" -n pp-nightly --yes' in trip
+    assert trip.count("az containerapp job list") >= 2  # before, and after to verify
+    assert "exit 1" in trip
+
+
+def test_nightly_job_is_deleted_even_if_stopping_pp_api_fails() -> None:
+    text = read("cost-guard.yml")
+    assert text.index("- name: Trip - delete pp-nightly") < text.index("- name: Trip - stop pp-api")
+    issue = step("cost-guard.yml", "Open or update the alert issue")
+    assert "steps.trip_jobs.outcome" in issue
