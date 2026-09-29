@@ -25,6 +25,7 @@ infra/**/*.json
 
 # Tools, editors, OS
 .claude/settings.local.json
+.playwright-mcp/
 .vscode/
 .idea/
 .DS_Store
