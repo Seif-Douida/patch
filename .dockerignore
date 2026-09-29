@@ -15,3 +15,6 @@ tests
 web
 .env
 .env.*
+dbt/target
+dbt/logs
+.playwright-mcp

@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# The Container Apps Jobs image (pp-nightly, pp-migrate): `patchpulse-pipeline` with dbt and the
+# games config. Same two stages as the API image; only the venv and the project files are copied.
+FROM python:3.12-slim-trixie AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+WORKDIR /app
+# Dependencies first, so a code change doesn't invalidate this layer.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-install-project --no-dev --group pipeline
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --group pipeline --no-editable
+
+FROM python:3.12-slim-trixie
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION} \
+    PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
+# mssql-python's documented Linux requirements (it bundles the ODBC driver itself).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libltdl7 libkrb5-3 libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --uid 10001 app
+WORKDIR /app
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+# Read-only at run time: dbt writes its target files and logs to a temp dir (pipeline/dbt.py).
+COPY dbt ./dbt
+COPY config ./config
+USER app
+ENTRYPOINT ["patchpulse-pipeline"]
+CMD ["--help"]
