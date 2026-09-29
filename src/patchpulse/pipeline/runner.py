@@ -6,7 +6,8 @@
    A game that fails is recorded and skipped; the others carry on.
 4. Prices for every game, in batches.
 5. Backfill: history older than each game's coverage, newest first, round-robin across games
-   until the time budget runs out, so every game's history fills in together.
+   until the time budget runs out, so every game's history fills in together. If Steam stops
+   answering (a rate limit), backfill stops for the night with a warning; the run still succeeds.
 6. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
    advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
 7. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
@@ -32,7 +33,7 @@ from patchpulse.config import Settings, SettingsError
 from patchpulse.export.site import build_site_export
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
 from patchpulse.ingest.games import GAMES_FILE, Game, load_games
-from patchpulse.ingest.http import SteamError, SteamHttp
+from patchpulse.ingest.http import SteamError, SteamHttp, SteamUnavailableError
 from patchpulse.ingest.load import (
     purge_raw_pages,
     read_coverage,
@@ -47,7 +48,7 @@ from patchpulse.ingest.load import (
 )
 from patchpulse.ingest.news import fetch_news
 from patchpulse.ingest.patches import classify
-from patchpulse.ingest.prices import fetch_prices
+from patchpulse.ingest.prices import PriceFetch, fetch_prices
 from patchpulse.ingest.reviews import ReviewPage, StopReason, fetch_review_pages
 from patchpulse.pipeline.dbt import DbtResult, run_dbt
 from patchpulse.pipeline.runs import finish_run, start_run
@@ -239,24 +240,22 @@ def _run_stages(
         run.stages["news"] = {"items": items_total, "new": new_total}
 
     with run.stage("prices"):
-        prices = fetch_prices(steam, [g.appid for g in games])
-        with run.engine.begin() as connection:
-            for raw in prices.raws:
-                record_page(connection, raw, run_id=run.run_id)
-            upsert_prices(connection, prices.snapshots, snapshot_date=now.date(), run_id=run.run_id)
-            for appid in sorted(prices.failed):
+        try:
+            prices = fetch_prices(steam, [g.appid for g in games])
+        except SteamError as error:
+            # A missing day of prices is a gap in one snapshot, not a reason to lose the night.
+            run.stages["prices"] = {"ok": 0, "error": f"{type(error).__name__}: {error}"}
+            with run.engine.begin() as connection:
                 record_dq(
                     connection,
                     run_id=run.run_id,
-                    check="price_unavailable",
-                    appid=appid,
+                    check="prices_unavailable",
+                    appid=None,
                     severity="warn",
-                    detail="appdetails answered success: false",
+                    detail=str(error),
                 )
-        run.stages["prices"] = {
-            "ok": len(prices.snapshots) - len(prices.failed),
-            "failed": sorted(prices.failed),
-        }
+        else:
+            _store_prices(run, prices, now)
 
     with run.stage("backfill"):
         reached = _backfill(run, settings, steam, games, plans, clock)
@@ -285,6 +284,26 @@ def _run_stages(
 
     with run.engine.begin() as connection:
         run.stages["purged_pages"] = purge_raw_pages(connection, older_than=now - RAW_RETENTION)
+
+
+def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:
+    with run.engine.begin() as connection:
+        for raw in prices.raws:
+            record_page(connection, raw, run_id=run.run_id)
+        upsert_prices(connection, prices.snapshots, snapshot_date=now.date(), run_id=run.run_id)
+        for appid in sorted(prices.failed):
+            record_dq(
+                connection,
+                run_id=run.run_id,
+                check="price_unavailable",
+                appid=appid,
+                severity="warn",
+                detail="appdetails answered success: false",
+            )
+    run.stages["prices"] = {
+        "ok": len(prices.snapshots) - len(prices.failed),
+        "failed": sorted(prices.failed),
+    }
 
 
 def _plan(connection: Connection, game: Game, now: datetime) -> tuple[Coverage | None, Windows]:
@@ -323,10 +342,29 @@ def _backfill(
     oldest: dict[int, datetime] = {}
     reached: dict[int, datetime | None] = {}
     complete: list[int] = []
+    stopped: str | None = None
     while pagers:
         for appid in list(pagers):
             try:
                 page = next(pagers[appid], None)
+            except SteamUnavailableError as error:
+                # Steam is refusing us (a rate limit or an outage): stop backfill for every game
+                # tonight. It is best effort; each game resumes from its oldest review next night.
+                stopped = f"{type(error).__name__}: {error}"
+                log.warning("backfill stopped: %s", error)
+                with run.engine.begin() as connection:
+                    record_dq(
+                        connection,
+                        run_id=run.run_id,
+                        check="backfill_stopped",
+                        appid=appid,
+                        severity="warn",
+                        detail=str(error),
+                    )
+                for unfinished in pagers:
+                    reached[unfinished] = oldest.get(unfinished)
+                pagers.clear()
+                break
             except SteamError as error:
                 run.fail_game(appid, error)
                 del pagers[appid]
@@ -350,5 +388,6 @@ def _backfill(
         **counters,
         "budget_minutes": settings.backfill_budget_minutes,
         "complete": sorted(complete),
+        "stopped": stopped,
     }
     return reached

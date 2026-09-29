@@ -21,6 +21,9 @@ class FakeSteam:
         self.news: dict[int, list[dict[str, Any]]] = {}
         self.prices: dict[int, dict[str, Any] | None] = {}
         self.failing: set[int] = set()
+        self.rate_limit_after: int | None = None  # answer HTTP 429 once this many reviews requests
+        self.review_requests = 0
+        self.prices_down = False
         self.requests: list[httpx2.Request] = []
 
     def add_review(self, appid: int, rid: int, created: datetime, *, voted_up: bool = True) -> None:
@@ -83,6 +86,8 @@ class FakeSteam:
         if "GetNewsForApp" in path:
             appid = int(params["appid"])
             return httpx2.Response(200, json={"appnews": {"newsitems": self.news.get(appid, [])}})
+        if self.prices_down:
+            return httpx2.Response(503)
         body: dict[str, Any] = {}
         for requested in params["appids"].split(","):
             overview = self.prices.get(int(requested))
@@ -93,6 +98,9 @@ class FakeSteam:
         return httpx2.Response(200, json=body)
 
     def _reviews(self, appid: int, params: dict[str, str]) -> httpx2.Response:
+        self.review_requests += 1
+        if self.rate_limit_after is not None and self.review_requests > self.rate_limit_after:
+            return httpx2.Response(429)
         if appid in self.failing:
             return httpx2.Response(500)
         start, end = int(params["start_date"]), int(params["end_date"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from itertools import pairwise
 
@@ -75,6 +76,60 @@ def test_requests_are_spaced_at_least_one_second_apart() -> None:
     assert min(gaps) >= 1.0
 
 
+def test_default_pace_stays_under_steams_appreviews_limit() -> None:
+    # Measured 2026-09-29 from this IP: Steam answered HTTP 429 after exactly 150 /appreviews
+    # requests, both at 1 request/s and at 0.8/s, and served again 5 minutes later: about 150
+    # requests per 5 minutes. Pace at least 10% under that.
+    requests_per_5_minutes = 300 / RateLimiter().min_interval_s
+    assert requests_per_5_minutes <= 150 * 0.9
+
+
+def test_rate_limit_without_retry_after_pauses_for_steams_block() -> None:
+    fake = FakeTime()
+    handler = responses(httpx2.Response(429), httpx2.Response(200, json={"success": 1}))
+
+    payload, _ = steam_http(handler, fake).get_json(URL, {"json": 1})
+
+    assert payload == {"success": 1}
+    assert 300.0 in fake.sleeps  # Steam blocks an emptied bucket for ~4.5 minutes
+
+
+def test_rate_limit_pause_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    # Otherwise a night that waited out Steam's block just looks 5 minutes slower.
+    fake = FakeTime()
+    handler = responses(httpx2.Response(429), httpx2.Response(200, json={"success": 1}))
+
+    with caplog.at_level(logging.WARNING, logger="patchpulse.ingest"):
+        steam_http(handler, fake).get_json(URL, {"json": 1})
+
+    assert "rate limit" in caplog.text
+    assert "300" in caplog.text
+
+
+def test_rate_limit_slows_the_shared_limiter() -> None:
+    fake = FakeTime()
+    handler = responses(httpx2.Response(429), httpx2.Response(200, json={"success": 1}))
+    http = steam_http(handler, fake)
+
+    http.get_json(URL, {"json": 1})
+
+    assert http.limiter.min_interval_s == 1.5
+
+
+def test_a_second_rate_limit_gives_up_and_later_requests_fail_fast() -> None:
+    fake = FakeTime()
+    handler = responses(*[httpx2.Response(429) for _ in range(3)])
+    http = steam_http(handler, fake)
+
+    with pytest.raises(SteamUnavailableError, match="429"):
+        http.get_json(URL, {"json": 1})
+    with pytest.raises(SteamUnavailableError, match="rate-limit"):
+        http.get_json(URL, {"json": 2})
+
+    assert len(handler.seen) == 2  # type: ignore[attr-defined]
+    assert fake.sleeps.count(300.0) == 1
+
+
 def test_rate_limited_requests_back_off_and_honour_retry_after() -> None:
     fake = FakeTime()
     handler = responses(
@@ -132,6 +187,8 @@ def test_backoff_grows_and_is_capped() -> None:
     assert delays == [2.0, 4.0, 8.0, 16.0, 20.0, 20.0]
     assert policy.delay(1, retry_after=None, jitter=0.0) == 1.0  # equal jitter: at least half
     assert policy.delay(1, retry_after=500.0, jitter=1.0) == 20.0  # Retry-After is capped too
+    assert policy.delay(1, retry_after=None, jitter=0.0, rate_limited=True) == 300.0
+    assert policy.delay(1, retry_after=900.0, jitter=0.0, rate_limited=True) == 300.0
 
 
 def test_user_agent_is_sent() -> None:

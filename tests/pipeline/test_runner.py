@@ -159,6 +159,32 @@ def test_one_game_failing_does_not_stop_the_others_but_fails_the_run(env: Env) -
     assert run.status == "failed"
 
 
+def test_steam_rate_limit_during_backfill_stops_the_backfill_not_the_run(env: Env) -> None:
+    # Backfill is best effort: a blocked night keeps its fresh data and resumes history tomorrow.
+    env.steam.rate_limit_after = 4  # the incremental windows' 4 requests succeed; then HTTP 429
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"
+    assert result.stages["backfill"]["stopped"].startswith("SteamUnavailableError")
+    coverage = {r.appid: r.covered_from for r in env.rows("SELECT * FROM ops.ingest_state")}
+    assert coverage == {game: (NOW - REREAD).replace(tzinfo=None) for game in (GAME_A, GAME_B)}
+    checks = {(r.check_name, r.severity) for r in env.rows("SELECT * FROM ops.data_quality_result")}
+    assert ("backfill_stopped", "warn") in checks
+    assert not any(severity == "error" for _, severity in checks)
+
+
+def test_steam_refusing_prices_is_recorded_not_fatal(env: Env) -> None:
+    env.steam.prices_down = True
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"
+    assert result.stages["prices"]["error"].startswith("SteamUnavailableError")
+    checks = {(r.check_name, r.severity) for r in env.rows("SELECT * FROM ops.data_quality_result")}
+    assert ("prices_unavailable", "warn") in checks
+
+
 def test_backfill_respects_the_time_budget(env: Env) -> None:
     no_budget = env.settings.model_copy(update={"backfill_budget_minutes": 0})
 
