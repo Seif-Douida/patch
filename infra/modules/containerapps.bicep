@@ -86,3 +86,4 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
 }
 
 output apiFqdn string = api.properties.configuration.ingress.fqdn
+output environmentId string = environment.id

@@ -73,3 +73,5 @@ resource allowDevMachine 'Microsoft.Sql/servers/firewallRules@2025-01-01' = {
 }
 
 output serverFqdn string = server.properties.fullyQualifiedDomainName
+output databaseName string = database.name
+output adminLogin string = server.properties.administratorLogin

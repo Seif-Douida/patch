@@ -28,6 +28,7 @@ ALLOWED_TYPES = frozenset(
         "microsoft.insights/components",
         "microsoft.app/managedenvironments",
         "microsoft.app/containerapps",
+        "microsoft.app/jobs",  # ADR-009
         "microsoft.sql/servers",
         "microsoft.sql/servers/databases",
         "microsoft.sql/servers/firewallrules",
@@ -36,6 +37,17 @@ ALLOWED_TYPES = frozenset(
 )
 
 _JSON_LITERAL = re.compile(r"^\[json\('(-?[0-9.]+)'\)\]$")
+
+# The Container Apps free grant, per subscription per month; pp-api and the jobs share it.
+GRANT_VCPU_SECONDS = 180_000
+GRANT_GIB_SECONDS = 360_000
+# A fixed minute and hour, every day: one run a day, whatever the timeout math assumes.
+_DAILY_CRON = re.compile(r"^[0-9]{1,2} [0-9]{1,2} \* \* \*$")
+_TRIGGER_CONFIG = {
+    "Schedule": "scheduleTriggerConfig",
+    "Manual": "manualTriggerConfig",
+    "Event": "eventTriggerConfig",
+}
 
 
 def bicep_build_command(main: Path) -> list[str] | None:
@@ -67,6 +79,19 @@ def literal_number(value: Any) -> float:
     if isinstance(value, str) and (match := _JSON_LITERAL.match(value)):
         return float(match.group(1))
     raise AssertionError(f"guard value must be a literal in Bicep, got {value!r}")
+
+
+def gibibytes(memory: Any) -> float:
+    match = re.fullmatch(r"([0-9.]+)Gi", memory) if isinstance(memory, str) else None
+    if match is None:
+        raise AssertionError(f"memory must be a literal like '2Gi', got {memory!r}")
+    return float(match.group(1))
+
+
+def trigger_config(job: dict[str, Any]) -> dict[str, Any]:
+    config: dict[str, Any] = job["properties"]["configuration"]
+    trigger: dict[str, Any] = config[_TRIGGER_CONFIG[config["triggerType"]]]
+    return trigger
 
 
 def iter_resources(template: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -150,6 +175,66 @@ def test_container_apps_scale_to_zero_with_capped_size(resources: list[dict[str,
             assert container["resources"]["memory"] == "1Gi"
 
 
+def test_jobs_have_capped_size_timeout_and_no_retries(resources: list[dict[str, Any]]) -> None:
+    for job in of_type(resources, "microsoft.app/jobs"):
+        config = job["properties"]["configuration"]
+        assert literal_number(config["replicaTimeout"]) <= 2700, job["name"]
+        # A retry doubles a failed night's usage; the next night catches up instead (ADR-009).
+        assert literal_number(config["replicaRetryLimit"]) == 0, job["name"]
+        assert literal_number(trigger_config(job)["parallelism"]) == 1, job["name"]
+        assert literal_number(trigger_config(job)["replicaCompletionCount"]) == 1, job["name"]
+        for container in job["properties"]["template"]["containers"]:
+            assert literal_number(container["resources"]["cpu"]) <= 1, job["name"]
+            assert gibibytes(container["resources"]["memory"]) <= 2, job["name"]
+
+
+def test_jobs_run_only_on_a_schedule_or_by_hand(resources: list[dict[str, Any]]) -> None:
+    # An event trigger scales out with its queue; nothing would bound how often it runs.
+    for job in of_type(resources, "microsoft.app/jobs"):
+        config = job["properties"]["configuration"]
+        assert config["triggerType"] in {"Schedule", "Manual"}, job["name"]
+        assert "eventTriggerConfig" not in config, job["name"]
+
+
+def test_scheduled_jobs_run_once_a_day(resources: list[dict[str, Any]]) -> None:
+    scheduled = [
+        job
+        for job in of_type(resources, "microsoft.app/jobs")
+        if job["properties"]["configuration"]["triggerType"] == "Schedule"
+    ]
+    assert scheduled, "expected the nightly job"
+    for job in scheduled:
+        cron = trigger_config(job)["cronExpression"]
+        assert _DAILY_CRON.match(cron), f"{job['name']}: {cron!r} is not a literal daily schedule"
+
+
+def test_worst_case_scheduled_job_usage_is_under_half_the_grant(
+    resources: list[dict[str, Any]],
+) -> None:
+    # Every scheduled run hits its timeout, every day of a 31-day month (one run a day, above).
+    vcpu_seconds = gib_seconds = 0.0
+    for job in of_type(resources, "microsoft.app/jobs"):
+        config = job["properties"]["configuration"]
+        if config["triggerType"] != "Schedule":
+            continue
+        month = 31 * literal_number(config["replicaTimeout"])
+        for container in job["properties"]["template"]["containers"]:
+            vcpu_seconds += month * literal_number(container["resources"]["cpu"])
+            gib_seconds += month * gibibytes(container["resources"]["memory"])
+
+    assert vcpu_seconds <= GRANT_VCPU_SECONDS / 2
+    assert gib_seconds <= GRANT_GIB_SECONDS / 2
+
+
+def test_job_credentials_come_from_container_app_secrets(resources: list[dict[str, Any]]) -> None:
+    for job in of_type(resources, "microsoft.app/jobs"):
+        for container in job["properties"]["template"]["containers"]:
+            for variable in container.get("env", []):
+                if re.search(r"PASSWORD|SALT|PRIVATE_KEY", variable["name"]):
+                    assert "secretRef" in variable, f"{job['name']}: {variable['name']}"
+                    assert "value" not in variable, f"{job['name']}: {variable['name']}"
+
+
 def test_static_web_app_is_free_plan(resources: list[dict[str, Any]]) -> None:
     (site,) = of_type(resources, "microsoft.web/staticsites")
     assert site["sku"]["name"] == "Free"
@@ -158,6 +243,13 @@ def test_static_web_app_is_free_plan(resources: list[dict[str, Any]]) -> None:
 def test_literal_number_reads_bicep_decimal_expressions() -> None:
     assert literal_number("[json('0.15')]") == 0.15
     assert literal_number(2) == 2.0
+
+
+def test_gibibytes_reads_literal_memory_only() -> None:
+    assert gibibytes("2Gi") == 2.0
+    assert gibibytes("0.5Gi") == 0.5
+    with pytest.raises(AssertionError, match="literal"):
+        gibibytes("[parameters('memory')]")
 
 
 def test_literal_number_rejects_parameterised_guard_values() -> None:

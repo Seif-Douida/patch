@@ -26,6 +26,17 @@ param sqlEntraAdminObjectId string
 @description('Public IPv4 address of the dev machine, allowed through the SQL firewall.')
 param devIpAddress string
 
+@description('Image for pp-nightly and pp-migrate. infra.yml passes the image the jobs already run, like apiImage.')
+param jobsImage string
+
+@description('Password of the pp_writer database user, from the GitHub environment secret SQL_WRITER_PASSWORD. pp-migrate sets it; pp-nightly logs in with it.')
+@secure()
+param sqlWriterPassword string
+
+@description('HMAC salt for author hashes, from the secret AUTHOR_HASH_SALT. Never rotated: a new salt makes every reviewer look new.')
+@secure()
+param authorHashSalt string
+
 var tags = {
   project: 'patchpulse'
   managedBy: 'bicep'
@@ -67,6 +78,22 @@ module sql 'modules/sql.bicep' = {
     entraAdminLogin: sqlEntraAdminLogin
     entraAdminObjectId: sqlEntraAdminObjectId
     devIpAddress: devIpAddress
+  }
+}
+
+module jobs 'modules/jobs.bicep' = {
+  name: 'jobs'
+  params: {
+    location: location
+    tags: tags
+    environmentId: containerApps.outputs.environmentId
+    jobsImage: jobsImage
+    sqlServerFqdn: sql.outputs.serverFqdn
+    sqlDatabaseName: sql.outputs.databaseName
+    sqlAdminLogin: sql.outputs.adminLogin
+    sqlAdminPassword: sqlAdminPassword
+    sqlWriterPassword: sqlWriterPassword
+    authorHashSalt: authorHashSalt
   }
 }
 
