@@ -30,9 +30,16 @@ BACKFILL_START = (NOW - timedelta(days=20)).date()
 @dataclass
 class RecordingPublisher:
     calls: list[tuple[dict[str, bytes], int]] = field(default_factory=list)
+    reports: list[tuple[int, str, str | None]] = field(default_factory=list)
+    report_fails: bool = False
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
         self.calls.append((dict(files), data_version))
+
+    def report(self, *, run_id: int, status: str, error: str | None) -> None:
+        if self.report_fails:
+            raise RuntimeError("GitHub is down")
+        self.reports.append((run_id, status, error))
 
 
 def ok_dbt(args: Any, **_: Any) -> DbtResult:
@@ -183,6 +190,27 @@ def test_steam_refusing_prices_is_recorded_not_fatal(env: Env) -> None:
     assert result.stages["prices"]["error"].startswith("SteamUnavailableError")
     checks = {(r.check_name, r.severity) for r in env.rows("SELECT * FROM ops.data_quality_result")}
     assert ("prices_unavailable", "warn") in checks
+
+
+def test_publisher_hears_the_outcome_of_every_run(env: Env) -> None:
+    # In Azure the outcome becomes a GitHub issue on failure, closed by the next success.
+    ok = env.run(dbt=ok_dbt, export=stub_export)
+    with pytest.raises(PipelineError):
+        env.run(dbt=failing_dbt, export=stub_export)
+
+    assert env.publisher.reports[0] == (ok.run_id, "succeeded", None)
+    failed_run, status, error = env.publisher.reports[1]
+    assert (failed_run, status) == (ok.run_id + 1, "failed")
+    assert error is not None
+    assert "dbt build failed" in error
+
+
+def test_a_reporting_failure_never_hides_the_run_result(env: Env) -> None:
+    env.publisher.report_fails = True
+
+    assert env.run(dbt=ok_dbt, export=stub_export).status == "succeeded"
+    with pytest.raises(PipelineError, match="dbt"):
+        env.run(dbt=failing_dbt, export=stub_export)
 
 
 def test_backfill_respects_the_time_budget(env: Env) -> None:

@@ -91,13 +91,17 @@ jobs:
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
+          PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
         run: |
-          # An empty secret would reach Azure as an empty pp_writer password, hash salt or alert
-          # address.
+          # An empty value would reach Azure as an empty pp_writer password, hash salt, alert
+          # address or GitHub App credential.
           missing=""
           [ -n "$SQL_WRITER_PASSWORD" ] || missing="$missing SQL_WRITER_PASSWORD"
           [ -n "$AUTHOR_HASH_SALT" ] || missing="$missing AUTHOR_HASH_SALT"
           [ -n "$ALERT_EMAIL" ] || missing="$missing ALERT_EMAIL"
+          [ -n "$PP_GITHUB_APP_PRIVATE_KEY" ] || missing="$missing PP_GITHUB_APP_PRIVATE_KEY"
+          [ -n "$PP_GITHUB_APP_ID" ] || missing="$missing PP_GITHUB_APP_ID(variable)"
           if [ -n "$missing" ]; then
             echo "::error::Add these secrets to the GitHub environment 'production':$missing"
             exit 1
@@ -142,6 +146,8 @@ jobs:
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
+          PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
         run: |
           az deployment group what-if -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam
@@ -156,6 +162,8 @@ jobs:
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
+          PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
         run: |
           az deployment group create -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam \

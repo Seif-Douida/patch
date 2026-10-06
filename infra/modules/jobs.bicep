@@ -20,6 +20,12 @@ param sqlWriterPassword string
 @secure()
 param authorHashSalt string
 
+@description('The GitHub App that publishes site-data and opens failure issues (ADR-018).')
+param githubAppId string
+
+@secure()
+param githubAppPrivateKey string
+
 resource nightly 'Microsoft.App/jobs@2025-07-01' = {
   name: 'pp-nightly'
   location: location
@@ -45,6 +51,10 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
           name: 'author-hash-salt'
           value: authorHashSalt
         }
+        {
+          name: 'github-app-key'
+          value: githubAppPrivateKey
+        }
       ]
     }
     template: {
@@ -54,6 +64,7 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
           image: jobsImage
           args: [
             'nightly'
+            '--publish'
           ]
           env: [
             {
@@ -75,6 +86,18 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
             {
               name: 'PP_AUTHOR_HASH_SALT'
               secretRef: 'author-hash-salt'
+            }
+            {
+              name: 'PP_GITHUB_REPOSITORY'
+              value: 'Seif-Douida/patch'
+            }
+            {
+              name: 'PP_GITHUB_APP_ID'
+              value: githubAppId
+            }
+            {
+              name: 'PP_GITHUB_APP_PRIVATE_KEY'
+              secretRef: 'github-app-key'
             }
             {
               // Of the 45 min: 25 backfill, up to 5 for one Steam rate-limit pause (ingest/http.py),

@@ -237,6 +237,18 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
                     assert "value" not in variable, f"{job['name']}: {variable['name']}"
 
 
+def test_nightly_job_publishes_with_the_github_app(resources: list[dict[str, Any]]) -> None:
+    # ADR-018: the key reaches the job only as a Container Apps secret; --publish makes a missing
+    # setting fail the night instead of skipping the publish.
+    (nightly,) = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] == "pp-nightly"]
+    (container,) = nightly["properties"]["template"]["containers"]
+    assert container["args"] == ["nightly", "--publish"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    assert "secretRef" in env["PP_GITHUB_APP_PRIVATE_KEY"]
+    assert env["PP_GITHUB_REPOSITORY"]["value"] == "Seif-Douida/patch"
+    assert "PP_GITHUB_APP_ID" in env
+
+
 def test_metric_alerts_stay_inside_the_free_time_series(resources: list[dict[str, Any]]) -> None:
     # The first 10 monitored metric time series a month are free. One resource, one metric and no
     # dimension split is one time series; a dimension would multiply them.

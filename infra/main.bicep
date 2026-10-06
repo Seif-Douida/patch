@@ -37,6 +37,13 @@ param sqlWriterPassword string
 @secure()
 param authorHashSalt string
 
+@description('App ID of the GitHub App that publishes site-data (ADR-018), from the variable PP_GITHUB_APP_ID.')
+param githubAppId string
+
+@description('Private key of that app, from the secret PP_GITHUB_APP_PRIVATE_KEY. It reaches only pp-nightly, as a Container Apps secret.')
+@secure()
+param githubAppPrivateKey string
+
 @description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
 @secure()
 param alertEmail string
@@ -98,6 +105,8 @@ module jobs 'modules/jobs.bicep' = {
     sqlAdminPassword: sqlAdminPassword
     sqlWriterPassword: sqlWriterPassword
     authorHashSalt: authorHashSalt
+    githubAppId: githubAppId
+    githubAppPrivateKey: githubAppPrivateKey
   }
 }
 

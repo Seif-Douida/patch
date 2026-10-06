@@ -10,3 +10,5 @@ param jobsImage = readEnvironmentVariable('JOBS_IMAGE', 'ghcr.io/seif-douida/pat
 param sqlWriterPassword = readEnvironmentVariable('SQL_WRITER_PASSWORD')
 param authorHashSalt = readEnvironmentVariable('AUTHOR_HASH_SALT')
 param alertEmail = readEnvironmentVariable('ALERT_EMAIL')
+param githubAppId = readEnvironmentVariable('PP_GITHUB_APP_ID')
+param githubAppPrivateKey = readEnvironmentVariable('PP_GITHUB_APP_PRIVATE_KEY')

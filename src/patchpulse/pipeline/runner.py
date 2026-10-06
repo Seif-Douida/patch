@@ -11,6 +11,8 @@
 6. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
    advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
 7. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
+8. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
+   success). A failure to report is logged and never changes the run's own result.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
 """
@@ -65,12 +67,17 @@ class PipelineError(RuntimeError):
 class Publisher(Protocol):
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None: ...
 
+    def report(self, *, run_id: int, status: str, error: str | None) -> None: ...
+
 
 class NoPublisher:
     """Local runs: the export is built but not pushed anywhere."""
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
         log.info("publish skipped (local run): %d files, data_version %d", len(files), data_version)
+
+    def report(self, *, run_id: int, status: str, error: str | None) -> None:
+        log.info("run %d %s (not reported: local run)", run_id, status)
 
 
 class DbtRunner(Protocol):
@@ -175,6 +182,7 @@ def run_nightly(
     except Exception as error:
         with engine.begin() as connection:
             finish_run(connection, run_id, status="failed", stages=run.stages, error=str(error))
+        _report(publisher, run_id, "failed", str(error))
         if isinstance(error, PipelineError):
             raise
         raise PipelineError(f"run {run_id} failed: {error}") from error
@@ -184,9 +192,17 @@ def run_nightly(
     with engine.begin() as connection:
         finish_run(connection, run_id, status=status, stages=run.stages, error=error_text)
     log.info("nightly run %d %s", run_id, status)
+    _report(publisher, run_id, status, error_text)
     if run.errors:
         raise PipelineError(f"run {run_id}: {len(run.errors)} game(s) failed: {error_text}")
     return RunResult(run_id, status, run.stages)
+
+
+def _report(publisher: Publisher, run_id: int, status: str, error: str | None) -> None:
+    try:
+        publisher.report(run_id=run_id, status=status, error=error)
+    except Exception as failure:  # reporting must never change the run's result
+        log.error("could not report run %d (%s): %s", run_id, status, failure)
 
 
 def _run_stages(

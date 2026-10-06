@@ -1511,6 +1511,7 @@ dev = [
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pytest" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
@@ -1526,6 +1527,7 @@ pipeline = [
     { name = "httpx2" },
     { name = "mssql-python" },
     { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pyyaml" },
     { name = "sqlalchemy" },
 ]
@@ -1546,6 +1548,7 @@ dev = [
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pre-commit", specifier = ">=4.6.2" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "pyyaml", specifier = ">=6" },
@@ -1561,6 +1564,7 @@ pipeline = [
     { name = "httpx2", specifier = ">=2.13.1" },
     { name = "mssql-python", specifier = ">=1.15.0" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "sqlalchemy", specifier = ">=2.1.1" },
 ]

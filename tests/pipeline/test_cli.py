@@ -47,6 +47,24 @@ def test_nightly_accepts_a_games_file_and_an_export_dir(
     out = capsys.readouterr().out
     assert "--games-file" in out
     assert "--export-dir" in out
+    assert "--publish" in out
+
+
+def test_publish_needs_the_github_settings_before_touching_the_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # In Azure a missing setting must fail the night loudly, not skip publishing quietly.
+    for name in list(os.environ):
+        if name.startswith("PP_"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+    for name in ("PP_DB_HOST", "PP_DB_NAME", "PP_DB_USER", "PP_DB_PASSWORD", "PP_AUTHOR_HASH_SALT"):
+        monkeypatch.setenv(name, "unused")  # a connection attempt would hang on this host
+
+    assert main(["nightly", "--publish"]) == 2
+    err = capsys.readouterr().err
+    for name in ("PP_GITHUB_REPOSITORY", "PP_GITHUB_APP_ID", "PP_GITHUB_APP_PRIVATE_KEY"):
+        assert name in err
 
 
 def test_http_request_logs_are_quiet() -> None:

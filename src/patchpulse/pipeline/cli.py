@@ -2,7 +2,8 @@
 
     migrate          Apply migrations and provision pp_writer. Connects as the server admin
                      (PP_DB_USER / PP_DB_PASSWORD) and needs PP_WRITER_PASSWORD. Run by pp-migrate.
-    nightly          The nightly run, as pp_writer. Run by pp-nightly on its cron.
+    nightly          The nightly run, as pp_writer. Run by pp-nightly on its cron with --publish,
+                     which sends the site data and the run's outcome to GitHub (ADR-018).
     create-local-db  Local and CI only: create PP_DB_NAME on the SQL Server container.
 
 Exit codes: 0 success, 1 the run failed (details in ops.pipeline_run), 2 bad configuration.
@@ -28,6 +29,7 @@ from patchpulse.db.provision import provision_writer
 from patchpulse.ingest.games import GAMES_FILE
 from patchpulse.ingest.http import RateLimiter, SteamHttp
 from patchpulse.pipeline.runner import NoPublisher, PipelineError, Publisher, run_nightly
+from patchpulse.publish.github import GitHubPublisher
 
 log = logging.getLogger("patchpulse.pipeline")
 
@@ -44,6 +46,9 @@ class LocalDirPublisher:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
         log.info("wrote %d files (data_version %d) to %s", len(files), data_version, self.directory)
+
+    def report(self, *, run_id: int, status: str, error: str | None) -> None:
+        log.info("run %d %s (not reported: local run)", run_id, status)
 
 
 def configure_logging() -> None:
@@ -70,11 +75,31 @@ def _migrate(settings: Settings) -> int:
     return 0
 
 
-def _nightly(settings: Settings, export_dir: Path | None, games_file: Path) -> int:
+def _github_publisher(settings: Settings, http: httpx2.Client) -> GitHubPublisher:
+    repo = settings.github_repository
+    app_id = settings.github_app_id
+    key = settings.github_app_private_key
+    if not (repo and app_id and key):
+        required = {
+            "PP_GITHUB_REPOSITORY": repo,
+            "PP_GITHUB_APP_ID": app_id,
+            "PP_GITHUB_APP_PRIVATE_KEY": key,
+        }
+        missing = ", ".join(name for name, value in required.items() if not value)
+        raise SettingsError(f"missing or invalid settings: {missing}")
+    return GitHubPublisher(app_id=app_id, private_key=key, repo=repo, http=http)
+
+
+def _nightly(settings: Settings, export_dir: Path | None, games_file: Path, publish: bool) -> int:
+    github = httpx2.Client()
+    publisher: Publisher
+    if publish:  # checked before the database is touched, so a bad setting fails fast
+        publisher = _github_publisher(settings, github)
+    else:
+        publisher = LocalDirPublisher(export_dir) if export_dir else NoPublisher()
     engine = make_engine(settings)
     connect_with_resume_retry(engine).close()  # wake a paused database first
-    publisher: Publisher = LocalDirPublisher(export_dir) if export_dir else NoPublisher()
-    with httpx2.Client() as client, tempfile.TemporaryDirectory() as target:
+    with github, httpx2.Client() as client, tempfile.TemporaryDirectory() as target:
         try:
             run_nightly(
                 settings,
@@ -109,6 +134,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     nightly.add_argument(
         "--games-file", type=Path, default=GAMES_FILE, help=f"default: {GAMES_FILE}"
     )
+    nightly.add_argument(
+        "--publish",
+        action="store_true",
+        help="publish to the site-data branch and report the outcome on GitHub (Azure)",
+    )
     commands.add_parser("create-local-db", help="local/CI only: create PP_DB_NAME on the container")
     args = parser.parse_args(argv)
 
@@ -118,7 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "migrate":
             return _migrate(settings)
         if args.command == "nightly":
-            return _nightly(settings, args.export_dir, args.games_file)
+            return _nightly(settings, args.export_dir, args.games_file, args.publish)
         return _create_local_db(settings)
     except SettingsError as error:
         print(f"patchpulse-pipeline: {error}", file=sys.stderr)
