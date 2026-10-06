@@ -156,8 +156,14 @@ def test_infra_refuses_to_deploy_without_the_phase_1_secrets() -> None:
     # An empty secret would reach Azure as an empty pp_writer password, hash salt or alert address.
     text = read("infra.yml")
     check = step("infra.yml", "Require the Phase 1 secrets")
-    for secret in ("SQL_WRITER_PASSWORD", "AUTHOR_HASH_SALT", "ALERT_EMAIL"):
+    for secret in (
+        "SQL_WRITER_PASSWORD",
+        "AUTHOR_HASH_SALT",
+        "ALERT_EMAIL",
+        "PP_GITHUB_APP_PRIVATE_KEY",
+    ):
         assert f"secrets.{secret}" in check
+    assert "vars.PP_GITHUB_APP_ID" in check
     assert "exit 1" in check
     assert text.index("- name: Require the Phase 1 secrets") < text.index(
         "az deployment group what-if"
@@ -166,6 +172,12 @@ def test_infra_refuses_to_deploy_without_the_phase_1_secrets() -> None:
 
 def test_infra_passes_the_alert_address_to_what_if_and_deploy() -> None:
     assert read("infra.yml").count("ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}") == 3
+
+
+def test_infra_passes_the_github_app_to_what_if_and_deploy() -> None:
+    text = read("infra.yml")
+    assert text.count("PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}") == 3
+    assert text.count("PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}") == 3
 
 
 def test_guard_counts_both_jobs_executions() -> None:
@@ -193,3 +205,41 @@ def test_nightly_job_is_deleted_even_if_stopping_pp_api_fails() -> None:
     assert text.index("- name: Trip - delete pp-nightly") < text.index("- name: Trip - stop pp-api")
     issue = step("cost-guard.yml", "Open or update the alert issue")
     assert "steps.trip_jobs.outcome" in issue
+
+
+def test_publish_site_listens_for_the_dispatch_event() -> None:
+    # The nightly job's site-data commit can't trigger a workflow; its repository_dispatch does.
+    text = read("publish-site.yml")
+    assert re.search(r"repository_dispatch:\n\s+types: \[site-data-updated\]", text)
+    assert "workflow_dispatch:" in text
+    assert '- "web/**"' in text
+
+
+def test_publish_site_checks_out_the_site_data_or_fails_clearly() -> None:
+    text = read("publish-site.yml")
+    check = step("publish-site.yml", "Require the site-data branch")
+    assert "git ls-remote --exit-code" in check
+    assert "::error::" in check
+    assert "ref: site-data" in text
+    assert "path: web/public/data" in text
+
+
+def test_swa_token_is_fetched_at_run_time_and_masked() -> None:
+    # No stored deployment token: it is read with the OIDC identity on each run.
+    fetch = step("publish-site.yml", "Fetch the Static Web App deployment token")
+    assert "az staticwebapp secrets list" in fetch
+    assert fetch.index("::add-mask::") < fetch.index("GITHUB_OUTPUT")
+    assert "secrets.AZURE_STATIC_WEB_APPS" not in read("publish-site.yml")
+
+
+def test_publish_site_never_puts_the_dispatch_payload_in_a_shell() -> None:
+    # Whoever can send a dispatch controls client_payload; in a run: script it would be code.
+    assert "client_payload" not in read("publish-site.yml")
+
+
+def test_publish_site_uploads_the_prebuilt_site_only() -> None:
+    deploy = step("publish-site.yml", "Deploy to the Static Web App")
+    assert "Azure/static-web-apps-deploy@v1" in deploy
+    assert "app_location: web/out" in deploy
+    assert "skip_app_build: true" in deploy
+    assert "skip_api_build: true" in deploy

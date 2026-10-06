@@ -1,0 +1,102 @@
+name: publish-site
+
+# Build the dashboard (web/ from main) with the latest data (the site-data branch) and upload it to
+# the Static Web App (Free). Started by the nightly job's repository_dispatch (ADR-018), by a push
+# to main that touches web/, or by hand. The dispatch payload is never read: the data comes from
+# the site-data branch, so a crafted dispatch can't inject anything into this job.
+on:
+  repository_dispatch:
+    types: [site-data-updated]
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/publish-site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only the newest data matters, so a newer run replaces one still building.
+concurrency:
+  group: publish-site
+  cancel-in-progress: true
+
+# `shell: bash` runs with -eo pipefail.
+defaults:
+  run:
+    shell: bash
+
+env:
+  RG: rg-patchpulse
+  SWA: pp-web
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # repository_dispatch runs on the default branch, so the production environment (main only)
+    # and its Azure identity are available.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Require the site-data branch
+        run: |
+          if ! git ls-remote --exit-code --heads "https://github.com/$GITHUB_REPOSITORY" site-data > /dev/null; then
+            echo "::error::The site-data branch doesn't exist yet. It appears after the first nightly run with --publish (or start pp-nightly by hand); then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Check out the site data
+        uses: actions/checkout@v7
+        with:
+          ref: site-data
+          path: web/public/data
+          persist-credentials: false
+
+      # Next.js copies public/ into the site as is; the checkout's git metadata must not go with it.
+      - name: Drop the data checkout's git metadata
+        run: rm -rf web/public/data/.git
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the site
+        working-directory: web
+        env:
+          SITE_DATA_DIR: public/data
+        run: |
+          npm ci
+          npm run build
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # No stored deployment token: read it with the OIDC identity on each run, masked at once.
+      - name: Fetch the Static Web App deployment token
+        id: swa
+        run: |
+          token=$(az staticwebapp secrets list -n "$SWA" -g "$RG" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to the Static Web App
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          action: upload
+          app_location: web/out
+          skip_app_build: true
+          skip_api_build: true
