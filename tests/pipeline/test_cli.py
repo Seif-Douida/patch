@@ -7,6 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import Engine, text
 
 from patchpulse.config import Settings
@@ -65,6 +67,66 @@ def test_publish_needs_the_github_settings_before_touching_the_database(
     err = capsys.readouterr().err
     for name in ("PP_GITHUB_REPOSITORY", "PP_GITHUB_APP_ID", "PP_GITHUB_APP_PRIVATE_KEY"):
         assert name in err
+
+
+class DatabaseTouchedError(Exception):
+    """Raised instead of connecting: the check under test has to come before the database."""
+
+
+@pytest.fixture(scope="module")
+def app_key() -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ).decode()
+
+
+def use_github_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key: str) -> None:
+    """Every setting `nightly --publish` needs, and a database that must not be reached."""
+    for name in list(os.environ):
+        if name.startswith("PP_"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+    for name in ("PP_DB_HOST", "PP_DB_NAME", "PP_DB_USER", "PP_DB_PASSWORD", "PP_AUTHOR_HASH_SALT"):
+        monkeypatch.setenv(name, "unused")
+    monkeypatch.setenv("PP_GITHUB_REPOSITORY", "Seif-Douida/patch")
+    monkeypatch.setenv("PP_GITHUB_APP_ID", "123456")
+    monkeypatch.setenv("PP_GITHUB_APP_PRIVATE_KEY", key)
+
+    def no_database(*args: object, **kwargs: object) -> Engine:
+        raise DatabaseTouchedError
+
+    monkeypatch.setattr("patchpulse.pipeline.cli.make_engine", no_database)
+
+
+def test_publish_rejects_a_key_without_its_pem_lines_before_touching_the_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    app_key: str,
+) -> None:
+    # 2026-10-06: the secret was pasted without its BEGIN/END lines. The night ran for 31 minutes,
+    # then failed at publish with PyJWT's misleading "Could not parse the provided public key".
+    body = "\n".join(app_key.strip().splitlines()[1:-1])
+    use_github_app(monkeypatch, tmp_path, body)
+
+    assert main(["nightly", "--publish"]) == 2
+    err = capsys.readouterr().err
+    assert "PP_GITHUB_APP_PRIVATE_KEY" in err
+    assert "-----BEGIN" in err
+    assert body.splitlines()[0] not in err  # the key is never echoed
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_publish_accepts_a_whole_pem_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, app_key: str, newline: str
+) -> None:
+    use_github_app(monkeypatch, tmp_path, app_key.replace("\n", newline))
+
+    with pytest.raises(DatabaseTouchedError):
+        main(["nightly", "--publish"])
 
 
 def test_http_request_logs_are_quiet() -> None:

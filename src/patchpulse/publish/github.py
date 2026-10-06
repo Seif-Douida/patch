@@ -21,6 +21,9 @@ from typing import Any
 
 import httpx2
 import jwt
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr
 
 log = logging.getLogger("patchpulse.publish")
@@ -70,6 +73,19 @@ def _call(
             message = ""
         raise GitHubError(f"{method} {path}: HTTP {response.status_code} {message}".strip())
     return response.json() if response.content else None
+
+
+def usable_private_key(pem: str) -> bool:
+    """Whether `pem` is the unencrypted RSA private key that RS256 signing needs.
+
+    Checked before the nightly run starts: PyJWT only finds out at publish, half an hour later, and
+    its message ("Could not parse the provided public key") points the wrong way.
+    """
+    try:
+        key = serialization.load_pem_private_key(pem.encode(), password=None)
+    except (ValueError, TypeError, UnsupportedAlgorithm):  # TypeError: the key is encrypted
+        return False
+    return isinstance(key, rsa.RSAPrivateKey)
 
 
 def app_jwt(app_id: str, private_key: str, *, now: datetime) -> str:

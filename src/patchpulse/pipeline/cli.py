@@ -29,7 +29,7 @@ from patchpulse.db.provision import provision_writer
 from patchpulse.ingest.games import GAMES_FILE
 from patchpulse.ingest.http import RateLimiter, SteamHttp
 from patchpulse.pipeline.runner import NoPublisher, PipelineError, Publisher, run_nightly
-from patchpulse.publish.github import GitHubPublisher
+from patchpulse.publish.github import GitHubPublisher, usable_private_key
 
 log = logging.getLogger("patchpulse.pipeline")
 
@@ -87,6 +87,11 @@ def _github_publisher(settings: Settings, http: httpx2.Client) -> GitHubPublishe
         }
         missing = ", ".join(name for name, value in required.items() if not value)
         raise SettingsError(f"missing or invalid settings: {missing}")
+    if not usable_private_key(key.get_secret_value()):
+        raise SettingsError(
+            "PP_GITHUB_APP_PRIVATE_KEY is not an RSA private key in PEM format. Paste the whole "
+            ".pem file, including its -----BEGIN and -----END lines"
+        )
     return GitHubPublisher(app_id=app_id, private_key=key, repo=repo, http=http)
 
 

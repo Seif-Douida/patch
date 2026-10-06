@@ -15,6 +15,8 @@ database before the code that needs the new schema runs.
 import re
 from pathlib import Path
 
+from patchpulse.publish.github import FAILURE_TITLE
+
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
 
@@ -205,6 +207,25 @@ def test_nightly_job_is_deleted_even_if_stopping_pp_api_fails() -> None:
     assert text.index("- name: Trip - delete pp-nightly") < text.index("- name: Trip - stop pp-api")
     issue = step("cost-guard.yml", "Open or update the alert issue")
     assert "steps.trip_jobs.outcome" in issue
+
+
+def test_guard_reports_a_failed_night_that_could_not_report_itself() -> None:
+    # 2026-10-06: a broken app key failed the night and kept it from opening its own issue.
+    reading = step("cost-guard.yml", "Job executions this month")
+    assert "id: executions" in reading
+    check = step("cost-guard.yml", "Check the last nightly run")
+    assert "steps.executions.outcome == 'success'" in check
+    assert "!cancelled()" in check  # also after a trip, or a failed trip step
+    assert "patchpulse.monitoring.nightly_watch pp-nightly-executions.json" in check
+    issue = step("cost-guard.yml", "Open the nightly failure issue")
+    assert "steps.nightly.outputs.failed == 'true'" in issue
+    # The title the publisher closes on the next successful night.
+    assert f'title="{FAILURE_TITLE}"' in issue
+    # One issue: none if one is open. The list API, unlike search, sees an issue opened seconds ago.
+    assert "--state open" in issue
+    assert "--search" not in issue
+    assert "--body-file nightly-issue.md" in issue
+    assert "${{" not in issue.split("run: |", 1)[1]  # Azure data reaches the shell only as a file
 
 
 def test_publish_site_listens_for_the_dispatch_event() -> None:

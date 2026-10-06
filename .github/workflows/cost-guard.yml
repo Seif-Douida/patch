@@ -98,6 +98,7 @@ jobs:
             --interval 1m --start-time "$start" --end-time "$end" -o json > replicas.json
 
       - name: Job executions this month (pp-nightly, pp-migrate)
+        id: executions
         run: |
           # `list` returns empty only when the job is absent (not created yet, or deleted by a
           # trip), and fails on real Azure errors. Azure keeps each job's recent executions.
@@ -224,6 +225,31 @@ jobs:
           else
             gh issue create --title "$title" --label alert --body-file issue-body.md
           fi
+
+      # A backstop, not part of the kill switch: pp-nightly reports its own failures, but not when
+      # it can't reach GitHub (a broken app key, 2026-10-06). Runs whatever the trip steps did.
+      - name: Check the last nightly run
+        id: nightly
+        if: "!cancelled() && steps.executions.outcome == 'success'"
+        run: uv run --no-dev python -m patchpulse.monitoring.nightly_watch pp-nightly-executions.json
+
+      - name: Open the nightly failure issue
+        if: "!cancelled() && steps.nightly.outputs.failed == 'true'"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # The title the next successful night closes. If one is open (the run reported itself,
+          # or an earlier check did), leave it: it stays open until a night succeeds.
+          title="pipeline failed: nightly"
+          number=$(gh issue list --label alert --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [ -n "$number" ]; then
+            echo "Issue #$number is already open; not opening another."
+            exit 0
+          fi
+          gh label create alert --color B60205 --description "Automated alert (ADR-013)" --force
+          gh issue create --title "$title" --label alert --body-file nightly-issue.md
 
       - name: Fail loudly if month-to-date cost was unavailable
         if: always() && (steps.cost.outcome == 'failure' || steps.guard.outputs.cost_available == 'false')

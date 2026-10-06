@@ -184,7 +184,7 @@ def _load(path: Path | None) -> Mapping[str, Any] | None:
     return loaded
 
 
-def _executions(path: Path) -> list[Mapping[str, Any]]:
+def read_executions(path: Path) -> list[Mapping[str, Any]]:
     """A job's executions: the CLI prints a list; the REST API wraps it as {"value": [...]}."""
     loaded = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(loaded, dict):
@@ -219,7 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     jobs = Decimal(0)
     for path in args.job_executions:
         try:
-            executions = _executions(path)
+            executions = read_executions(path)
             jobs += job_vcpu_seconds(executions, month_start=month_start, now=now)
         except (KeyError, TypeError, ValueError) as error:
             # Unlike cost, job usage has no other source: guessing zero would under-count.
