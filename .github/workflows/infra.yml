@@ -86,15 +86,18 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Require the pipeline secrets
+      - name: Require the Phase 1 secrets
         env:
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
         run: |
-          # An empty secret would reach Azure as an empty pp_writer password or hash salt.
+          # An empty secret would reach Azure as an empty pp_writer password, hash salt or alert
+          # address.
           missing=""
           [ -n "$SQL_WRITER_PASSWORD" ] || missing="$missing SQL_WRITER_PASSWORD"
           [ -n "$AUTHOR_HASH_SALT" ] || missing="$missing AUTHOR_HASH_SALT"
+          [ -n "$ALERT_EMAIL" ] || missing="$missing ALERT_EMAIL"
           if [ -n "$missing" ]; then
             echo "::error::Add these secrets to the GitHub environment 'production':$missing"
             exit 1
@@ -138,6 +141,7 @@ jobs:
           DEV_IP_ADDRESS: ${{ secrets.DEV_IP_ADDRESS }}
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
         run: |
           az deployment group what-if -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam
@@ -151,6 +155,7 @@ jobs:
           DEV_IP_ADDRESS: ${{ secrets.DEV_IP_ADDRESS }}
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
         run: |
           az deployment group create -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam \

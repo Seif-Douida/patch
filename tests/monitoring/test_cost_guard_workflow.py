@@ -152,16 +152,20 @@ def test_infra_keeps_the_running_jobs_image() -> None:
     assert "patchpulse-jobs:latest" in text
 
 
-def test_infra_refuses_to_deploy_without_the_pipeline_secrets() -> None:
-    # An empty secret would reach Azure as an empty pp_writer password or hash salt.
+def test_infra_refuses_to_deploy_without_the_phase_1_secrets() -> None:
+    # An empty secret would reach Azure as an empty pp_writer password, hash salt or alert address.
     text = read("infra.yml")
-    check = step("infra.yml", "Require the pipeline secrets")
-    for secret in ("SQL_WRITER_PASSWORD", "AUTHOR_HASH_SALT"):
+    check = step("infra.yml", "Require the Phase 1 secrets")
+    for secret in ("SQL_WRITER_PASSWORD", "AUTHOR_HASH_SALT", "ALERT_EMAIL"):
         assert f"secrets.{secret}" in check
     assert "exit 1" in check
-    assert text.index("- name: Require the pipeline secrets") < text.index(
+    assert text.index("- name: Require the Phase 1 secrets") < text.index(
         "az deployment group what-if"
     )
+
+
+def test_infra_passes_the_alert_address_to_what_if_and_deploy() -> None:
+    assert read("infra.yml").count("ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}") == 3
 
 
 def test_guard_counts_both_jobs_executions() -> None:

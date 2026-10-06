@@ -37,6 +37,10 @@ param sqlWriterPassword string
 @secure()
 param authorHashSalt string
 
+@description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
+@secure()
+param alertEmail string
+
 var tags = {
   project: 'patchpulse'
   managedBy: 'bicep'
@@ -94,6 +98,15 @@ module jobs 'modules/jobs.bicep' = {
     sqlAdminPassword: sqlAdminPassword
     sqlWriterPassword: sqlWriterPassword
     authorHashSalt: authorHashSalt
+  }
+}
+
+module alerts 'modules/alerts.bicep' = {
+  name: 'alerts'
+  params: {
+    tags: tags
+    apiId: containerApps.outputs.apiId
+    alertEmail: alertEmail
   }
 }
 

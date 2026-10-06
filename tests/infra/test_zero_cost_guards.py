@@ -26,6 +26,8 @@ ALLOWED_TYPES = frozenset(
         "microsoft.resources/deployments",
         "microsoft.operationalinsights/workspaces",
         "microsoft.insights/components",
+        "microsoft.insights/actiongroups",  # ADR-017 option B
+        "microsoft.insights/metricalerts",  # ADR-017 option B
         "microsoft.app/managedenvironments",
         "microsoft.app/containerapps",
         "microsoft.app/jobs",  # ADR-009
@@ -233,6 +235,48 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
                 if re.search(r"PASSWORD|SALT|PRIVATE_KEY", variable["name"]):
                     assert "secretRef" in variable, f"{job['name']}: {variable['name']}"
                     assert "value" not in variable, f"{job['name']}: {variable['name']}"
+
+
+def test_metric_alerts_stay_inside_the_free_time_series(resources: list[dict[str, Any]]) -> None:
+    # The first 10 monitored metric time series a month are free. One resource, one metric and no
+    # dimension split is one time series; a dimension would multiply them.
+    series = 0
+    for alert in of_type(resources, "microsoft.insights/metricalerts"):
+        properties = alert["properties"]
+        assert len(properties["scopes"]) == 1, alert["name"]
+        criteria = properties["criteria"]["allOf"]
+        for criterion in criteria:
+            assert not criterion.get("dimensions"), alert["name"]
+        series += len(criteria)
+    assert series <= 10
+
+
+def test_action_groups_only_send_email(resources: list[dict[str, Any]]) -> None:
+    # SMS and voice calls are billed from the first one; email is free up to 1,000 a month.
+    for group in of_type(resources, "microsoft.insights/actiongroups"):
+        receivers = {
+            name
+            for name, value in group["properties"].items()
+            if name.endswith("Receivers") and value
+        }
+        assert receivers == {"emailReceivers"}, group["name"]
+
+
+def test_backup_alert_matches_the_cost_guard_burn_rate_rule(
+    resources: list[dict[str, Any]],
+) -> None:
+    # cost-guard runs only every few hours (measured 2026-10-05), so Azure itself watches the same
+    # rule and emails: a pp-api replica up for 45 of the last 60 minutes (max 1 replica).
+    (alert,) = of_type(resources, "microsoft.insights/metricalerts")
+    properties = alert["properties"]
+    (criterion,) = properties["criteria"]["allOf"]
+    assert criterion["metricName"] == "Replicas"
+    assert criterion["timeAggregation"] == "Average"
+    assert criterion["operator"] == "GreaterThanOrEqual"
+    assert literal_number(criterion["threshold"]) == 0.75
+    assert properties["windowSize"] == "PT1H"
+    assert properties["enabled"] is True
+    assert properties["actions"], "the alert must notify someone"
 
 
 def test_static_web_app_is_free_plan(resources: list[dict[str, Any]]) -> None:
