@@ -1,0 +1,589 @@
+/* PatchPulse. One accent (the pulse blue, categorical slot 1 of the validated chart palette) for
+   the data that is the point: the positive share. Everything else is ink and neutral grey.
+   Dark mode is its own set of steps, not an inversion. */
+
+:root {
+  color-scheme: light;
+  --page: #f6f7f5;
+  --surface: #fcfcfb;
+  --ink: #151a21;
+  --ink-2: #4b5260;
+  --ink-3: #6f757e;
+  --hairline: #e1e2dc;
+  --axis: #c3c4bd;
+  --pulse: #2a78d6;
+  --pulse-wash: rgb(42 120 214 / 0.16);
+  --volume: #aeb1aa;
+  --marker: #4b5260;
+  --marker-soft: #b8bbb4;
+  --sale: #ecebe4;
+  --chip: #ecedea;
+  --focus: #2a78d6;
+
+  --step--1: 0.875rem;
+  --step-0: 1.0625rem;
+  --step-1: 1.25rem;
+  --step-2: 1.6rem;
+  --step-3: 2.25rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #121417;
+    --surface: #1a1c20;
+    --ink: #f1f2f4;
+    --ink-2: #c4c7cd;
+    --ink-3: #9a9fa8;
+    --hairline: #2b2e34;
+    --axis: #40444b;
+    --pulse: #3987e5;
+    --pulse-wash: rgb(57 135 229 / 0.24);
+    --volume: #646a72;
+    --marker: #c4c7cd;
+    --marker-soft: #565b63;
+    --sale: #24272c;
+    --chip: #25282d;
+    --focus: #6da7ec;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--page);
+  color: var(--ink);
+}
+
+body {
+  margin: 0 auto;
+  max-width: 68rem;
+  padding: 0 clamp(16px, 4vw, 40px);
+  font-size: var(--step-0);
+  line-height: 1.5;
+  background: var(--page);
+}
+
+h1,
+h2 {
+  line-height: 1.2;
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--step-3);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: var(--step-1);
+  font-weight: 700;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: var(--axis);
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Header and footer */
+
+.site-header {
+  padding: 1.25rem 0 0;
+}
+
+.wordmark {
+  font-weight: 700;
+  font-size: var(--step-1);
+  text-decoration: none;
+}
+
+.site-footer {
+  margin: 4rem 0 0;
+  padding: 1.5rem 0 2.5rem;
+  border-top: 1px solid var(--hairline);
+  color: var(--ink-2);
+  font-size: var(--step--1);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 2rem;
+}
+
+/* Home */
+
+.intro {
+  padding: 3.5rem 0 2.5rem;
+  max-width: 44rem;
+}
+
+.intro p {
+  margin-top: 1rem;
+  color: var(--ink-2);
+}
+
+.game-list {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.game-list thead th {
+  white-space: nowrap;
+  text-align: left;
+  font-size: var(--step--1);
+  font-weight: 400;
+  color: var(--ink-3);
+  padding: 0 1rem 0.5rem 0;
+}
+
+.game-list tbody tr {
+  border-top: 1px solid var(--hairline);
+}
+
+.game-list tbody th,
+.game-list td {
+  text-align: left;
+  vertical-align: middle;
+  padding: 1.25rem 1.5rem 1.25rem 0;
+}
+
+.game-name {
+  display: block;
+  font-size: var(--step-1);
+  font-weight: 700;
+}
+
+.game-genres {
+  display: block;
+  font-weight: 400;
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+.game-pulse {
+  width: 216px;
+}
+
+.pulse {
+  display: block;
+  overflow: visible;
+}
+
+.pulse-line {
+  fill: none;
+  stroke: var(--pulse);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.pulse-dot {
+  fill: var(--pulse);
+  stroke: var(--page);
+  stroke-width: 2;
+}
+
+.pulse-empty {
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+.game-share {
+  width: 11rem;
+}
+
+.share-figure {
+  display: block;
+  font-size: var(--step-2);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.share-count {
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+@media (max-width: 640px) {
+  .game-list thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .game-list tbody tr {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    padding: 1rem 0;
+    gap: 0.5rem 1rem;
+  }
+
+  .game-list tbody th,
+  .game-list td {
+    padding: 0;
+  }
+
+  .game-list tbody th {
+    grid-column: 1 / -1;
+  }
+
+  .game-pulse {
+    width: auto;
+  }
+
+  .game-share {
+    width: auto;
+    text-align: right;
+  }
+}
+
+/* Game page */
+
+.breadcrumb {
+  padding: 2rem 0 0;
+  font-size: var(--step--1);
+}
+
+.game-header {
+  padding: 1rem 0 2rem;
+}
+
+.game-header .game-genres {
+  margin-top: 0.25rem;
+}
+
+.game-latest {
+  margin-top: 1.5rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  color: var(--ink-2);
+}
+
+.range-filter {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+
+.range-filter button {
+  font: inherit;
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  background: transparent;
+  border: 1px solid var(--axis);
+  border-radius: 999px;
+  padding: 0.3rem 0.9rem;
+  cursor: pointer;
+}
+
+.range-filter button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--chip);
+  border-color: var(--ink-3);
+  font-weight: 700;
+}
+
+.chart {
+  margin: 0 0 2rem;
+  padding: 1.25rem 1.25rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+}
+
+.chart figcaption {
+  margin-bottom: 0.75rem;
+}
+
+.chart-note {
+  margin-top: 0.25rem;
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+.chart-frame-share {
+  height: 300px;
+}
+
+.chart-frame-volume {
+  height: 150px;
+}
+
+.chart-key {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.25rem;
+  font-size: var(--step--1);
+  color: var(--ink-2);
+}
+
+.chart-key li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.key-line {
+  width: 18px;
+  height: 2px;
+  background: var(--pulse);
+  border-radius: 1px;
+}
+
+.key-band {
+  width: 14px;
+  height: 14px;
+  background: var(--pulse-wash);
+  border-radius: 3px;
+}
+
+.key-marker {
+  width: 1px;
+  height: 14px;
+  background: var(--marker-soft);
+}
+
+.key-marker-treatment {
+  width: 2px;
+  background: var(--marker);
+}
+
+.key-sale {
+  width: 14px;
+  height: 14px;
+  background: var(--sale);
+  border: 1px solid var(--axis);
+  border-radius: 3px;
+}
+
+/* Recharts: its default colours are replaced through its class names. */
+
+.chart .recharts-cartesian-grid-horizontal line {
+  stroke: var(--hairline);
+}
+
+.chart .recharts-cartesian-axis-line {
+  stroke: var(--axis);
+}
+
+.chart .recharts-cartesian-axis-tick-value {
+  fill: var(--ink-3);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.share-line .recharts-line-curve {
+  stroke: var(--pulse);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.share-band .recharts-area-area {
+  fill: var(--pulse);
+  fill-opacity: 0.16;
+}
+
+.share-band .recharts-area-curve {
+  stroke: none;
+}
+
+.share-dot,
+.recharts-active-dot circle {
+  fill: var(--pulse);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.volume-bar .recharts-bar-rectangle path {
+  fill: var(--volume);
+}
+
+.marker .recharts-reference-line-line,
+.marker line {
+  stroke: var(--marker-soft);
+  stroke-width: 1;
+}
+
+.marker-treatment .recharts-reference-line-line,
+.marker-treatment line {
+  stroke: var(--marker);
+  stroke-width: 2;
+}
+
+.sale-band .recharts-reference-area-rect,
+.sale-band rect,
+.sale-band path {
+  fill: var(--sale);
+  fill-opacity: 1;
+  stroke: none;
+}
+
+.chart .recharts-tooltip-cursor {
+  stroke: var(--ink-3);
+  stroke-width: 1;
+}
+
+.chart-volume .recharts-tooltip-cursor {
+  fill: var(--ink-3);
+  fill-opacity: 0.12;
+  stroke: none;
+}
+
+/* The day readout: the value leads, the label follows. */
+
+.day-details {
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  max-width: 18rem;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.08);
+}
+
+.day-details strong {
+  color: var(--ink);
+  font-size: var(--step-1);
+}
+
+.day-date {
+  color: var(--ink);
+  font-weight: 700;
+  margin-bottom: 0.2rem;
+}
+
+.day-quiet {
+  color: var(--ink-3);
+}
+
+.day-posts {
+  margin: 0.4rem 0 0;
+  padding: 0.4rem 0 0;
+  border-top: 1px solid var(--hairline);
+  list-style: none;
+  color: var(--ink);
+}
+
+/* Tables */
+
+.table-view {
+  margin: 0 0 3rem;
+}
+
+.table-view summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: var(--step--1);
+}
+
+.table-scroll {
+  max-height: 28rem;
+  overflow: auto;
+  margin-top: 0.75rem;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+.table-view table,
+.posts table {
+  width: 100%;
+  font-size: var(--step--1);
+}
+
+.table-view th,
+.table-view td,
+.posts th,
+.posts td {
+  text-align: left;
+  padding: 0.5rem 1rem 0.5rem 0;
+  border-bottom: 1px solid var(--hairline);
+  font-variant-numeric: tabular-nums;
+  vertical-align: top;
+}
+
+.table-view thead th,
+.posts thead th {
+  color: var(--ink-3);
+  font-weight: 400;
+  position: sticky;
+  top: 0;
+  background: var(--page);
+}
+
+.posts {
+  margin-top: 1rem;
+}
+
+.posts h2 {
+  margin-bottom: 1rem;
+}
+
+.posts td:first-child {
+  white-space: nowrap;
+}
+
+.kind {
+  display: inline-block;
+  width: 1px;
+  height: 0.9em;
+  margin-right: 0.5rem;
+  vertical-align: -0.1em;
+  background: var(--marker-soft);
+}
+
+.kind-treatment {
+  width: 2px;
+  background: var(--marker);
+}
+
+.method-note {
+  margin-top: 1rem;
+  max-width: 44rem;
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+@media (max-width: 640px) {
+  .chart {
+    padding: 1rem 0.75rem 0.5rem;
+  }
+}
