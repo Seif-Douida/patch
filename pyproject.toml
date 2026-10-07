@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 patchpulse-pipeline = "patchpulse.pipeline.cli:main"
+patchpulse-ml = "patchpulse.models.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13"]
@@ -43,7 +44,8 @@ mypy_path = "src,tests/support"
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["mssql_python", "mssql_python.*", "statsmodels", "statsmodels.*"]
+module = ["mssql_python", "mssql_python.*", "sklearn", "sklearn.*", "statsmodels", "statsmodels.*",
+    "streamlit", "streamlit.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -52,20 +54,37 @@ addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
 pythonpath = ["tests/support"]
 markers = [
     "integration: needs the SQL Server container (skipped locally without it, required in CI)",
+    "gpu: needs PyTorch with CUDA (Phase 2 training; local only, skipped wherever it's absent)",
 ]
 
 [dependency-groups]
-# The API image syncs without groups; the jobs image syncs `pipeline`; dev gets everything.
+# The API image syncs without groups; the jobs image syncs `pipeline`; dev gets everything but the
+# local-only Phase 2 groups (`lab`, `gpu`).
 dev = [
     { include-group = "pipeline" },
+    { include-group = "ml" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
     "pre-commit>=4.6.2",
+    "pandas-stubs>=3.0.5.260914",
     "pytest>=9.1.1",
     "python-dotenv>=1.2.3",
     "ruff>=0.16.9",
+    "scipy-stubs>=1.18.1.1",
     "statsmodels>=0.15.0",
     "types-pyyaml>=6.0.12.20260906",
+]
+# Phase 2, local only and never in dev or CI: Seif's labeling app (design D3).
+lab = [
+    "streamlit>=1.65.0",
+]
+# Phase 2, run on Seif's machine: the snapshot, labeling and training (design D1, D5).
+ml = [
+    "azure-identity>=1.26.0",
+    "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.18.1",
 ]
 pipeline = [
     "alembic>=1.20.0",

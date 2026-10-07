@@ -34,3 +34,6 @@ Thumbs.db
 # dbt artefacts (the pipeline writes them to a temp dir; these catch manual runs)
 dbt/target/
 dbt/logs/
+
+# Phase 2: the local review snapshot, teacher cache and model builds (review text never committed).
+data/local/

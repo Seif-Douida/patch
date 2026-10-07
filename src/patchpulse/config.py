@@ -6,6 +6,8 @@ secrets, which Bicep fills from GitHub environment secrets. Nothing secret is st
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,10 +39,37 @@ class Settings(BaseSettings):
     github_app_private_key: SecretStr | None = None
 
 
-def get_settings(*, env_file: str | None = ".env") -> Settings:
-    """Load settings; a missing or invalid value raises `SettingsError` naming its env var."""
+class LabSettings(BaseSettings):
+    """Phase 2's local work on Seif's machine (`patchpulse-ml`): the snapshot, labeling, training.
+
+    MLflow reads its own standard MLFLOW_TRACKING_* variables; nothing here reaches Azure.
+    """
+
+    model_config = SettingsConfigDict(env_prefix=ENV_PREFIX, extra="ignore")
+
+    # The Azure SQL server's host name (not secret); only `pull` needs it.
+    pull_host: str | None = None
+    pull_database: str = "patchpulse"
+    # Review text lives here and is never committed (.gitignore).
+    data_dir: Path = Path("data/local")
+    # Review ids, splits and labels only: committed (spec C4).
+    gold_dir: Path = Path("data/gold")
+    gemini_api_key: SecretStr | None = None
+
+
+def _load[T: BaseSettings](cls: type[T], env_file: str | None) -> T:
     try:
-        return Settings(_env_file=env_file)  # type: ignore[call-arg]
+        return cls(_env_file=env_file)
     except ValidationError as error:
         names = sorted({f"{ENV_PREFIX}{str(issue['loc'][0]).upper()}" for issue in error.errors()})
         raise SettingsError(f"missing or invalid settings: {', '.join(names)}") from None
+
+
+def get_settings(*, env_file: str | None = ".env") -> Settings:
+    """Load settings; a missing or invalid value raises `SettingsError` naming its env var."""
+    return _load(Settings, env_file)
+
+
+def get_lab_settings(*, env_file: str | None = ".env") -> LabSettings:
+    """Load the local Phase 2 settings, naming any invalid env var like `get_settings`."""
+    return _load(LabSettings, env_file)
