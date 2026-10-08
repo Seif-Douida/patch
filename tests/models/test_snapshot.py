@@ -200,3 +200,15 @@ def test_firewall_and_login_errors_name_the_fix() -> None:
     assert login_help is not None
     assert "az login" in login_help
     assert explain_pull_error(RuntimeError("something else")) is None
+
+
+def test_azure_sign_in_logs_are_quiet() -> None:
+    # azure-identity logs each credential it tries and dumps HTTP requests at INFO.
+    import logging
+
+    from patchpulse.models.cli import configure_logging
+
+    configure_logging()
+
+    assert logging.getLogger("azure").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("patchpulse").getEffectiveLevel() == logging.INFO

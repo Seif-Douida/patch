@@ -49,6 +49,15 @@ PULL_COST = (
 )
 
 
+def configure_logging() -> None:
+    """INFO for PatchPulse; azure-identity's credential lines and HTTP dumps only on warnings."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    logging.getLogger("patchpulse").setLevel(logging.INFO)
+    logging.getLogger("azure").setLevel(logging.WARNING)
+
+
 def _pull(settings: LabSettings, *, yes: bool) -> int:
     if settings.pull_host is None:
         raise SettingsError("missing or invalid settings: PP_PULL_HOST")
@@ -187,9 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     gold.add_parser("agreement", help="compare Seif's blind audit with Claude's labels")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    configure_logging()
     try:
         settings = get_lab_settings()
         if args.command == "pull":
