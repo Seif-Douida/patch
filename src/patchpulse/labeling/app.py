@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -26,35 +25,14 @@ from patchpulse.labeling.audit import (
     AuditSession,
     as_plain_text,
     relabel_selection,
+    review_lookup,
 )
 from patchpulse.labeling.gold import AUDIT_FILE
 from patchpulse.labeling.taxonomy import ASPECTS
-from patchpulse.models.snapshot import load_snapshot
 
 GUIDELINES = Path("docs/labeling-guidelines.md")
 RELABEL_SEED = 20261024
 MODES = ("Audit (150 reviews)", "Re-label (30 reviews, 14+ days later)")
-
-
-@st.cache_data
-def _reviews(data_dir: str) -> tuple[dict[int, dict[str, Any]], dict[int, str]]:
-    snapshot = load_snapshot(Path(data_dir))
-    columns = ["review_id", "appid", "language", "voted_up", "text"]
-    reviews = {
-        int(review_id): {
-            "appid": int(appid),
-            "language": str(language),
-            "voted_up": bool(up),
-            "text": str(text),
-        }
-        for review_id, appid, language, up, text in snapshot.reviews[columns].itertuples(
-            index=False
-        )
-    }
-    names = {
-        int(a): str(n) for a, n in zip(snapshot.games["appid"], snapshot.games["name"], strict=True)
-    }
-    return reviews, names
 
 
 def _session(mode: str) -> AuditSession:
@@ -87,13 +65,12 @@ def main() -> None:
     if review_id is None:
         st.success("This session is complete. Thank you. Close the tab whenever you like.")
         return
-    reviews, names = _reviews(str(get_lab_settings().data_dir))
-    review = reviews[review_id]
-    thumbs = "thumbs up" if review["voted_up"] else "thumbs down"
-    st.subheader(names.get(int(review["appid"]), str(review["appid"])))
-    st.caption(f"{review['language']}, {thumbs}, review {review_id}")
+    review = review_lookup(str(get_lab_settings().data_dir)).reviews[review_id]
+    thumbs = "thumbs up" if review.voted_up else "thumbs down"
+    st.subheader(review.game)
+    st.caption(f"{review.language}, {thumbs}, review {review_id}")
     # Normal-contrast text in a fixed-height box that scrolls, so the buttons stay on screen.
-    st.container(height=230, border=True).markdown(as_plain_text(str(review["text"])))
+    st.container(height=230, border=True).markdown(as_plain_text(review.text))
 
     selected: set[str] = st.session_state.setdefault(f"selected-{review_id}", set())
     columns = st.columns(2)

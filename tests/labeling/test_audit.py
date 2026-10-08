@@ -12,7 +12,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from patchpulse.labeling.audit import AuditSession, as_plain_text, relabel_selection
+from patchpulse.labeling.audit import (
+    AuditSession,
+    ReviewView,
+    as_plain_text,
+    relabel_selection,
+    review_lookup,
+)
 
 APP = Path(__file__).resolve().parents[2] / "src" / "patchpulse" / "labeling" / "app.py"
 AUDITED_AT = datetime(2026, 10, 10, 18, 0, tzinfo=UTC)
@@ -113,3 +119,34 @@ def test_review_text_is_shown_as_written() -> None:
     shown = as_plain_text("a *b* [c](d)\n# not a heading_")
 
     assert shown == r"a \*b\* \[c\]\(d\)" + "  \n" + r"\# not a heading\_"
+
+
+def test_review_lookup_reads_the_snapshot_once(tmp_path: Path) -> None:
+    # The app reruns its script on every key press; the lookup must stay cached across reruns.
+    reviews = pd.DataFrame(
+        {
+            "review_id": [7],
+            "appid": [900001],
+            "date": [date(2026, 9, 1)],
+            "language": ["french"],
+            "voted_up": [False],
+            "playtime_at_review": [10],
+            "timestamp_updated": [pd.Timestamp("2026-09-01")],
+            "last_seen_run_id": [1],
+            "text": ["Trop de bugs"],
+        }
+    )
+    reviews.to_parquet(tmp_path / "reviews.parquet", index=False)
+    pd.DataFrame({"appid": [900001], "name": ["Example Arena"], "genres": ["x"]}).to_parquet(
+        tmp_path / "games.parquet", index=False
+    )
+    pd.DataFrame(columns=["appid", "date", "title", "patch_type"]).to_parquet(
+        tmp_path / "patches.parquet", index=False
+    )
+
+    first = review_lookup(str(tmp_path))
+
+    assert first.reviews[7] == ReviewView(
+        game="Example Arena", language="french", voted_up=False, text="Trop de bugs"
+    )
+    assert review_lookup(str(tmp_path)) is first

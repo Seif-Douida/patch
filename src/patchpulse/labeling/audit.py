@@ -11,9 +11,11 @@ first answers.
 from __future__ import annotations
 
 import csv
+import functools
 import os
 import re
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +24,7 @@ import pandas as pd
 
 from patchpulse.labeling.gold import format_aspects, parse_aspects
 from patchpulse.labeling.taxonomy import ASPECTS
+from patchpulse.models.snapshot import load_snapshot
 
 SEIF_LABELS_FILE = "labels_seif.csv"
 SEIF_RELABEL_FILE = "relabel_seif.csv"
@@ -125,3 +128,45 @@ def relabel_selection(
     ids = sorted(int(i) for i in rows["review_id"])
     chosen = np.random.default_rng(seed).choice(ids, size=min(n, len(ids)), replace=False)
     return sorted(int(i) for i in chosen)
+
+
+@dataclass(frozen=True)
+class ReviewView:
+    """What the labeling app shows for a review, and nothing else (no split, no patch proximity)."""
+
+    game: str
+    language: str
+    voted_up: bool
+    text: str
+
+
+@dataclass(frozen=True)
+class ReviewLookup:
+    reviews: dict[int, ReviewView]
+
+
+@functools.lru_cache(maxsize=2)
+def review_lookup(data_dir: str) -> ReviewLookup:
+    """The snapshot as the app needs it, read once per process.
+
+    Streamlit reruns the app script on every key press, but imported modules stay loaded, so this
+    cache survives the reruns (a cache defined in the script itself would not).
+    """
+    snapshot = load_snapshot(Path(data_dir))
+    names = {
+        int(a): str(n) for a, n in zip(snapshot.games["appid"], snapshot.games["name"], strict=True)
+    }
+    columns = ["review_id", "appid", "language", "voted_up", "text"]
+    return ReviewLookup(
+        reviews={
+            int(review_id): ReviewView(
+                game=names.get(int(appid), str(appid)),
+                language=str(language),
+                voted_up=bool(voted_up),
+                text=str(text),
+            )
+            for review_id, appid, language, voted_up, text in snapshot.reviews[columns].itertuples(
+                index=False
+            )
+        }
+    )
