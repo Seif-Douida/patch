@@ -42,6 +42,10 @@ _COST_COLUMNS = ("totalCost", "Cost", "PreTaxCost")
 # The most a job replica may use (tests/infra/test_zero_cost_guards.py); assumed when an
 # execution doesn't say.
 MAX_JOB_VCPU = Decimal(1)
+# The longest any job may run (its replicaTimeout, capped by tests/infra/test_zero_cost_guards.py).
+# Azure stops an execution there, so none can use more, even one listed without an endTime: a failed
+# execution has none, and counting it "until now" tripped the guard on 2026-10-08.
+MAX_JOB_SECONDS = Decimal(2700)
 
 
 def month_to_date_cost(query_response: Mapping[str, Any]) -> Decimal:
@@ -80,13 +84,19 @@ def count_replica_minutes(
 def job_vcpu_seconds(
     executions: Iterable[Mapping[str, Any]], *, month_start: datetime, now: datetime
 ) -> Decimal:
-    """vCPU-seconds of job executions inside [month_start, now]; a running one counts until now."""
+    """vCPU-seconds of job executions inside [month_start, now].
+
+    One without an endTime (running, or failed: Azure records no end for those) counts until now,
+    but no execution counts beyond its start + MAX_JOB_SECONDS, where Azure stops it.
+    """
     total = Decimal(0)
     for item in executions:
         properties = item["properties"]
-        start = max(datetime.fromisoformat(properties["startTime"]), month_start)
+        started = datetime.fromisoformat(properties["startTime"])
+        start = max(started, month_start)
         end_time = properties.get("endTime")
-        end = min(datetime.fromisoformat(end_time), now) if end_time else now
+        latest_possible = started + timedelta(seconds=float(MAX_JOB_SECONDS))
+        end = min(datetime.fromisoformat(end_time) if end_time else now, now, latest_possible)
         if end <= start:
             continue
         containers = properties.get("template", {}).get("containers", [])

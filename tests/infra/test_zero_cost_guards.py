@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 
+from patchpulse.monitoring.cost_guard import MAX_JOB_SECONDS
+
 MAIN_BICEP = Path(__file__).resolve().parents[2] / "infra" / "main.bicep"
 
 # Every resource type the templates may create. Adding a type is a deliberate, reviewed change.
@@ -180,7 +182,8 @@ def test_container_apps_scale_to_zero_with_capped_size(resources: list[dict[str,
 def test_jobs_have_capped_size_timeout_and_no_retries(resources: list[dict[str, Any]]) -> None:
     for job in of_type(resources, "microsoft.app/jobs"):
         config = job["properties"]["configuration"]
-        assert literal_number(config["replicaTimeout"]) <= 2700, job["name"]
+        # The cost guard caps every execution at this (cost_guard.MAX_JOB_SECONDS): keep them equal.
+        assert literal_number(config["replicaTimeout"]) <= MAX_JOB_SECONDS, job["name"]
         # A retry doubles a failed night's usage; the next night catches up instead (ADR-009).
         assert literal_number(config["replicaRetryLimit"]) == 0, job["name"]
         assert literal_number(trigger_config(job)["parallelism"]) == 1, job["name"]

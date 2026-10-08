@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from patchpulse.monitoring.cost_guard import (
+    MAX_JOB_SECONDS,
     GuardDecision,
     count_replica_minutes,
     evaluate,
@@ -134,6 +135,22 @@ def test_running_execution_counts_until_now() -> None:
     running = execution(NOW - timedelta(minutes=12), None, status="Running")
 
     assert job_vcpu_seconds([running], month_start=START, now=NOW) == Decimal(12 * 60)
+
+
+def test_failed_execution_without_an_end_counts_at_most_the_job_timeout() -> None:
+    # 2026-10-08: Azure lists a failed execution with no endTime. Counted "until now", the run that
+    # failed at publish on 6 Oct grew by 3,600 vCPU-s an hour and tripped the guard 42 hours later
+    # with 169,488 vCPU-s, when the jobs had really used about 17,500. Azure stops any job at its
+    # replicaTimeout, so no execution can use more than that.
+    failed = execution(NOW - timedelta(hours=42), None, status="Failed")
+
+    assert job_vcpu_seconds([failed], month_start=START, now=NOW) == MAX_JOB_SECONDS
+
+
+def test_running_execution_counts_until_now_up_to_the_job_timeout() -> None:
+    stuck = execution(NOW - timedelta(hours=3), None, status="Running")
+
+    assert job_vcpu_seconds([stuck], month_start=START, now=NOW) == MAX_JOB_SECONDS
 
 
 def test_job_vcpu_comes_from_the_execution_or_the_one_vcpu_cap() -> None:
