@@ -6,7 +6,10 @@ through the model's `RequestLimiter`.
 
 - A 429 for a per-minute quota waits Google's `retryDelay` and tries again.
 - A 429 for the daily quota raises `QuotaExhaustedError` at once: only Pacific midnight helps.
-- 5xx answers (an overloaded model) and network errors back off and retry.
+- 5xx answers (an overloaded model) and network errors back off and retry, for about 4.5 minutes.
+- What still fails after every attempt raises `GeminiUnavailableError`: the service is down, not
+  the request wrong, so callers stop and resume later instead of reshaping the request. Only a
+  refused request (4xx) or a blocked prompt raises `GeminiError`.
 
 Nothing this module raises, logs or prints contains the key: Google's messages are scrubbed.
 """
@@ -28,8 +31,8 @@ log = logging.getLogger("patchpulse.labeling.gemini")
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT_S = 120.0
-MAX_ATTEMPTS = 4
-_BACKOFF_S = (5.0, 15.0, 45.0)
+MAX_ATTEMPTS = 6
+_BACKOFF_S = (5.0, 15.0, 45.0, 90.0, 120.0)  # 275 s in all: overloads usually pass by then
 _DEFAULT_RETRY_S = 60.0  # a per-minute 429 without a retryDelay
 _CHARS_PER_TOKEN = 3  # a cautious estimate until Google counts the real tokens
 
@@ -44,6 +47,18 @@ class GeminiResponse:
 
 class GeminiError(RuntimeError):
     """Google refused or failed a request; `status` is the HTTP status (0 for a network error)."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(f"{status}: {message}")
+        self.status = status
+        self.message = message
+
+
+class GeminiUnavailableError(RuntimeError):
+    """Google kept failing (5xx, rate limits, network) through every retry: try again later.
+
+    Not a `GeminiError`, so nobody mistakes an outage for a problem with the request.
+    """
 
     def __init__(self, status: int, message: str) -> None:
         super().__init__(f"{status}: {message}")
@@ -92,7 +107,7 @@ class GeminiClient:
         body = self._body(system, user, json_schema, max_output_tokens)
         estimate = (len(system) + len(user)) // _CHARS_PER_TOKEN + expected_output_tokens
         url = f"{API_ROOT}/models/{self.model.id}:generateContent"
-        last = GeminiError(0, "no attempt made")
+        last = GeminiUnavailableError(0, "no attempt made")
         for attempt in range(1, MAX_ATTEMPTS + 1):
             self.limiter.acquire(estimate)
             backoff = _BACKOFF_S[min(attempt, len(_BACKOFF_S)) - 1]
@@ -104,7 +119,7 @@ class GeminiClient:
                     timeout=REQUEST_TIMEOUT_S,
                 )
             except httpx2.TransportError as error:  # includes timeouts
-                last = GeminiError(0, f"network error: {type(error).__name__}")
+                last = GeminiUnavailableError(0, f"network error: {type(error).__name__}")
                 self._wait(attempt, backoff, last)
                 continue
             if response.status_code == httpx2.codes.OK:
@@ -112,22 +127,23 @@ class GeminiClient:
                 self.limiter.settle(answer.input_tokens + answer.output_tokens)
                 return answer
             problem = self._problem(response)
-            last = GeminiError(response.status_code, problem.message)
             if response.status_code == httpx2.codes.TOO_MANY_REQUESTS:
                 if any("PerDay" in quota for quota in problem.quota_ids):
                     raise QuotaExhaustedError(
                         f"{self.model.id}: Google's free daily quota is used up "
                         f"({problem.message}); it resets at midnight Pacific time"
                     )
+                last = GeminiUnavailableError(response.status_code, problem.message)
                 self._wait(attempt, problem.retry_delay_s or _DEFAULT_RETRY_S, last)
                 continue
             if response.status_code >= httpx2.codes.INTERNAL_SERVER_ERROR:
+                last = GeminiUnavailableError(response.status_code, problem.message)
                 self._wait(attempt, backoff, last)
                 continue
-            raise last
+            raise GeminiError(response.status_code, problem.message)
         raise last
 
-    def _wait(self, attempt: int, seconds: float, problem: GeminiError) -> None:
+    def _wait(self, attempt: int, seconds: float, problem: Exception) -> None:
         if attempt == MAX_ATTEMPTS:
             return
         log.warning(

@@ -228,11 +228,14 @@ def _teacher_bakeoff(settings: LabSettings, *, names: list[str] | None) -> int:
         make_client=make_client,
         cache=LabelCache(settings.data_dir / TEACHER_CACHE_FILE),
     )
-    stopped = [c.name for c in result.candidates if c.stopped_for_quota]
-    if stopped:
+    quota = [c.name for c in result.candidates if c.stopped_for_quota]
+    outage = [c.name for c in result.candidates if c.stopped_for_outage]
+    if quota or outage:
+        reasons = [f"the daily quota ran out for {', '.join(quota)}"] if quota else []
+        reasons += [f"Google stayed unavailable for {', '.join(outage)}"] if outage else []
         print(
-            f"patchpulse-ml: the daily quota ran out for {', '.join(stopped)}. The labels so far "
-            "are cached; run again after midnight Pacific time.",
+            f"patchpulse-ml: no verdict: {'; '.join(reasons)}. The labels so far are cached; "
+            "run the same command again later (after midnight Pacific time for the quota).",
             file=sys.stderr,
         )
         return 1
@@ -303,6 +306,8 @@ def _teacher_label(settings: LabSettings, *, candidate: str | None) -> int:
     log.info("silver positives:\n%s", prevalence_report(settings.data_dir, snapshot))
     if run.stopped_for_quota:
         log.warning("the daily quota ran out; run the same command after midnight Pacific time")
+    if run.stopped_for_outage:
+        log.warning("Google stayed unavailable; run the same command again later")
     return 0
 
 

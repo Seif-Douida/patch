@@ -12,7 +12,7 @@ import pytest
 
 from patchpulse.labeling import teacher
 from patchpulse.labeling.cache import LabelCache
-from patchpulse.labeling.gemini import GeminiError, GeminiResponse
+from patchpulse.labeling.gemini import GeminiError, GeminiResponse, GeminiUnavailableError
 from patchpulse.labeling.limits import QuotaExhaustedError
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import (
@@ -198,3 +198,29 @@ def test_prompt_defines_every_aspect_and_its_hash_tracks_prompt_and_cleaning(
     assert len(original) == 64
     monkeypatch.setattr(teacher, "CLEANING_VERSION", "c2")
     assert prompt_hash() != original
+
+
+def test_an_outage_stops_the_run_without_splitting_or_skipping(tmp_path: Path) -> None:
+    # Seen live on 10 Oct: a 503 storm made a batch go one review at a time and skip one review.
+    cache = LabelCache(tmp_path / "teacher_labels.sqlite")
+    reviews = [review(i, f"review number {i}") for i in range(1, 61)]
+    outage = GeminiUnavailableError(503, "This model is currently experiencing high demand.")
+    model = FakeModel([answer({a: ["content"] for a in range(1, 21)}), outage])
+
+    run = label_reviews(model, cache, reviews, model=MODEL)
+
+    assert run == LabelRun(
+        labeled=20, cached=0, remaining=40, stopped_for_quota=False, stopped_for_outage=True
+    )
+    assert len(model.users) == 2  # no review sent alone
+    stored = cache.get_many(range(1, 61), model=MODEL, prompt_hash=prompt_hash())
+    assert sorted(stored) == list(range(1, 21))  # nothing skipped or guessed
+
+
+def test_an_outage_during_a_single_review_is_not_a_skip() -> None:
+    outage = GeminiUnavailableError(500, "Internal error encountered.")
+    model = FakeModel(["bad", "bad again", answer({1: ["content"]}), outage])
+    (batch,) = make_batches([review(31), review(32)])
+
+    with pytest.raises(GeminiUnavailableError):
+        label_batch(model, batch)

@@ -66,6 +66,7 @@ class CandidateResult:
     precision: dict[str, float] = field(default_factory=dict)
     recall: dict[str, float] = field(default_factory=dict)
     stopped_for_quota: bool = False
+    stopped_for_outage: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,7 @@ def run_bakeoff(
                 precision={c: float(v) for c, v in zip(ASPECTS, scores.precision, strict=True)},
                 recall={c: float(v) for c, v in zip(ASPECTS, scores.recall, strict=True)},
                 stopped_for_quota=run.stopped_for_quota,
+                stopped_for_outage=run.stopped_for_outage,
             )
         )
     paired = []

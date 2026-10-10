@@ -12,7 +12,13 @@ import httpx2
 import pytest
 from fake_clock import FakeClock
 
-from patchpulse.labeling.gemini import GeminiClient, GeminiError, GeminiResponse
+from patchpulse.labeling.gemini import (
+    MAX_ATTEMPTS,
+    GeminiClient,
+    GeminiError,
+    GeminiResponse,
+    GeminiUnavailableError,
+)
 from patchpulse.labeling.limits import QuotaExhaustedError, RequestLimiter
 from patchpulse.labeling.teachers import ModelConfig
 
@@ -172,21 +178,43 @@ def test_daily_quota_raises_quota_exhausted(tmp_path: Path) -> None:
     assert len(seen) == 1  # waiting 30 s would not help: the quota resets at Pacific midnight
 
 
-def test_server_errors_are_retried_then_reported(tmp_path: Path) -> None:
-    overloaded = httpx2.Response(
+def overloaded() -> httpx2.Response:
+    return httpx2.Response(
         503,
         json={
             "error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}
         },
     )
-    gemini, seen, clock = client(tmp_path, [overloaded] * 4)
 
-    with pytest.raises(GeminiError, match="503: The model is overloaded") as raised:
+
+def test_an_outage_that_outlasts_the_retries_is_not_a_request_error(tmp_path: Path) -> None:
+    # An overloaded model isn't the batch's fault: the teacher must stop, not split the batch.
+    gemini, seen, clock = client(tmp_path, [overloaded() for _ in range(MAX_ATTEMPTS)])
+
+    with pytest.raises(GeminiUnavailableError, match="503: The model is overloaded") as raised:
         gemini.generate("system", "user", json_schema=SCHEMA)
 
     assert raised.value.status == 503
-    assert len(seen) == 4
-    assert clock.slept  # backed off between attempts
+    assert not isinstance(raised.value, GeminiError)
+    assert len(seen) == MAX_ATTEMPTS == 6
+    assert sum(clock.slept) >= 4 * 60  # patient: minutes, not seconds, before giving up
+
+
+def test_an_overload_that_clears_is_retried_quietly(tmp_path: Path) -> None:
+    gemini, seen, _ = client(tmp_path, [overloaded(), overloaded(), ok()])
+
+    assert gemini.generate("system", "user", json_schema=SCHEMA).text == '{"labels": []}'
+    assert len(seen) == 3
+
+
+def test_rate_limits_that_never_clear_are_an_outage(tmp_path: Path) -> None:
+    per_minute = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+    gemini, _, _ = client(tmp_path, [quota_429(per_minute, "2s") for _ in range(MAX_ATTEMPTS)])
+
+    with pytest.raises(GeminiUnavailableError) as raised:
+        gemini.generate("system", "user", json_schema=SCHEMA)
+
+    assert raised.value.status == 429
 
 
 def test_api_key_never_appears_in_errors_logs_or_repr(

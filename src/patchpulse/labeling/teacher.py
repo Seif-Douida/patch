@@ -9,7 +9,7 @@
   answer gets one repair request quoting the error. If that fails too, each review goes alone, and a
   review that never validates is skipped, never guessed.
 - **Resuming:** `label_reviews` skips reviews already cached for this model and prompt, writes after
-  every batch, and stops cleanly when the daily quota runs out.
+  every batch, and stops cleanly when the daily quota runs out or Google stays unavailable.
 
 Nothing here logs review text: only ids, counts and validation errors.
 """
@@ -29,7 +29,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from patchpulse.labeling.cache import LabelCache
-from patchpulse.labeling.gemini import GeminiError, GeminiResponse
+from patchpulse.labeling.gemini import GeminiError, GeminiResponse, GeminiUnavailableError
 from patchpulse.labeling.limits import QuotaExhaustedError
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.models.snapshot import Snapshot
@@ -124,6 +124,7 @@ class LabelRun:
     cached: int
     remaining: int
     stopped_for_quota: bool
+    stopped_for_outage: bool = False  # Google kept failing; rerun later
 
 
 class _Item(BaseModel):
@@ -311,6 +312,20 @@ def label_reviews(
         except QuotaExhaustedError as error:
             log.warning("stopped after %d of %d batches: %s", number - 1, len(batches), error)
             return LabelRun(labeled, cached, len(todo) - labeled, stopped_for_quota=True)
+        except GeminiUnavailableError as error:
+            log.warning(
+                "stopped after %d of %d batches: Google unavailable (%s)",
+                number - 1,
+                len(batches),
+                error,
+            )
+            return LabelRun(
+                labeled,
+                cached,
+                len(todo) - labeled,
+                stopped_for_quota=False,
+                stopped_for_outage=True,
+            )
         cache.put_many(
             {label.review_id: label.aspects for label in labels},
             model=model,

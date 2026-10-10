@@ -22,7 +22,7 @@ from patchpulse.labeling.bakeoff import (
     run_bakeoff,
 )
 from patchpulse.labeling.cache import LabelCache
-from patchpulse.labeling.gemini import GeminiResponse
+from patchpulse.labeling.gemini import GeminiResponse, GeminiUnavailableError
 from patchpulse.labeling.teacher import ReviewIn
 from patchpulse.labeling.teachers import ModelConfig
 from patchpulse.models.cli import main
@@ -222,3 +222,25 @@ def test_bakeoff_command_needs_the_gemini_key(
     assert main(["teacher", "bakeoff"]) == 2
     assert "PP_GEMINI_API_KEY" in capsys.readouterr().err
     assert requests == []
+
+
+class Down:
+    def generate(self, *args: object, **kwargs: object) -> GeminiResponse:
+        raise GeminiUnavailableError(503, "This model is currently experiencing high demand.")
+
+
+def test_an_outage_is_recorded_so_no_verdict_is_drawn(tmp_path: Path) -> None:
+    reviews, gold = dev_set(20)
+
+    result = run_bakeoff(
+        {"down": model("m-down")},
+        reviews,
+        gold,
+        make_client=lambda name, _: Down(),
+        cache=LabelCache(tmp_path / "cache.sqlite"),
+        samples=50,
+    )
+
+    (down,) = result.candidates
+    assert down.stopped_for_outage
+    assert down.missing == 20
