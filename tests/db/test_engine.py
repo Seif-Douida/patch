@@ -7,7 +7,12 @@ from mssql_python.exceptions import OperationalError as DriverOperationalError
 from sqlalchemy.exc import OperationalError
 
 from patchpulse.config import Settings
-from patchpulse.db.engine import connect_with_resume_retry, is_transient, make_engine
+from patchpulse.db.engine import (
+    connect_with_resume_retry,
+    is_transient,
+    make_engine,
+    make_entra_engine,
+)
 
 # Microsoft's text for error 40613, returned while a paused serverless database resumes.
 RESUMING = (
@@ -123,3 +128,15 @@ def test_make_engine_trusts_the_certificate_only_when_asked() -> None:
     engine = make_engine(settings(db_trust_cert=True))
 
     assert engine.url.query["TrustServerCertificate"] == "yes"
+
+
+def test_entra_engine_reuses_az_login_and_holds_no_password() -> None:
+    # Phase 2's `pull` signs in as Seif through his `az login` (DefaultAzureCredential); device
+    # code sign-in is blocked by the tenant's security defaults.
+    engine = make_entra_engine("sql-x.database.windows.net", "patchpulse")
+
+    assert engine.url.drivername == "mssql+mssqlpython"
+    assert engine.url.query["Authentication"] == "ActiveDirectoryDefault"
+    assert engine.url.query["Encrypt"] == "yes"
+    assert engine.url.password is None
+    assert engine.url.database == "patchpulse"

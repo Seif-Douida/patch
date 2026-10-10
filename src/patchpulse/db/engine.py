@@ -53,6 +53,26 @@ def make_engine(settings: Settings) -> Engine:
     return create_engine(url, pool_pre_ping=True)
 
 
+def make_entra_engine(host: str, database: str) -> Engine:
+    """An engine that signs in as the person at the keyboard, for Phase 2's local `pull`.
+
+    `ActiveDirectoryDefault` lets mssql-python use azure-identity's DefaultAzureCredential, which
+    reuses a working `az login`. Device-code sign-in is blocked by the tenant's security defaults.
+    """
+    url = URL.create(
+        "mssql+mssqlpython",
+        host=host,
+        port=1433,
+        database=database,
+        query={
+            "Authentication": "ActiveDirectoryDefault",
+            "Encrypt": "yes",
+            "TrustServerCertificate": "no",
+        },
+    )
+    return create_engine(url, pool_pre_ping=True)
+
+
 def is_transient(error: BaseException) -> bool:
     if not isinstance(error, DBAPIError):
         return False
