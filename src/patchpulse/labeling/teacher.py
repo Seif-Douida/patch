@@ -43,6 +43,8 @@ MAX_INPUT_TOKENS = 4000  # for the reviews; the system prompt comes on top
 _CHARS_PER_TOKEN = 3  # cautious; Google's real count replaces it in the limiter
 _OFF_TOPIC = "off_topic"
 PROGRESS_EVERY = 1000  # reviews between progress lines
+# Precedes the reviews' JSON array, which always ends the user message.
+REVIEWS_MARKER = "Reviews (JSON array):\n"
 
 ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -236,7 +238,7 @@ def parse_answer(text: str, aliases: Sequence[int]) -> dict[int, frozenset[str]]
 
 def _user_message(batch: Batch) -> str:
     count = len(batch.review_ids)
-    return f"Label these {count} reviews. Reviews (JSON array):\n{batch.payload}"
+    return f"Label these {count} reviews. {REVIEWS_MARKER}{batch.payload}"
 
 
 def _ask(client: TextModel, batch: Batch) -> dict[int, frozenset[str]]:

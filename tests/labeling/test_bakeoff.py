@@ -23,7 +23,7 @@ from patchpulse.labeling.bakeoff import (
 )
 from patchpulse.labeling.cache import LabelCache
 from patchpulse.labeling.gemini import GeminiResponse, GeminiUnavailableError
-from patchpulse.labeling.teacher import ReviewIn
+from patchpulse.labeling.teacher import REVIEWS_MARKER, ReviewIn
 from patchpulse.labeling.teachers import ModelConfig
 from patchpulse.models.cli import main
 
@@ -58,7 +58,7 @@ class Teacher:
         expected_output_tokens: int = 512,
         max_output_tokens: int = 4096,
     ) -> GeminiResponse:
-        reviews = json.loads(user[user.index("[") :])
+        reviews = json.loads(user.split(REVIEWS_MARKER, 1)[1])
         answer = [
             {"alias": r["alias"], "aspects": sorted(self.labels[int(r["text"].split()[1])])}
             for r in reviews
@@ -244,3 +244,43 @@ def test_an_outage_is_recorded_so_no_verdict_is_drawn(tmp_path: Path) -> None:
     (down,) = result.candidates
     assert down.stopped_for_outage
     assert down.missing == 20
+
+
+class RepeatsAnAliasOnce(Teacher):
+    """Its first answer repeats an alias, so the teacher sends a repair request (seen live)."""
+
+    def __init__(self, labels: Mapping[int, frozenset[str]]) -> None:
+        super().__init__(labels)
+        self.first = True
+
+    def generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        json_schema: Mapping[str, Any] | None,
+        expected_output_tokens: int = 512,
+        max_output_tokens: int = 4096,
+    ) -> GeminiResponse:
+        if self.first:
+            self.first = False
+            repeated = [{"alias": 1, "aspects": []}, {"alias": 1, "aspects": []}]
+            return GeminiResponse(json.dumps({"labels": repeated}), 100, 10, "STOP")
+        return super().generate(system, user, json_schema=json_schema)
+
+
+def test_a_repair_request_is_counted_like_any_other(tmp_path: Path) -> None:
+    reviews, gold = dev_set(20)
+
+    result = run_bakeoff(
+        {"fixer": model("m-fixer")},
+        reviews,
+        gold,
+        make_client=lambda name, _: RepeatsAnAliasOnce(gold),
+        cache=LabelCache(tmp_path / "cache.sqlite"),
+        samples=50,
+    )
+
+    (fixer,) = result.candidates
+    assert fixer.calls == 2
+    assert fixer.labeled == 20

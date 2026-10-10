@@ -16,6 +16,7 @@ from patchpulse.labeling.gemini import GeminiError, GeminiResponse, GeminiUnavai
 from patchpulse.labeling.limits import QuotaExhaustedError
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import (
+    REVIEWS_MARKER,
     AnswerError,
     LabelRun,
     ReviewIn,
@@ -67,8 +68,7 @@ def answer(labels: Mapping[int, Sequence[str]]) -> str:
 
 def sent_reviews(user: str) -> list[dict[str, Any]]:
     """The JSON array of reviews inside a user message."""
-    start = user.index("[")
-    parsed: list[dict[str, Any]] = json.loads(user[start:])
+    parsed: list[dict[str, Any]] = json.loads(user.split(REVIEWS_MARKER, 1)[1])
     return parsed
 
 

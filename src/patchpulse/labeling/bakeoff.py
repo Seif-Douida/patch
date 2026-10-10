@@ -13,7 +13,6 @@ wins. The report and the MLflow run hold ids, counts and scores only, never revi
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -93,13 +92,12 @@ class BakeoffResult:
 
 
 class _Meter:
-    """Counts a model's requests, tokens and reviews sent, for the throughput estimate."""
+    """Counts a model's requests and tokens, for the throughput estimate."""
 
     def __init__(self, model: TextModel) -> None:
         self.model = model
         self.calls = 0
         self.tokens = 0
-        self.reviews_sent = 0
 
     def generate(
         self,
@@ -119,7 +117,6 @@ class _Meter:
         )
         self.calls += 1
         self.tokens += answer.input_tokens + answer.output_tokens
-        self.reviews_sent += len(json.loads(user[user.index("[") :]))
         return answer
 
 

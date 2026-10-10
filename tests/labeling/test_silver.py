@@ -24,7 +24,7 @@ from patchpulse.labeling.silver import (
     write_silver_ids,
 )
 from patchpulse.labeling.taxonomy import ASPECTS
-from patchpulse.labeling.teacher import LabelRun
+from patchpulse.labeling.teacher import REVIEWS_MARKER, LabelRun
 from patchpulse.models.cli import main
 from patchpulse.models.snapshot import Snapshot
 
@@ -119,7 +119,7 @@ class Teacher:
         if self.calls_left is not None and self.calls == self.calls_left:
             raise QuotaExhaustedError("daily quota")
         self.calls += 1
-        aliases = [r["alias"] for r in json.loads(user[user.index("[") :])]
+        aliases = [r["alias"] for r in json.loads(user.split(REVIEWS_MARKER, 1)[1])]
         labels = [{"alias": a, "aspects": ["performance"]} for a in aliases]
         return GeminiResponse(json.dumps({"labels": labels}), 1_000, 100, "STOP")
 
