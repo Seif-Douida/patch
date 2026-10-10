@@ -1,0 +1,34 @@
+# Teacher candidates on the free-tier Gemini API (spec §7.3; no billing on the project: C2).
+# Limits (requests a minute, tokens a minute, requests a day) are from Seif's AI Studio dashboard on
+# 2026-10-06 (docs/budget.md). They are per project, so PatchPulse uses only `use_fraction` of each.
+# `id`, `json_mode` and `system_instruction` are what the Gemini API accepted in the live smoke test
+# (plan Task 7, 2026-10-10): all three accept both. Gemma 4 31B's JSON mode isn't strict (it added a
+# stray code fence after valid JSON), so answers are always parsed and validated.
+candidates:
+  gemma-4-31b:
+    id: gemma-4-31b-it
+    rpm: 30
+    tpm: 16000
+    rpd: 14400
+    json_mode: true
+    system_instruction: true
+    use_fraction: 0.5
+  gemma-4-26b-a4b:
+    id: gemma-4-26b-a4b-it
+    rpm: 30
+    tpm: 16000
+    rpd: 14400
+    json_mode: true
+    system_instruction: true
+    use_fraction: 0.5
+  gemini-3.5-flash-lite:
+    id: gemini-3.5-flash-lite
+    rpm: 15
+    tpm: 250000
+    rpd: 500
+    json_mode: true
+    system_instruction: true
+    use_fraction: 0.5
+
+# The bake-off winner (plan Task 9).
+teacher: null
