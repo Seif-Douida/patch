@@ -18,6 +18,7 @@ from patchpulse.labeling.audit import (
     as_plain_text,
     relabel_selection,
     review_lookup,
+    scroll_hint,
 )
 
 APP = Path(__file__).resolve().parents[2] / "src" / "patchpulse" / "labeling" / "app.py"
@@ -119,6 +120,16 @@ def test_review_text_is_shown_as_written() -> None:
     shown = as_plain_text("a *b* [c](d)\n# not a heading_")
 
     assert shown == r"a \*b\* \[c\]\(d\)" + "  \n" + r"\# not a heading\_"
+
+
+def test_long_reviews_say_the_box_scrolls() -> None:
+    # In the audit, a combat paragraph below the fold of the 230 px box went unseen.
+    assert scroll_hint("Great game, smooth combat.") is None
+    hint = scroll_hint("x" * 2088)
+
+    assert hint is not None
+    assert "2,088 characters" in hint
+    assert "scroll" in hint
 
 
 def test_review_lookup_reads_the_snapshot_once(tmp_path: Path) -> None:

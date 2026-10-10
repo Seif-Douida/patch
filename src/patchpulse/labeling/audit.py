@@ -42,6 +42,17 @@ def as_plain_text(text: str) -> str:
     return _MARKDOWN_SPECIAL.sub(r"\\\1", text).replace("\n", "  \n")
 
 
+# About what the app's 230 px review box shows before it scrolls.
+LONG_REVIEW_CHARS = 600
+
+
+def scroll_hint(text: str) -> str | None:
+    """A caption for reviews longer than the box, so the end of a review isn't missed."""
+    if len(text) <= LONG_REVIEW_CHARS:
+        return None
+    return f"Long review ({len(text):,} characters): scroll inside the box to read all of it."
+
+
 def _append(path: Path, header: list[str], row: list[object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()

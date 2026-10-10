@@ -26,6 +26,7 @@ from patchpulse.labeling.audit import (
     as_plain_text,
     relabel_selection,
     review_lookup,
+    scroll_hint,
 )
 from patchpulse.labeling.gold import AUDIT_FILE
 from patchpulse.labeling.taxonomy import ASPECTS
@@ -70,6 +71,9 @@ def main() -> None:
     st.subheader(review.game)
     st.caption(f"{review.language}, {thumbs}, review {review_id}")
     # Normal-contrast text in a fixed-height box that scrolls, so the buttons stay on screen.
+    hint = scroll_hint(review.text)
+    if hint:
+        st.warning(hint)
     st.container(height=230, border=True).markdown(as_plain_text(review.text))
 
     selected: set[str] = st.session_state.setdefault(f"selected-{review_id}", set())
