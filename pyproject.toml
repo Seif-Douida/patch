@@ -51,6 +51,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
+# MLflow's SQLite store uses a loader SQLAlchemy 2.1 deprecates; not ours to fix.
+filterwarnings = ["ignore:The ``noload`` loader strategy is deprecated:DeprecationWarning"]
 pythonpath = ["tests/support"]
 markers = [
     "integration: needs the SQL Server container (skipped locally without it, required in CI)",
@@ -81,10 +83,12 @@ lab = [
 # Phase 2, run on Seif's machine: the snapshot, labeling and training (design D1, D5).
 ml = [
     "azure-identity>=1.26.0",
+    "mlflow-skinny>=3.17.0",
     "pandas>=3.0.6",
     "pyarrow>=25.0.1",
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
+    "tzdata>=2026.4",
 ]
 pipeline = [
     "alembic>=1.20.0",
