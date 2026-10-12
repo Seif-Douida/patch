@@ -62,6 +62,11 @@ module = [
 ]
 ignore_missing_imports = true
 
+# S1b's network subclasses torch.nn.Module; where the gpu group is absent (CI), torch is Any.
+[[tool.mypy.overrides]]
+module = ["patchpulse.models.s1b_train"]
+disallow_subclassing_any = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
@@ -98,6 +103,7 @@ dev = [
 gpu = [
     "huggingface-hub>=2.2.0",
     "onnx>=1.23.2",
+    "onnxscript>=0.7.2",
     "torch>=2.14.1",
     "transformers>=5.19.0",
 ]

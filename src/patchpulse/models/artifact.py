@@ -176,4 +176,8 @@ def load_scorer(model_dir: Path) -> Scorer:
         from patchpulse.models.s1a import S1aScorer  # here, not at the top: s1a imports this module
 
         return S1aScorer.load(model_dir, artifact)
+    if artifact.family == "s1b":
+        from patchpulse.models.s1b import S1bScorer  # here, not at the top: s1b imports this module
+
+        return S1bScorer.load(model_dir, artifact)
     raise ArtifactError(f"no scorer for model family {artifact.family!r} yet")

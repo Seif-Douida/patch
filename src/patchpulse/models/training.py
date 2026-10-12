@@ -48,6 +48,7 @@ class Split:
 class TrainingData:
     train: Split
     dev: Split
+    holdout: Split  # silver holdout: S1b's early stopping (fidelity is measured in Task 14)
     teacher: str  # the model that labeled silver, as cached
     teacher_prompt_hash: str
 
@@ -73,6 +74,7 @@ def load_training_data(data_dir: Path, gold_dir: Path) -> TrainingData:
     sample = pd.read_csv(gold_dir / SAMPLE_FILE)
     dev_ids = sorted(int(i) for i in sample.loc[sample["split"] == "dev", "review_id"])
     train_ids = [int(i) for i in silver.train["review_id"]]
+    holdout_ids = [int(i) for i in silver.holdout["review_id"]]
     return TrainingData(
         train=Split(
             ids=train_ids,
@@ -83,6 +85,11 @@ def load_training_data(data_dir: Path, gold_dir: Path) -> TrainingData:
             ids=dev_ids,
             texts=[str(texts[i]) for i in dev_ids],
             labels=label_matrix(read_labels(gold_dir / CLAUDE_LABELS_FILE), dev_ids),
+        ),
+        holdout=Split(
+            ids=holdout_ids,
+            texts=[str(texts[i]) for i in holdout_ids],
+            labels=silver.holdout[list(ASPECTS)].to_numpy(dtype=bool),
         ),
         teacher=_one(source["model"], "teacher"),
         teacher_prompt_hash=_one(source["prompt_hash"], "prompt"),

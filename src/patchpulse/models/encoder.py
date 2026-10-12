@@ -47,20 +47,23 @@ def l2_normalise(rows: NDArray[np.float32]) -> NDArray[np.float32]:
     return np.asarray(rows / np.where(norms > 0, norms, 1.0), dtype=np.float32)
 
 
-class OnnxEncoder:
-    """`embed(texts) -> (n, dim)` unit vectors. `threads` caps ONNX Runtime's CPU threads."""
+class _OnnxTextModel:
+    """Tokenize with the e5 prefix, run an ONNX graph in length-sorted batches, and return one row
+    per text from `_rows`. `threads` caps ONNX Runtime's CPU threads."""
 
-    def __init__(self, model_dir: Path, *, threads: int | None = None) -> None:
-        encoder, tokenizer = model_dir / ENCODER_FILE, model_dir / TOKENIZER_FILE
-        missing = [path.name for path in (encoder, tokenizer) if not path.is_file()]
+    kind = "model"
+
+    def __init__(self, model_dir: Path, model_file: str, *, threads: int | None = None) -> None:
+        graph, tokenizer = model_dir / model_file, model_dir / TOKENIZER_FILE
+        missing = [path.name for path in (graph, tokenizer) if not path.is_file()]
         if missing:
-            raise FileNotFoundError(f"no encoder in {model_dir}: {', '.join(missing)} missing")
+            raise FileNotFoundError(f"no {self.kind} in {model_dir}: {', '.join(missing)} missing")
         options = ort.SessionOptions()
         if threads:
             options.intra_op_num_threads = threads
             options.inter_op_num_threads = 1
         self._session: Any = ort.InferenceSession(
-            str(encoder), sess_options=options, providers=["CPUExecutionProvider"]
+            str(graph), sess_options=options, providers=["CPUExecutionProvider"]
         )
         self._tokenizer = Tokenizer.from_file(str(tokenizer))
         pad_id = self._tokenizer.token_to_id(PAD_TOKEN)
@@ -71,6 +74,9 @@ class OnnxEncoder:
         self._output = self._session.get_outputs()[0].name
         self.dim = int(self._session.get_outputs()[0].shape[-1])
 
+    def _rows(self, output: NDArray[np.float32], mask: NDArray[np.int64]) -> NDArray[np.float32]:
+        return output
+
     def _batch(self, texts: list[str]) -> NDArray[np.float32]:
         encodings = self._tokenizer.encode_batch(texts)
         ids = np.array([e.ids for e in encodings], dtype=np.int64)
@@ -79,16 +85,11 @@ class OnnxEncoder:
         if "token_type_ids" in self._inputs:
             feeds["token_type_ids"] = np.zeros_like(ids)
         wanted = {name: value for name, value in feeds.items() if name in self._inputs}
-        (hidden,) = self._session.run([self._output], wanted)
-        return l2_normalise(mean_pool(np.asarray(hidden, dtype=np.float32), mask))
+        (output,) = self._session.run([self._output], wanted)
+        return self._rows(np.asarray(output, dtype=np.float32), mask)
 
-    def embed(
-        self,
-        texts: Sequence[str],
-        *,
-        prefix: str = QUERY_PREFIX,
-        max_tokens: int = MAX_TOKENS,
-        batch: int = 32,
+    def _run(
+        self, texts: Sequence[str], *, prefix: str, max_tokens: int, batch: int
     ) -> NDArray[np.float32]:
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         if not texts:
@@ -101,6 +102,47 @@ class OnnxEncoder:
             rows = order[start : start + batch]
             out[rows] = self._batch([prefixed[i] for i in rows])
         return out
+
+
+class OnnxEncoder(_OnnxTextModel):
+    """`embed(texts) -> (n, dim)` unit vectors: mean-pooled over real tokens, then normalised."""
+
+    kind = "encoder"
+
+    def __init__(self, model_dir: Path, *, threads: int | None = None) -> None:
+        super().__init__(model_dir, ENCODER_FILE, threads=threads)
+
+    def _rows(self, output: NDArray[np.float32], mask: NDArray[np.int64]) -> NDArray[np.float32]:
+        return l2_normalise(mean_pool(output, mask))
+
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        prefix: str = QUERY_PREFIX,
+        max_tokens: int = MAX_TOKENS,
+        batch: int = 32,
+    ) -> NDArray[np.float32]:
+        return self._run(texts, prefix=prefix, max_tokens=max_tokens, batch=batch)
+
+
+class OnnxClassifier(_OnnxTextModel):
+    """`logits(texts) -> (n, outputs)`: a graph that pools and classifies itself (S1b)."""
+
+    kind = "classifier"
+
+    def __init__(self, model_dir: Path, model_file: str, *, threads: int | None = None) -> None:
+        super().__init__(model_dir, model_file, threads=threads)
+
+    def logits(
+        self,
+        texts: Sequence[str],
+        *,
+        prefix: str = QUERY_PREFIX,
+        max_tokens: int = MAX_TOKENS,
+        batch: int = 32,
+    ) -> NDArray[np.float32]:
+        return self._run(texts, prefix=prefix, max_tokens=max_tokens, batch=batch)
 
 
 def build_encoder(

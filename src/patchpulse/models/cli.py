@@ -13,6 +13,9 @@
                        on gold dev, save it under build/models/ and log it to MLflow (`students`).
     train s1a          The same for S1a (frozen e5 embeddings + logistic regression). Downloads e5
                        once and embeds the silver set on the CPU (~10 min, then cached).
+    train s1b          The same for S1b (e5 fine-tuned on the GTX 1650, exported to int8 ONNX).
+                       Needs the gpu group: `uv run --group gpu patchpulse-ml train s1b`.
+                       `--checkpoint build/checkpoints/s1b-...` reuses a finished fine-tune.
 
 Exit codes: 0 success, 1 the command failed, 2 bad configuration or a refused action.
 """
@@ -24,11 +27,14 @@ import logging
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx2
+import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from patchpulse.config import LabSettings, SettingsError, get_lab_settings
 from patchpulse.db.engine import connect_with_resume_retry, make_entra_engine
@@ -73,23 +79,35 @@ from patchpulse.labeling.silver import (
 )
 from patchpulse.labeling.teacher import TextModel, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
+from patchpulse.models.artifact import Scorer
 from patchpulse.models.embed_gpu import EMBEDDINGS_DIR, cached_embeddings
 from patchpulse.models.encoder import (
     E5_MODEL_ID,
     E5_REVISION,
     MAX_TOKENS,
     QUERY_PREFIX,
+    OnnxClassifier,
     OnnxEncoder,
     build_encoder,
 )
 from patchpulse.models.s0 import S0Params, save_s0, train_s0
 from patchpulse.models.s1a import HEAD_FILE, S1aParams, S1aScorer, load_head, save_s1a, train_s1a
+from patchpulse.models.s1b import (
+    S1B_FILE,
+    S1bParams,
+    S1bScorer,
+    S1bTraining,
+    read_training,
+    save_s1b,
+    sigmoid,
+)
 from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
 from patchpulse.models.text import clean_texts
 from patchpulse.models.tracking import TrackingError, require_tracking
 from patchpulse.models.training import (
     MODELS_DIR,
     DevScores,
+    TrainingData,
     load_training_data,
     log_student,
     new_version,
@@ -99,6 +117,7 @@ from patchpulse.models.training import (
 log = logging.getLogger("patchpulse.ml")
 
 ENCODERS_DIR = Path("build/encoders")
+CHECKPOINTS_DIR = Path("build/checkpoints")
 CPU_PREVIEW_REVIEWS = 500
 
 PULL_COST = (
@@ -405,11 +424,8 @@ def _encoder_dir() -> Path:
     return build_encoder(ENCODERS_DIR / f"e5-small-{E5_REVISION[:8]}-int8")
 
 
-def _cpu_preview(model_dir: Path, scorer: S1aScorer, texts: list[str]) -> float:
-    """Reviews a second through the saved model on one CPU thread of this machine."""
-    one_thread = S1aScorer(
-        OnnxEncoder(model_dir, threads=1), load_head(model_dir / HEAD_FILE), scorer.artifact
-    )
+def _cpu_preview(one_thread: Scorer, texts: list[str]) -> float:
+    """Reviews a second through a saved model limited to one CPU thread of this machine."""
     started = time.perf_counter()
     one_thread.predict_proba(texts)
     return len(texts) / (time.perf_counter() - started)
@@ -446,8 +462,10 @@ def _train_s1a(settings: LabSettings) -> int:
     artifact = save_s1a(
         model, encoder_dir, model_dir, thresholds=scores.thresholds, version=version
     )
-    scorer = S1aScorer(OnnxEncoder(model_dir), model, artifact)
-    per_second = _cpu_preview(model_dir, scorer, data.train.texts[:CPU_PREVIEW_REVIEWS])
+    one_thread = S1aScorer(
+        OnnxEncoder(model_dir, threads=1), load_head(model_dir / HEAD_FILE), artifact
+    )
+    per_second = _cpu_preview(one_thread, data.train.texts[:CPU_PREVIEW_REVIEWS])
     size_mb = sum((model_dir / name).stat().st_size for name in artifact.files) / 1e6
     run_id = log_student(
         family="s1a",
@@ -473,6 +491,111 @@ def _train_s1a(settings: LabSettings) -> int:
     )
     _print_scores(
         f"S1a {version}", scores, f"head trained in {train_seconds:.0f} s, {size_mb:.1f} MB"
+    )
+    print(
+        f"CPU preview (this machine, 1 thread): {per_second:.0f} reviews a second; the gate is 70 "
+        "on 1 vCPU, measured in a container in Task 14"
+    )
+    print(f"model: {model_dir}; MLflow run {run_id}")
+    return 0
+
+
+def _require_torch() -> None:
+    """S1b trains in PyTorch: the local `gpu` group."""
+    try:
+        import torch
+    except ImportError as error:
+        raise SettingsError(
+            "this command needs the gpu group: uv run --group gpu patchpulse-ml train s1b"
+        ) from error
+    if not torch.cuda.is_available():
+        log.warning("CUDA isn't available: fine-tuning on the CPU will take many hours")
+
+
+def _fine_tune(data: TrainingData, checkpoint_dir: Path, params: S1bParams) -> S1bTraining:
+    from patchpulse.models.s1b_train import train_s1b  # the gpu group
+
+    return train_s1b(
+        data.train.texts,
+        data.train.labels,
+        data.holdout.texts,
+        data.holdout.labels,
+        checkpoint_dir,
+        params=params,
+    )
+
+
+def _export(checkpoint: Path, out_dir: Path) -> Path:
+    from patchpulse.models.s1b_train import export_s1b  # the gpu group
+
+    return export_s1b(checkpoint, out_dir)
+
+
+def _torch_dev_probs(checkpoint: Path, texts: list[str]) -> NDArray[np.float64]:
+    from patchpulse.models.s1b_train import torch_logits  # the gpu group
+
+    return sigmoid(torch_logits(checkpoint, texts))
+
+
+def _train_s1b(settings: LabSettings, *, checkpoint: Path | None = None) -> int:
+    require_tracking()  # before any work, so a missing setting costs nothing
+    _require_torch()
+    data = load_training_data(settings.data_dir, settings.gold_dir)
+    version = new_version()
+    if checkpoint is None:
+        log.info(
+            "fine-tuning e5 on %d silver reviews, early stopping on %d",
+            len(data.train.ids),
+            len(data.holdout.ids),
+        )
+        training = _fine_tune(data, CHECKPOINTS_DIR / f"s1b-{version}", S1bParams())
+    else:
+        training = read_training(checkpoint)  # a finished fine-tune: export and score it only
+        log.info("reusing the fine-tune in %s", checkpoint)
+    onnx_dir = _export(training.checkpoint, training.checkpoint / "onnx-int8")
+    # Thresholds come from the int8 graph Azure would run; PyTorch's own dev score shows what
+    # the quantization costs.
+    classifier = OnnxClassifier(onnx_dir, S1B_FILE)
+    scores = score_on_dev(data.dev, sigmoid(classifier.logits(clean_texts(data.dev.texts))))
+    torch_scores = score_on_dev(data.dev, _torch_dev_probs(training.checkpoint, data.dev.texts))
+    model_dir = MODELS_DIR / f"s1b-{version}"
+    artifact = save_s1b(onnx_dir, model_dir, thresholds=scores.thresholds, version=version)
+    one_thread = S1bScorer(OnnxClassifier(model_dir, S1B_FILE, threads=1), artifact)
+    per_second = _cpu_preview(one_thread, data.train.texts[:CPU_PREVIEW_REVIEWS])
+    size_mb = sum((model_dir / name).stat().st_size for name in artifact.files) / 1e6
+    run_id = log_student(
+        family="s1b",
+        version=version,
+        params={
+            "encoder": E5_MODEL_ID,
+            "encoder_revision": E5_REVISION,
+            "quantization": "int8 dynamic (ONNX Runtime)",
+            "prefix": QUERY_PREFIX,
+            "holdout_n": len(data.holdout.ids),
+            **asdict(training.params),
+        },
+        data=data,
+        scores=scores,
+        model_dir=model_dir,
+        metrics={
+            "train_seconds": training.seconds,
+            "epochs_run": training.epochs_run,
+            "best_epoch": training.best_epoch,
+            **{f"holdout_loss.{i}": loss for i, loss in enumerate(training.holdout_losses, 1)},
+            "dev_cv_macro_f1_torch": torch_scores.cv_macro_f1,
+            "model_mb": size_mb,
+            "cpu_preview_reviews_per_s": per_second,
+        },
+    )
+    _print_scores(
+        f"S1b {version}",
+        scores,
+        f"{training.epochs_run} epochs (best {training.best_epoch}) in "
+        f"{training.seconds / 60:.0f} min, {size_mb:.1f} MB",
+    )
+    print(
+        f"PyTorch's own dev macro-F1 (before int8): {torch_scores.cv_macro_f1:.3f}; holdout "
+        f"losses {', '.join(f'{loss:.4f}' for loss in training.holdout_losses)}"
     )
     print(
         f"CPU preview (this machine, 1 thread): {per_second:.0f} reviews a second; the gate is 70 "
@@ -537,14 +660,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     train.add_parser("s0", help="TF-IDF + logistic regression on silver; thresholds on gold dev")
     train.add_parser("s1a", help="frozen e5 embeddings + logistic regression")
+    s1b = train.add_parser("s1b", help="e5 fine-tuned on the GPU, int8 ONNX (gpu group)")
+    s1b.add_argument(
+        "--checkpoint", type=Path, help="reuse a finished fine-tune instead of training again"
+    )
     args = parser.parse_args(argv)
 
+    # A character the console can't encode (Windows' cp1252, redirected to a file) prints as "?"
+    # instead of killing the command: PyTorch's exporter and MLflow both print emoji.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
     configure_logging()
     try:
         settings = get_lab_settings()
         if args.command == "pull":
             return _pull(settings, yes=args.yes)
         if args.command == "train":
+            if args.train_command == "s1b":
+                return _train_s1b(settings, checkpoint=args.checkpoint)
             return _train_s1a(settings) if args.train_command == "s1a" else _train_s0(settings)
         if args.command == "silver":
             return _silver_sample(settings, seed=args.seed, n=args.n, force=args.force)

@@ -83,3 +83,43 @@ def expected_embedding(
     ids = [2, *(index.get(w, 1) for w in words), 3]
     mean = table[ids].mean(axis=0)
     return (mean / np.linalg.norm(mean)).astype(np.float32)
+
+
+def write_tiny_classifier(model_dir: Path, *, file_name: str) -> NDArray[np.float32]:
+    """A fake S1b: `tokenizer.json` and an ONNX graph whose logits are the masked mean of each
+    token's row in a (words x aspects) table. Returns the table."""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    write_tiny_encoder(model_dir)  # for its tokenizer
+    (model_dir / ENCODER_FILE).unlink()
+    table = np.random.default_rng(1).normal(size=(len(WORDS), 10)).astype(np.float32)
+    table[0] = 100.0  # <pad>
+    axes = numpy_helper.from_array(np.array([1], dtype=np.int64), "axis_tokens")
+    last = numpy_helper.from_array(np.array([2], dtype=np.int64), "axis_last")
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node("Gather", ["table", "input_ids"], ["rows"]),
+            helper.make_node("Cast", ["attention_mask"], ["mask_f"], to=TensorProto.FLOAT),
+            helper.make_node("Unsqueeze", ["mask_f", "axis_last"], ["mask_3d"]),
+            helper.make_node("Mul", ["rows", "mask_3d"], ["masked"]),
+            helper.make_node("ReduceSum", ["masked", "axis_tokens"], ["total"], keepdims=0),
+            helper.make_node("ReduceSum", ["mask_3d", "axis_tokens"], ["count"], keepdims=0),
+            helper.make_node("Div", ["total", "count"], ["logits"]),
+        ],
+        name="tiny-s1b",
+        inputs=[
+            helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "tokens"]),
+            helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "tokens"]),
+        ],
+        outputs=[helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", 10])],
+        initializer=[numpy_helper.from_array(table, "table"), axes, last],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 9
+    onnx.save(model, str(model_dir / file_name))
+    return table
+
+
+def expected_logits(text: str, table: NDArray[np.float32]) -> NDArray[np.float32]:
+    index = {w: i for i, w in enumerate(WORDS)}
+    ids = [2, *(index.get(w, 1) for w in ["query", ":", *text.split()]), 3]
+    return np.asarray(table[ids].mean(axis=0), dtype=np.float32)
