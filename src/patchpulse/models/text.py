@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 
 CLEANING_VERSION = "c1"
 MAX_CHARS = 2000
@@ -39,3 +40,8 @@ def clean_text(text: str, *, max_chars: int = MAX_CHARS) -> str:
     cut = text[:max_chars]
     boundary = max(cut.rfind(" "), cut.rfind("\n"))
     return cut[:boundary].rstrip() if boundary >= max_chars // 2 else cut
+
+
+def clean_texts(texts: Sequence[str]) -> list[str]:
+    """What every student sees: each text through `clean_text`, in order."""
+    return [clean_text(text) for text in texts]

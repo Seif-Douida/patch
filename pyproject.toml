@@ -20,6 +20,16 @@ build-backend = "uv_build"
 [tool.uv]
 required-version = ">=0.12.19"
 
+# PyTorch with CUDA 12.6 for the GTX 1650 (compute capability 7.5), on Windows only; elsewhere the
+# `gpu` group resolves PyTorch from PyPI. Nothing but `torch` is taken from this index.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -44,8 +54,12 @@ mypy_path = "src,tests/support"
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["joblib", "joblib.*", "mssql_python", "mssql_python.*", "sklearn", "sklearn.*", "statsmodels", "statsmodels.*",
-    "streamlit", "streamlit.*"]
+# torch, transformers and huggingface_hub are in the local-only gpu group: absent from CI.
+module = [
+    "huggingface_hub", "huggingface_hub.*", "joblib", "joblib.*", "mssql_python", "mssql_python.*",
+    "onnxruntime", "onnxruntime.*", "sklearn", "sklearn.*", "statsmodels", "statsmodels.*",
+    "streamlit", "streamlit.*", "torch", "torch.*", "transformers", "transformers.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -68,6 +82,8 @@ dev = [
     { include-group = "scoring" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
+    # Tests build tiny ONNX graphs as fake encoders; the jobs image doesn't need it.
+    "onnx>=1.23.2",
     "pre-commit>=4.6.2",
     "pandas-stubs>=3.0.5.260914",
     "pytest>=9.1.1",
@@ -76,6 +92,14 @@ dev = [
     "scipy-stubs>=1.18.1.1",
     "statsmodels>=0.15.0",
     "types-pyyaml>=6.0.12.20260906",
+]
+# Phase 2, local only and never in dev, CI or an image: GPU embeddings and fine-tuning on the
+# GTX 1650 (design D5). PyTorch comes from its CUDA index on Windows (see [tool.uv.sources]).
+gpu = [
+    "huggingface-hub>=2.2.0",
+    "onnx>=1.23.2",
+    "torch>=2.14.1",
+    "transformers>=5.19.0",
 ]
 # Phase 2, local only and never in dev or CI: Seif's labeling app (design D3).
 lab = [
@@ -91,12 +115,14 @@ ml = [
     "scipy>=1.18.1",
     "tzdata>=2026.4",
 ]
-# Phase 2: what the jobs image needs to score reviews (design D5, D8). onnxruntime and tokenizers
-# join with S1 (plan Task 12); never PyTorch.
+# Phase 2: what the jobs image needs to score reviews (design D5, D8): S0 through scikit-learn,
+# S1a and S1b through ONNX Runtime and tokenizers. Never PyTorch.
 scoring = [
     "joblib>=1.6.0",
     "numpy>=2.5.3",
+    "onnxruntime>=1.30.0",
     "scikit-learn>=1.9.1",
+    "tokenizers>=0.23.2",
 ]
 pipeline = [
     "alembic>=1.20.0",

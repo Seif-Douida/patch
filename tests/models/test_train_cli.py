@@ -5,18 +5,31 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import mlflow
+import numpy as np
 import pandas as pd
 import pytest
+from tiny_encoder import write_tiny_encoder
 from toy_reviews import toy_reviews
 
 from patchpulse.labeling.gold import format_aspects
 from patchpulse.labeling.taxonomy import ASPECTS, TAXONOMY_VERSION
+from patchpulse.models import cli
 from patchpulse.models.artifact import MODEL_FILE, load_scorer
 from patchpulse.models.cli import main
+from patchpulse.models.encoder import (
+    E5_MODEL_ID,
+    E5_REVISION,
+    ENCODER_FILE,
+    TOKENIZER_FILE,
+    OnnxEncoder,
+)
 from patchpulse.models.s0 import S0_FILE
+from patchpulse.models.s1a import HEAD_FILE
+from patchpulse.models.text import clean_texts
 
 N_SILVER, N_DEV = 300, 60
 
@@ -115,3 +128,37 @@ def test_train_s0_needs_mlflow_before_training(
     assert main(["train", "s0"]) == 2
     assert "MLFLOW_TRACKING_URI" in capsys.readouterr().err
     assert not (workdir / "build").exists()
+
+
+def test_train_s1a_saves_a_loadable_model_and_logs_its_run(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    texts = write_inputs(workdir)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{(workdir / 'mlflow.db').as_posix()}")
+    encoder_dir = workdir / "tiny-encoder"
+    write_tiny_encoder(encoder_dir)
+    monkeypatch.setattr(cli, "_encoder_dir", lambda: encoder_dir)
+    monkeypatch.setitem(sys.modules, "torch", None)  # S1a needs no PyTorch: no gpu group
+
+    assert main(["train", "s1a"]) == 0
+
+    (model_dir,) = (workdir / "build" / "models").glob("s1a-*")
+    assert load_scorer(model_dir).predict_proba(["good game"]).shape == (1, len(ASPECTS))
+    (run,) = mlflow.search_runs(experiment_names=["students"], output_format="list")
+    params, metrics = run.data.params, run.data.metrics
+    assert params["family"] == "s1a"
+    assert params["encoder"] == E5_MODEL_ID
+    assert params["encoder_revision"] == E5_REVISION
+    assert {f"file_sha256.{name}" for name in (ENCODER_FILE, TOKENIZER_FILE, HEAD_FILE)} <= set(
+        params
+    )
+    assert 0.0 <= metrics["dev_cv_macro_f1"] <= 1.0
+    assert metrics["cpu_preview_reviews_per_s"] > 0
+    assert mlflow.MlflowClient().list_artifacts(run.info.run_id) == []
+    # The head learned from the very embeddings the shipped encoder computes (int8 in real use).
+    (cached,) = (workdir / "data" / "local" / "embeddings").glob("*.npy")
+    silver_train = [texts[i - 1] for i in range(1, N_SILVER + 1) if i % 10 != 0]
+    np.testing.assert_allclose(
+        np.load(cached), OnnxEncoder(model_dir).embed(clean_texts(silver_train)), atol=1e-6
+    )
+    assert "CPU preview" in capsys.readouterr().out

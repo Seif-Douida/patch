@@ -2,7 +2,7 @@
 
 TF-IDF on word 1-2-grams and on character 3-5-grams within word boundaries (`char_wb`, which
 carries languages without spaces, like Chinese), then one logistic regression per aspect with
-balanced class weights. Texts are cleaned with the shared `clean_text` before both training and
+balanced class weights. Texts are cleaned with the shared `clean_texts` before both training and
 scoring, so the two always see the same input.
 
 `min_df` keeps only n-grams found in at least that many different reviews: the saved vocabulary
@@ -28,7 +28,7 @@ from sklearn.pipeline import FeatureUnion, Pipeline
 
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.models.artifact import ModelArtifact, write_artifact
-from patchpulse.models.text import clean_text
+from patchpulse.models.text import clean_texts
 
 S0_FILE = "s0.joblib"
 
@@ -44,10 +44,6 @@ class S0Params:
     max_iter: int = 1_000
 
 
-def _clean(texts: Sequence[str]) -> list[str]:
-    return [clean_text(text) for text in texts]
-
-
 @dataclass(frozen=True)
 class S0Model:
     pipeline: Any  # scikit-learn has no type information
@@ -56,7 +52,7 @@ class S0Model:
     def predict_proba(self, texts: Sequence[str]) -> NDArray[np.float64]:
         if not texts:
             return np.zeros((0, len(ASPECTS)))
-        return np.asarray(self.pipeline.predict_proba(_clean(texts)), dtype=np.float64)
+        return np.asarray(self.pipeline.predict_proba(clean_texts(texts)), dtype=np.float64)
 
 
 def _pipeline(params: S0Params) -> Pipeline:
@@ -103,7 +99,7 @@ def train_s0(texts: Sequence[str], labels: ArrayLike, *, params: S0Params | None
         raise ValueError(f"labels need one column for each of the {len(ASPECTS)} aspects")
     if y.shape[0] != len(texts):
         raise ValueError("one label row per text")
-    pipeline = _pipeline(params).fit(_clean(texts), y.astype(np.int8))
+    pipeline = _pipeline(params).fit(clean_texts(texts), y.astype(np.int8))
     return S0Model(pipeline=pipeline, params=params)
 
 

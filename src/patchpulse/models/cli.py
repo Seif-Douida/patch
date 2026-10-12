@@ -11,6 +11,8 @@
     teacher label      Label the silver set with the chosen teacher; resumable after a quota stop.
     train s0           Train S0 (TF-IDF + logistic regression) on silver train, tune its thresholds
                        on gold dev, save it under build/models/ and log it to MLflow (`students`).
+    train s1a          The same for S1a (frozen e5 embeddings + logistic regression). Downloads e5
+                       once and embeds the silver set on the CPU (~10 min, then cached).
 
 Exit codes: 0 success, 1 the command failed, 2 bad configuration or a refused action.
 """
@@ -71,11 +73,23 @@ from patchpulse.labeling.silver import (
 )
 from patchpulse.labeling.teacher import TextModel, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
+from patchpulse.models.embed_gpu import EMBEDDINGS_DIR, cached_embeddings
+from patchpulse.models.encoder import (
+    E5_MODEL_ID,
+    E5_REVISION,
+    MAX_TOKENS,
+    QUERY_PREFIX,
+    OnnxEncoder,
+    build_encoder,
+)
 from patchpulse.models.s0 import S0Params, save_s0, train_s0
+from patchpulse.models.s1a import HEAD_FILE, S1aParams, S1aScorer, load_head, save_s1a, train_s1a
 from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
+from patchpulse.models.text import clean_texts
 from patchpulse.models.tracking import TrackingError, require_tracking
 from patchpulse.models.training import (
     MODELS_DIR,
+    DevScores,
     load_training_data,
     log_student,
     new_version,
@@ -83,6 +97,9 @@ from patchpulse.models.training import (
 )
 
 log = logging.getLogger("patchpulse.ml")
+
+ENCODERS_DIR = Path("build/encoders")
+CPU_PREVIEW_REVIEWS = 500
 
 PULL_COST = (
     "`pull` wakes Azure SQL, which costs about 2,000-2,500 of the month's 100,000 free vCore-s. "
@@ -369,12 +386,98 @@ def _train_s0(settings: LabSettings) -> int:
         model_dir=model_dir,
         metrics={"train_seconds": train_seconds, "model_mb": size_mb},
     )
+    _print_scores(f"S0 {version}", scores, f"trained in {train_seconds:.0f} s, {size_mb:.1f} MB")
+    print(f"model: {model_dir}; MLflow run {run_id}")
+    return 0
+
+
+def _print_scores(name: str, scores: DevScores, detail: str) -> None:
     print(
-        f"S0 {version}: CV-tuned dev macro-F1 {scores.cv_macro_f1:.3f} "
-        f"(micro {scores.cv_micro_f1:.3f}); trained in {train_seconds:.0f} s, {size_mb:.1f} MB"
+        f"{name}: CV-tuned dev macro-F1 {scores.cv_macro_f1:.3f} "
+        f"(micro {scores.cv_micro_f1:.3f}); {detail}"
     )
     for code, f1 in scores.cv_f1.items():
         print(f"  {code:<17} {f1:.3f}")
+
+
+def _encoder_dir() -> Path:
+    """The int8 e5 encoder, built (and downloaded) once."""
+    return build_encoder(ENCODERS_DIR / f"e5-small-{E5_REVISION[:8]}-int8")
+
+
+def _cpu_preview(model_dir: Path, scorer: S1aScorer, texts: list[str]) -> float:
+    """Reviews a second through the saved model on one CPU thread of this machine."""
+    one_thread = S1aScorer(
+        OnnxEncoder(model_dir, threads=1), load_head(model_dir / HEAD_FILE), scorer.artifact
+    )
+    started = time.perf_counter()
+    one_thread.predict_proba(texts)
+    return len(texts) / (time.perf_counter() - started)
+
+
+def _train_s1a(settings: LabSettings) -> int:
+    require_tracking()  # before any work, so a missing setting costs nothing
+    data = load_training_data(settings.data_dir, settings.gold_dir)
+    encoder_dir = _encoder_dir()
+    encoder = OnnxEncoder(encoder_dir)
+    params = S1aParams()
+    # The head learns from the int8 encoder's own embeddings, the ones Azure computes: trained on
+    # 16-bit GPU embeddings instead, it lost ~0.075 dev macro-F1 when served through int8.
+    log.info(
+        "embedding %d silver reviews with e5 (cached after the first run)", len(data.train.ids)
+    )
+    started = time.monotonic()
+    train_x = cached_embeddings(
+        settings.data_dir / EMBEDDINGS_DIR,
+        data.train.ids,
+        clean_texts(data.train.texts),
+        model_id=E5_MODEL_ID,
+        embed=encoder.embed,
+        variant=f"{E5_REVISION}|{QUERY_PREFIX}|{MAX_TOKENS}|int8-onnx",
+    )
+    embed_seconds = time.monotonic() - started
+    started = time.monotonic()
+    model = train_s1a(train_x, data.train.labels, params=params)
+    train_seconds = time.monotonic() - started
+    dev_x = encoder.embed(clean_texts(data.dev.texts))
+    scores = score_on_dev(data.dev, model.predict_proba(dev_x))
+    version = new_version()
+    model_dir = MODELS_DIR / f"s1a-{version}"
+    artifact = save_s1a(
+        model, encoder_dir, model_dir, thresholds=scores.thresholds, version=version
+    )
+    scorer = S1aScorer(OnnxEncoder(model_dir), model, artifact)
+    per_second = _cpu_preview(model_dir, scorer, data.train.texts[:CPU_PREVIEW_REVIEWS])
+    size_mb = sum((model_dir / name).stat().st_size for name in artifact.files) / 1e6
+    run_id = log_student(
+        family="s1a",
+        version=version,
+        params={
+            "encoder": E5_MODEL_ID,
+            "encoder_revision": E5_REVISION,
+            "encoder_quantization": "int8 dynamic (ONNX Runtime)",
+            "prefix": QUERY_PREFIX,
+            "max_tokens": MAX_TOKENS,
+            "train_embeddings": "the int8 ONNX encoder, as served",
+            "c": params.c,
+        },
+        data=data,
+        scores=scores,
+        model_dir=model_dir,
+        metrics={
+            "embed_seconds": embed_seconds,
+            "train_seconds": train_seconds,
+            "model_mb": size_mb,
+            "cpu_preview_reviews_per_s": per_second,
+        },
+    )
+    _print_scores(
+        f"S1a {version}", scores, f"head trained in {train_seconds:.0f} s, {size_mb:.1f} MB"
+    )
+    print(
+        f"CPU preview (this machine, 1 thread): {per_second:.0f} reviews a second; the gate is 70 "
+        "on 1 vCPU, measured in a container in Task 14"
+    )
     print(f"model: {model_dir}; MLflow run {run_id}")
     return 0
 
@@ -433,6 +536,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="train_command", required=True
     )
     train.add_parser("s0", help="TF-IDF + logistic regression on silver; thresholds on gold dev")
+    train.add_parser("s1a", help="frozen e5 embeddings + logistic regression")
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -441,7 +545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "pull":
             return _pull(settings, yes=args.yes)
         if args.command == "train":
-            return _train_s0(settings)
+            return _train_s1a(settings) if args.train_command == "s1a" else _train_s0(settings)
         if args.command == "silver":
             return _silver_sample(settings, seed=args.seed, n=args.n, force=args.force)
         if args.command == "teacher" and args.teacher_command == "label":
