@@ -1764,9 +1764,11 @@ dev = [
     { name = "dbt-core" },
     { name = "dbt-sqlserver", extra = ["mssql"] },
     { name = "httpx2" },
+    { name = "joblib" },
     { name = "mlflow-skinny" },
     { name = "mssql-python" },
     { name = "mypy" },
+    { name = "numpy" },
     { name = "pandas" },
     { name = "pandas-stubs" },
     { name = "pre-commit" },
@@ -1808,6 +1810,11 @@ pipeline = [
     { name = "pyyaml" },
     { name = "sqlalchemy" },
 ]
+scoring = [
+    { name = "joblib" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1822,9 +1829,11 @@ dev = [
     { name = "dbt-core", specifier = "~=1.12.5" },
     { name = "dbt-sqlserver", extras = ["mssql"], specifier = "~=1.12.0" },
     { name = "httpx2", specifier = ">=2.13.1" },
+    { name = "joblib", specifier = ">=1.6.0" },
     { name = "mlflow-skinny", specifier = ">=3.17.0" },
     { name = "mssql-python", specifier = ">=1.15.0" },
     { name = "mypy", specifier = ">=2.3.1" },
+    { name = "numpy", specifier = ">=2.5.3" },
     { name = "pandas", specifier = ">=3.0.6" },
     { name = "pandas-stubs", specifier = ">=3.0.5.260914" },
     { name = "pre-commit", specifier = ">=4.6.2" },
@@ -1863,6 +1872,11 @@ pipeline = [
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "sqlalchemy", specifier = ">=2.1.1" },
+]
+scoring = [
+    { name = "joblib", specifier = ">=1.6.0" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "scikit-learn", specifier = ">=1.9.1" },
 ]
 
 [[package]]

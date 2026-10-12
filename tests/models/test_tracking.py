@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import mlflow
 import pytest
 
-from patchpulse.models.tracking import TrackingError, log_ids_hash, log_report, tracking_run
+from patchpulse.models.tracking import (
+    TrackingError,
+    log_ids_hash,
+    log_report,
+    tracking_run,
+)
 
 
 @pytest.fixture
@@ -53,22 +59,16 @@ def test_tracking_logs_params_and_metrics_to_a_local_store(local_store: Path) ->
         "data/gold/labels_claude.csv",
         "notes.md",
         "reports/../data/local/gold_reasons.csv",
+        "build/models/s0-1/s0.joblib",
+        "build/models/s0-1/model.json",
+        "reports/../build/models/s0-1/s0.joblib",
     ],
 )
-def test_tracking_refuses_local_data_artifacts(local_store: Path, path: str) -> None:
+def test_tracking_refuses_local_data_and_model_files(local_store: Path, path: str) -> None:
     target = write(Path(path))
 
     with tracking_run("t", params={}, tags={}), pytest.raises(TrackingError, match="refused"):
         log_report(target)
-
-
-def test_model_build_folder_is_allowed(local_store: Path) -> None:
-    target = write(Path("build/s0/model.json"), "{}")
-
-    with tracking_run("t", params={}, tags={}) as run:
-        log_report(target)
-
-    assert [a.path for a in mlflow.MlflowClient().list_artifacts(run.info.run_id)] == ["model.json"]
 
 
 def test_tracking_needs_a_tracking_uri(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,3 +78,15 @@ def test_tracking_needs_a_tracking_uri(tmp_path: Path, monkeypatch: pytest.Monke
 
     with pytest.raises(TrackingError, match="MLFLOW_TRACKING_URI"), tracking_run("t", params={}):
         pass
+
+
+def test_runs_never_print_mlflows_run_link(
+    local_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For a remote store MLflow prints "View run" with an emoji before it closes the run. A
+    Windows console redirected to a file (cp1252) can't encode it: `train s0` crashed on 12 Oct and
+    left its DagsHub run open. Our commands print the run id themselves."""
+    monkeypatch.setenv("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "false")
+
+    with tracking_run("t", params={}):
+        assert os.environ["MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT"] == "true"

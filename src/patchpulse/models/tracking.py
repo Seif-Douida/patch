@@ -1,9 +1,11 @@
 """MLflow tracking for Phase 2 (plan Task 9, design D7): DagsHub's hosted MLflow, free tier.
 
 `tracking_run` won't start without `MLFLOW_TRACKING_URI`, from the environment or `.env`, so a
-missing setting can't quietly log to a local folder instead. Only reports (`reports/`) and model
-builds (`build/`) may be logged as artifacts, never anything under `data/`: that's where review
-text and the annotators' notes live (spec C4).
+missing setting can't quietly log to a local folder instead. Only reports (`reports/`) may be
+logged as artifacts:
+- never anything under `data/`, where review text and the annotators' notes live (spec C4);
+- never model files (`build/`): a model's vocabulary holds phrasing from reviews, so models stay on
+  this machine (Seif, 12 Oct). Runs record each model file's SHA-256 instead.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from mlflow import ActiveRun
 
 from patchpulse.config import get_lab_settings
 
-ALLOWED_ROOTS = (Path("reports"), Path("build"))
+ALLOWED_ROOTS = (Path("reports"),)
 _NEVER = Path("data")
 
 
@@ -29,6 +31,10 @@ class TrackingError(RuntimeError):
 
 def require_tracking() -> str:
     """The tracking URI. `.env`'s MLflow settings are exported if the environment lacks them."""
+    # MLflow's "View run" line starts with an emoji that a redirected Windows console (cp1252)
+    # can't encode; it's printed before the run is closed, so the crash left runs open. Our
+    # commands print the run id themselves.
+    os.environ["MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT"] = "true"
     if not os.environ.get("MLFLOW_TRACKING_URI"):
         settings = get_lab_settings()
         if not settings.mlflow_tracking_uri:
@@ -69,12 +75,16 @@ def log_ids_hash(name: str, ids: Iterable[int]) -> None:
     mlflow.log_params({f"{name}_ids_sha256": digest, f"{name}_n": len(unique)})
 
 
-def log_report(path: Path) -> None:
+def _may_leave(path: Path) -> Path:
     resolved = path.resolve()
     here = Path.cwd().resolve()
     allowed = any(resolved.is_relative_to((here / root).resolve()) for root in ALLOWED_ROOTS)
     if not allowed or resolved.is_relative_to((here / _NEVER).resolve()):
         raise TrackingError(
-            f"refused to log {path}: only files under reports/ or build/ may leave this machine"
+            f"refused to log {path}: only files under reports/ may leave this machine"
         )
-    mlflow.log_artifact(str(resolved))
+    return resolved
+
+
+def log_report(path: Path) -> None:
+    mlflow.log_artifact(str(_may_leave(path)))

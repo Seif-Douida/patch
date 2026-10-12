@@ -9,6 +9,8 @@
                        MLflow). Needs PP_GEMINI_API_KEY and the MLFLOW_TRACKING_* settings.
     silver sample      Draw the ~30k silver reviews and their holdout (data/local/silver/).
     teacher label      Label the silver set with the chosen teacher; resumable after a quota stop.
+    train s0           Train S0 (TF-IDF + logistic regression) on silver train, tune its thresholds
+                       on gold dev, save it under build/models/ and log it to MLflow (`students`).
 
 Exit codes: 0 success, 1 the command failed, 2 bad configuration or a refused action.
 """
@@ -18,6 +20,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,8 +71,16 @@ from patchpulse.labeling.silver import (
 )
 from patchpulse.labeling.teacher import TextModel, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
+from patchpulse.models.s0 import S0Params, save_s0, train_s0
 from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
 from patchpulse.models.tracking import TrackingError, require_tracking
+from patchpulse.models.training import (
+    MODELS_DIR,
+    load_training_data,
+    log_student,
+    new_version,
+    score_on_dev,
+)
 
 log = logging.getLogger("patchpulse.ml")
 
@@ -329,6 +340,45 @@ def _teacher_label(
     return 0
 
 
+def _train_s0(settings: LabSettings) -> int:
+    require_tracking()  # before training, so a missing setting costs nothing
+    data = load_training_data(settings.data_dir, settings.gold_dir)
+    params = S0Params()
+    log.info("training S0 on %d silver reviews", len(data.train.ids))
+    started = time.monotonic()
+    model = train_s0(data.train.texts, data.train.labels, params=params)
+    train_seconds = time.monotonic() - started
+    scores = score_on_dev(data.dev, model.predict_proba(data.dev.texts))
+    version = new_version()
+    model_dir = MODELS_DIR / f"s0-{version}"
+    artifact = save_s0(model, model_dir, thresholds=scores.thresholds, version=version)
+    size_mb = sum((model_dir / name).stat().st_size for name in artifact.files) / 1e6
+    run_id = log_student(
+        family="s0",
+        version=version,
+        params={
+            "word_ngrams": params.word_ngrams,
+            "char_ngrams": params.char_ngrams,
+            "min_df": params.min_df,
+            "max_word_features": params.max_word_features,
+            "max_char_features": params.max_char_features,
+            "c": params.c,
+        },
+        data=data,
+        scores=scores,
+        model_dir=model_dir,
+        metrics={"train_seconds": train_seconds, "model_mb": size_mb},
+    )
+    print(
+        f"S0 {version}: CV-tuned dev macro-F1 {scores.cv_macro_f1:.3f} "
+        f"(micro {scores.cv_micro_f1:.3f}); trained in {train_seconds:.0f} s, {size_mb:.1f} MB"
+    )
+    for code, f1 in scores.cv_f1.items():
+        print(f"  {code:<17} {f1:.3f}")
+    print(f"model: {model_dir}; MLflow run {run_id}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="patchpulse-ml", description="PatchPulse Phase 2: local snapshot, labeling, training."
@@ -379,6 +429,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     silver_sample.add_argument("--seed", type=int, required=True)
     silver_sample.add_argument("--n", type=int, default=SILVER_SIZE)
     silver_sample.add_argument("--force", action="store_true", help="start the silver set over")
+    train = commands.add_parser("train", help="train a student").add_subparsers(
+        dest="train_command", required=True
+    )
+    train.add_parser("s0", help="TF-IDF + logistic regression on silver; thresholds on gold dev")
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -386,6 +440,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = get_lab_settings()
         if args.command == "pull":
             return _pull(settings, yes=args.yes)
+        if args.command == "train":
+            return _train_s0(settings)
         if args.command == "silver":
             return _silver_sample(settings, seed=args.seed, n=args.n, force=args.force)
         if args.command == "teacher" and args.teacher_command == "label":

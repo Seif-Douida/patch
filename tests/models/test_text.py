@@ -12,7 +12,7 @@ from patchpulse.models.text import CLEANING_VERSION, clean_text
     [
         ("", ""),
         ("   \n\t  ", ""),
-        ("🔥🔥🔥", "🔥🔥🔥"),
+        ("\U0001f525" * 3, "\U0001f525" * 3),  # emoji only, written as an escape
         (
             "[h1]Verdict[/h1]\n[b]Great[/b] [i]combat[/i], [strike]bad[/strike] fine",
             "Verdict\nGreat combat, bad fine",
