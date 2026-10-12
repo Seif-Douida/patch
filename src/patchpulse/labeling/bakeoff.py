@@ -23,7 +23,7 @@ import mlflow
 import numpy as np
 from numpy.typing import NDArray
 
-from patchpulse.labeling.cache import LabelCache
+from patchpulse.labeling.cache import LabelCache, Usage
 from patchpulse.labeling.gemini import GeminiResponse
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import (
@@ -58,8 +58,8 @@ class CandidateResult:
     support: dict[str, int]  # gold positives per aspect
     macro_f1: float
     macro_f1_ci: tuple[float, float]
-    reviews_per_day: float | None  # None when every label came from the cache
-    calls: int
+    reviews_per_day: float | None  # None when no request was ever measured
+    calls: int  # requests spent on these labels, this run and earlier ones
     labeled: int
     missing: int  # dev reviews without a label: scored as "no aspect"
     precision: dict[str, float] = field(default_factory=dict)
@@ -133,13 +133,14 @@ def _scorer(truth: NDArray[np.bool_], predicted: NDArray[np.bool_]) -> IndexMetr
     return score
 
 
-def _reviews_per_day(config: ModelConfig, meter: _Meter, labeled: int) -> float | None:
-    if meter.calls == 0:
+def _reviews_per_day(config: ModelConfig, usage: Usage | None) -> float | None:
+    """From every request this model spent on the prompt, in this run and earlier ones."""
+    if usage is None or usage.calls == 0:
         return None
-    tokens_per_call = meter.tokens / meter.calls
+    tokens_per_call = usage.tokens / usage.calls
     calls_a_minute = min(config.share(config.rpm), config.share(config.tpm) // tokens_per_call)
     calls_a_day = min(config.share(config.rpd), calls_a_minute * _MINUTES_A_DAY)
-    return float(calls_a_day * labeled / meter.calls)
+    return float(calls_a_day * usage.labeled / usage.calls)
 
 
 def run_bakeoff(
@@ -160,6 +161,15 @@ def run_bakeoff(
     for name, config in candidates.items():
         meter = _Meter(make_client(name, config))
         run = label_reviews(meter, cache, reviews, model=config.id)
+        if meter.calls:
+            cache.add_usage(
+                model=config.id,
+                prompt_hash=digest,
+                calls=meter.calls,
+                tokens=meter.tokens,
+                labeled=run.labeled,
+            )
+        usage = cache.usage(model=config.id, prompt_hash=digest)
         labels = cache.get_many(ids, model=config.id, prompt_hash=digest)
         predicted = _matrix([labels.get(i, frozenset()) for i in ids])
         predictions[name] = predicted
@@ -174,8 +184,8 @@ def run_bakeoff(
                 macro_f1_ci=bootstrap_ci(
                     _scorer(truth, predicted), len(ids), samples=samples, seed=seed
                 ),
-                reviews_per_day=_reviews_per_day(config, meter, run.labeled),
-                calls=meter.calls,
+                reviews_per_day=_reviews_per_day(config, usage),
+                calls=usage.calls if usage else 0,
                 labeled=len(labels),
                 missing=len(ids) - len(labels),
                 precision={c: float(v) for c, v in zip(ASPECTS, scores.precision, strict=True)},
@@ -220,7 +230,7 @@ def choose_teacher(result: BakeoffResult) -> str:
 
 
 def _per_day(value: float | None) -> str:
-    return "n/a (all cached)" if value is None else f"{value:,.0f}"
+    return "n/a (not measured)" if value is None else f"{value:,.0f}"
 
 
 def render_report(result: BakeoffResult, winner: str) -> str:

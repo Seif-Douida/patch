@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from patchpulse.labeling.cache import LabelCache
+from patchpulse.labeling.cache import LabelCache, Usage
 
 CREATED = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 
@@ -42,3 +42,12 @@ def test_putting_a_label_again_replaces_it(tmp_path: Path) -> None:
     cache.put_many({1: frozenset({"monetization"})}, model="m", prompt_hash="p", created_at=CREATED)
 
     assert cache.get_many([1], model="m", prompt_hash="p") == {1: frozenset({"monetization"})}
+
+
+def test_usage_accumulates_per_model_and_prompt(tmp_path: Path) -> None:
+    cache = LabelCache(tmp_path / "teacher_labels.sqlite")
+    cache.add_usage(model="m", prompt_hash="p", calls=3, tokens=9_000, labeled=60)
+    cache.add_usage(model="m", prompt_hash="p", calls=1, tokens=2_000, labeled=10)
+
+    assert LabelCache(cache.path).usage(model="m", prompt_hash="p") == Usage(4, 11_000, 70)
+    assert cache.usage(model="m", prompt_hash="other") is None

@@ -1,7 +1,9 @@
 """Teacher labels already paid for (plan Task 7): one SQLite file in data/local, never committed.
 
 A review is sent to Gemini once per (model, prompt): the prompt hash changes whenever the prompt,
-the guidelines it quotes or the cleaning does, so a new prompt is a fresh cache.
+the guidelines it quotes or the cleaning does, so a new prompt is a fresh cache. The requests and
+tokens those labels cost are kept beside them (`Usage`), so a rerun that finds everything cached
+still knows a model's measured throughput.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +29,26 @@ CREATE TABLE IF NOT EXISTS teacher_labels (
     PRIMARY KEY (review_id, model, prompt_hash)
 )
 """
+_USAGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS teacher_usage (
+    model TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    calls INTEGER NOT NULL,
+    tokens INTEGER NOT NULL,
+    labeled INTEGER NOT NULL,
+    PRIMARY KEY (model, prompt_hash)
+)
+"""
 _BATCH = 500  # stays under SQLite's limit on query parameters
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Requests, tokens (Google's count) and labels a model has spent on one prompt, all runs."""
+
+    calls: int
+    tokens: int
+    labeled: int
 
 
 class LabelCache:
@@ -35,6 +57,28 @@ class LabelCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(path)) as connection, connection:
             connection.execute(_SCHEMA)
+            connection.execute(_USAGE_SCHEMA)
+
+    def add_usage(
+        self, *, model: str, prompt_hash: str, calls: int, tokens: int, labeled: int
+    ) -> None:
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO teacher_usage (model, prompt_hash, calls, tokens, labeled) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT (model, prompt_hash) DO UPDATE SET "
+                "calls = calls + excluded.calls, tokens = tokens + excluded.tokens, "
+                "labeled = labeled + excluded.labeled",
+                (model, prompt_hash, calls, tokens, labeled),
+            )
+
+    def usage(self, *, model: str, prompt_hash: str) -> Usage | None:
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT calls, tokens, labeled FROM teacher_usage "
+                "WHERE model = ? AND prompt_hash = ?",
+                (model, prompt_hash),
+            ).fetchone()
+        return None if row is None else Usage(int(row[0]), int(row[1]), int(row[2]))
 
     def get_many(
         self, review_ids: Iterable[int], *, model: str, prompt_hash: str

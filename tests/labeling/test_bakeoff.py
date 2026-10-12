@@ -284,3 +284,31 @@ def test_a_repair_request_is_counted_like_any_other(tmp_path: Path) -> None:
     (fixer,) = result.candidates
     assert fixer.calls == 2
     assert fixer.labeled == 20
+
+
+def test_throughput_survives_a_rerun_from_the_cache(tmp_path: Path) -> None:
+    # A rerun reuses cached labels, so it makes no requests: throughput must come from the cache.
+    reviews, gold = dev_set()
+    cache = LabelCache(tmp_path / "cache.sqlite")
+    first = run_bakeoff(
+        {"perfect": model("m-perfect")},
+        reviews,
+        gold,
+        make_client=lambda name, _: Teacher(gold),
+        cache=cache,
+        samples=50,
+    )
+
+    rerun = run_bakeoff(
+        {"perfect": model("m-perfect")},
+        reviews,
+        gold,
+        make_client=lambda name, _: Down(),  # would raise if asked anything
+        cache=cache,
+        samples=50,
+    )
+
+    (again,) = rerun.candidates
+    assert again.reviews_per_day == first.candidates[0].reviews_per_day == pytest.approx(57_600)
+    assert again.calls == 3
+    assert not again.stopped_for_outage
