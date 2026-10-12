@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -29,8 +30,8 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from patchpulse.labeling.cache import LabelCache
-from patchpulse.labeling.gemini import GeminiError, GeminiResponse, GeminiUnavailableError
 from patchpulse.labeling.limits import QuotaExhaustedError
+from patchpulse.labeling.llm import LLMResponse, TeacherRequestError, TeacherUnavailableError
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.models.snapshot import Snapshot
 from patchpulse.models.text import CLEANING_VERSION, clean_text
@@ -81,7 +82,7 @@ class TextModel(Protocol):
         json_schema: Mapping[str, Any] | None,
         expected_output_tokens: int = ...,
         max_output_tokens: int = ...,
-    ) -> GeminiResponse: ...
+    ) -> LLMResponse: ...
 
 
 @dataclass(frozen=True)
@@ -276,7 +277,7 @@ def label_batch(client: TextModel, batch: Batch) -> list[TeacherLabel]:
     """Labels for the batch's reviews; a review that never validates is left out."""
     try:
         labels = _ask(client, batch)
-    except (AnswerError, GeminiError) as error:
+    except (AnswerError, TeacherRequestError) as error:
         if len(batch.review_ids) == 1:
             log.warning("review %d skipped: %s", batch.review_ids[0], error)
             return []
@@ -299,35 +300,26 @@ def label_reviews(
     *,
     model: str,
     clock: Callable[[], datetime] = _utc_now,
+    workers: int = 1,
 ) -> LabelRun:
+    """Label the reviews not yet cached for `model`, saving each batch as soon as it's done.
+
+    With `workers` above 1, that many batches are in flight at once: for a server without rate
+    limits (Gemini's limiter paces one request at a time). A quota or outage stop keeps every batch
+    that finished; the rest stay "remaining" for the next run.
+    """
     digest = prompt_hash()
     reviews = list(reviews)
     missing = set(cache.missing([r.review_id for r in reviews], model=model, prompt_hash=digest))
     todo = [r for r in reviews if r.review_id in missing]
     cached = len(reviews) - len(todo)
+    batches = make_batches(todo)
     labeled = 0
     next_mark = PROGRESS_EVERY
-    batches = make_batches(todo)
-    for number, batch in enumerate(batches, start=1):
-        try:
-            labels = label_batch(client, batch)
-        except QuotaExhaustedError as error:
-            log.warning("stopped after %d of %d batches: %s", number - 1, len(batches), error)
-            return LabelRun(labeled, cached, len(todo) - labeled, stopped_for_quota=True)
-        except GeminiUnavailableError as error:
-            log.warning(
-                "stopped after %d of %d batches: Google unavailable (%s)",
-                number - 1,
-                len(batches),
-                error,
-            )
-            return LabelRun(
-                labeled,
-                cached,
-                len(todo) - labeled,
-                stopped_for_quota=False,
-                stopped_for_outage=True,
-            )
+    stop: str | None = None
+
+    def save(labels: list[TeacherLabel]) -> None:
+        nonlocal labeled, next_mark
         cache.put_many(
             {label.review_id: label.aspects for label in labels},
             model=model,
@@ -335,13 +327,6 @@ def label_reviews(
             created_at=clock(),
         )
         labeled += len(labels)
-        log.debug(
-            "batch %d of %d: %d of %d labeled",
-            number,
-            len(batches),
-            len(labels),
-            len(batch.review_ids),
-        )
         while labeled >= next_mark:
             log.info(
                 "%s of %s labeled so far (%s were cached)",
@@ -350,4 +335,39 @@ def label_reviews(
                 f"{cached:,}",
             )
             next_mark += PROGRESS_EVERY
-    return LabelRun(labeled, cached, len(todo) - labeled, stopped_for_quota=False)
+
+    def stopped(error: Exception) -> str:
+        reason = "quota" if isinstance(error, QuotaExhaustedError) else "outage"
+        log.warning("stopping with %s of %s labeled (%s): %s", labeled, len(todo), reason, error)
+        return reason
+
+    if workers <= 1:
+        for batch in batches:
+            try:
+                labels = label_batch(client, batch)
+            except (QuotaExhaustedError, TeacherUnavailableError) as error:
+                stop = stopped(error)
+                break
+            save(labels)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(label_batch, client, batch) for batch in batches]
+            for future in as_completed(futures):
+                if future.cancelled():
+                    continue
+                try:
+                    labels = future.result()
+                except (QuotaExhaustedError, TeacherUnavailableError) as error:
+                    if stop is None:
+                        stop = stopped(error)
+                        for waiting in futures:
+                            waiting.cancel()  # those already running still finish and are saved
+                    continue
+                save(labels)
+    return LabelRun(
+        labeled,
+        cached,
+        len(todo) - labeled,
+        stopped_for_quota=stop == "quota",
+        stopped_for_outage=stop == "outage",
+    )

@@ -6,17 +6,20 @@ import json
 import logging
 import os
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
+from fake_clock import FakeClock
 
 from patchpulse.labeling.cache import LabelCache
-from patchpulse.labeling.gemini import GeminiResponse
+from patchpulse.labeling.gemini import GeminiResponse, GeminiUnavailableError
 from patchpulse.labeling.limits import QuotaExhaustedError
 from patchpulse.labeling.silver import (
     label_silver,
+    label_silver_until_done,
     load_silver,
     prevalence_report,
     sample_silver,
@@ -205,9 +208,50 @@ def models_yaml(tmp_path: Path, teacher: str | None) -> None:
         "    json_mode: true\n"
         "    system_instruction: true\n"
         "    use_fraction: 0.5\n"
+        "  server:\n"
+        "    provider: openai_compat\n"
+        "    id: gemma-31b\n"
+        "    json_mode: true\n"
+        "    system_instruction: true\n"
         f"teacher: {teacher or 'null'}\n",
         encoding="utf-8",
     )
+
+
+def test_teacher_label_sends_gemini_one_request_at_a_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clean_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PP_GEMINI_API_KEY", "AIza-test-key")
+    models_yaml(tmp_path, teacher="gemma")
+
+    assert main(["teacher", "label", "--set", "silver", "--workers", "4"]) == 2
+    assert "one request at a time" in capsys.readouterr().err
+
+
+def test_a_self_hosted_teacher_needs_the_server_address_and_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clean_env(monkeypatch, tmp_path)
+    models_yaml(tmp_path, teacher="server")
+
+    assert main(["teacher", "label", "--set", "silver", "--workers", "4"]) == 2
+    error = capsys.readouterr().err
+    assert "PP_LLM_SERVER_URL" in error
+    assert "PP_LLM_SERVER_KEY" in error
+
+
+def test_silver_labeling_can_run_in_parallel(tmp_path: Path) -> None:
+    snap = snapshot()
+    ids = silver_files(tmp_path, snap, n=100)
+
+    run = label_silver(
+        Teacher(), LabelCache(tmp_path / "c.sqlite"), snap, tmp_path, model=MODEL, workers=3
+    )
+
+    assert run.labeled == 100
+    silver = load_silver(tmp_path)
+    assert sorted([*silver.train["review_id"], *silver.holdout["review_id"]]) == sorted(ids)
 
 
 def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -224,7 +268,7 @@ def test_teacher_label_needs_a_chosen_teacher(
     monkeypatch.setenv("PP_GEMINI_API_KEY", "AIza-test-key")
     models_yaml(tmp_path, teacher=None)
 
-    assert main(["teacher", "label", "--set", "silver"]) == 2
+    assert main(["teacher", "label", "--set", "silver", "--keep-going"]) == 2
     assert "teacher bakeoff" in capsys.readouterr().err
 
 
@@ -236,3 +280,94 @@ def test_silver_sample_command_refuses_to_overwrite(
 
     assert main(["silver", "sample", "--seed", "7"]) == 2
     assert "--force" in capsys.readouterr().err
+
+
+class Flaky(Teacher):
+    """Google is down for `outages` stretches: each one fails the next request."""
+
+    def __init__(self, outages: int) -> None:
+        super().__init__()
+        self.outages = outages
+        self.served = 0
+
+    def generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        json_schema: Mapping[str, Any] | None,
+        expected_output_tokens: int = 512,
+        max_output_tokens: int = 4096,
+    ) -> GeminiResponse:
+        if self.outages and self.served % 2 == 1:  # every other batch, while outages last
+            self.outages -= 1
+            self.served += 1
+            raise GeminiUnavailableError(503, "This model is currently experiencing high demand.")
+        self.served += 1
+        return super().generate(system, user, json_schema=json_schema)
+
+
+def test_keep_going_resumes_after_outages_until_done(tmp_path: Path) -> None:
+    snap = snapshot()
+    silver_files(tmp_path, snap, n=100)  # 5 batches
+    clock = FakeClock(datetime(2026, 10, 12, 12, 0, tzinfo=UTC))
+
+    run = label_silver_until_done(
+        Flaky(outages=2),
+        LabelCache(tmp_path / "c.sqlite"),
+        snap,
+        tmp_path,
+        model=MODEL,
+        pause_s=900,
+        max_s=6 * 3600,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert run == LabelRun(labeled=100, cached=0, remaining=0, stopped_for_quota=False)
+    assert clock.slept == [900, 900]
+    assert len(load_silver(tmp_path).train) + len(load_silver(tmp_path).holdout) == 100
+
+
+def test_keep_going_gives_up_at_its_time_limit(tmp_path: Path) -> None:
+    snap = snapshot()
+    silver_files(tmp_path, snap, n=40)
+    clock = FakeClock(datetime(2026, 10, 12, 12, 0, tzinfo=UTC))
+
+    run = label_silver_until_done(
+        DownAfter(1),
+        LabelCache(tmp_path / "c.sqlite"),
+        snap,
+        tmp_path,
+        model=MODEL,
+        pause_s=900,
+        max_s=3600,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert run.stopped_for_outage
+    assert run.labeled == 20  # the first batch of each attempt succeeds, then Google fails
+    assert sum(clock.slept) <= 3600
+
+
+class DownAfter(Teacher):
+    """Answers `ok` requests, then Google stays down."""
+
+    def __init__(self, ok: int) -> None:
+        super().__init__()
+        self.ok = ok
+
+    def generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        json_schema: Mapping[str, Any] | None,
+        expected_output_tokens: int = 512,
+        max_output_tokens: int = 4096,
+    ) -> GeminiResponse:
+        if self.ok == 0:
+            raise GeminiUnavailableError(500, "Internal error encountered.")
+        self.ok -= 1
+        return super().generate(system, user, json_schema=json_schema)

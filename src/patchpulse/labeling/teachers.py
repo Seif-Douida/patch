@@ -1,15 +1,23 @@
 """The teacher candidates, from config/models.yaml (plan Task 7; limits in docs/budget.md).
 
-Each model's free-tier limits are read from Seif's AI Studio dashboard: they are per project, so
-PatchPulse uses only `use_fraction` of each and leaves the rest to everything else on the project
-(the Phase 5 agent shares it). `json_mode` and `system_instruction` record what the Gemini API
-accepted for that model in the live smoke test; Gemma 3 refused system instructions there.
+Two providers (ADR-020):
+
+- `gemini` (the default): Google's free tier. Each model's limits are read from Seif's AI Studio
+  dashboard and are per project, so PatchPulse uses only `use_fraction` of each and leaves the rest
+  to everything else on the project (the Phase 5 agent shares it).
+- `openai_compat`: a self-hosted, OpenAI-style server with no rate limits. Its address and key live
+  in `.env` (PP_LLM_SERVER_URL, PP_LLM_SERVER_KEY), never in this public file.
+
+`json_mode` and `system_instruction` record what the provider accepted for that model in a live
+test; Gemma 3 refused system instructions on Gemini. A model's labels are cached under
+`cache_name`, so the same model served by two providers never shares labels.
 """
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError, model_validator
@@ -25,16 +33,31 @@ class ModelConfigError(ValueError):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    id: str = Field(min_length=1)
-    rpm: PositiveInt
-    tpm: PositiveInt
-    rpd: PositiveInt
+    provider: Literal["gemini", "openai_compat"] = "gemini"
+    id: str = Field(min_length=1)  # the name the provider's API expects
+    # Free-tier limits: required for Gemini, absent for a self-hosted server.
+    rpm: PositiveInt | None = None
+    tpm: PositiveInt | None = None
+    rpd: PositiveInt | None = None
     json_mode: bool
     system_instruction: bool
-    use_fraction: float = Field(gt=0, le=1)
+    use_fraction: float = Field(default=0.5, gt=0, le=1)
 
-    def share(self, limit: int) -> int:
+    @model_validator(mode="after")
+    def _gemini_has_limits(self) -> ModelConfig:
+        missing = [name for name in ("rpm", "tpm", "rpd") if getattr(self, name) is None]
+        if self.provider == "gemini" and missing:
+            raise ValueError(f"a Gemini model needs its free-tier limits: {', '.join(missing)}")
+        return self
+
+    @property
+    def cache_name(self) -> str:
+        return self.id if self.provider == "gemini" else f"{self.provider}/{self.id}"
+
+    def share(self, limit: int | None) -> int:
         """PatchPulse's part of a free-tier limit: `use_fraction` of it, at least 1."""
+        if limit is None:
+            raise ValueError(f"{self.id} has no free-tier limits ({self.provider})")
         return max(1, math.floor(limit * self.use_fraction))
 
 

@@ -13,13 +13,13 @@ import pytest
 from fake_clock import FakeClock
 
 from patchpulse.labeling.gemini import (
-    MAX_ATTEMPTS,
     GeminiClient,
     GeminiError,
     GeminiResponse,
     GeminiUnavailableError,
 )
 from patchpulse.labeling.limits import QuotaExhaustedError, RequestLimiter
+from patchpulse.labeling.llm import MAX_ATTEMPTS
 from patchpulse.labeling.teachers import ModelConfig
 
 KEY = "AIzaTEST-not-a-real-key-123"

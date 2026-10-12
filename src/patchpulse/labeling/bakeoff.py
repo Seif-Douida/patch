@@ -24,7 +24,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from patchpulse.labeling.cache import LabelCache, Usage
-from patchpulse.labeling.gemini import GeminiResponse
+from patchpulse.labeling.llm import LLMResponse
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import (
     PROMPT_VERSION,
@@ -107,7 +107,7 @@ class _Meter:
         json_schema: Mapping[str, Any] | None,
         expected_output_tokens: int = 512,
         max_output_tokens: int = 4096,
-    ) -> GeminiResponse:
+    ) -> LLMResponse:
         answer = self.model.generate(
             system,
             user,
@@ -134,8 +134,8 @@ def _scorer(truth: NDArray[np.bool_], predicted: NDArray[np.bool_]) -> IndexMetr
 
 
 def _reviews_per_day(config: ModelConfig, usage: Usage | None) -> float | None:
-    """From every request this model spent on the prompt, in this run and earlier ones."""
-    if usage is None or usage.calls == 0:
+    """From every request this model spent on the prompt, in all runs; free-tier models only."""
+    if usage is None or usage.calls == 0 or config.provider != "gemini":
         return None
     tokens_per_call = usage.tokens / usage.calls
     calls_a_minute = min(config.share(config.rpm), config.share(config.tpm) // tokens_per_call)
@@ -160,17 +160,17 @@ def run_bakeoff(
     predictions: dict[str, NDArray[np.bool_]] = {}
     for name, config in candidates.items():
         meter = _Meter(make_client(name, config))
-        run = label_reviews(meter, cache, reviews, model=config.id)
+        run = label_reviews(meter, cache, reviews, model=config.cache_name)
         if meter.calls:
             cache.add_usage(
-                model=config.id,
+                model=config.cache_name,
                 prompt_hash=digest,
                 calls=meter.calls,
                 tokens=meter.tokens,
                 labeled=run.labeled,
             )
-        usage = cache.usage(model=config.id, prompt_hash=digest)
-        labels = cache.get_many(ids, model=config.id, prompt_hash=digest)
+        usage = cache.usage(model=config.cache_name, prompt_hash=digest)
+        labels = cache.get_many(ids, model=config.cache_name, prompt_hash=digest)
         predicted = _matrix([labels.get(i, frozenset()) for i in ids])
         predictions[name] = predicted
         scores = prf(truth, predicted)

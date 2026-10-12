@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +16,7 @@ from patchpulse.labeling import teacher
 from patchpulse.labeling.cache import LabelCache
 from patchpulse.labeling.gemini import GeminiError, GeminiResponse, GeminiUnavailableError
 from patchpulse.labeling.limits import QuotaExhaustedError
+from patchpulse.labeling.llm import LLMResponse, TeacherUnavailableError
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import (
     REVIEWS_MARKER,
@@ -224,3 +227,68 @@ def test_an_outage_during_a_single_review_is_not_a_skip() -> None:
 
     with pytest.raises(GeminiUnavailableError):
         label_batch(model, batch)
+
+
+class Parallel:
+    """Thread-safe fake server: labels every review `content`, records the most requests at once."""
+
+    def __init__(self, fail_after: int | None = None) -> None:
+        self.lock = threading.Lock()
+        self.calls = 0
+        self.in_flight = 0
+        self.peak = 0
+        self.fail_after = fail_after
+
+    def generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        json_schema: Mapping[str, Any] | None,
+        expected_output_tokens: int = 512,
+        max_output_tokens: int = 4096,
+    ) -> LLMResponse:
+        with self.lock:
+            self.calls += 1
+            number = self.calls
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+        try:
+            time.sleep(0.05)  # long enough for requests to overlap
+            if self.fail_after is not None and number > self.fail_after:
+                raise TeacherUnavailableError(503, "model is loading")
+            aliases = [r["alias"] for r in sent_reviews(user)]
+            labels = [{"alias": a, "aspects": ["content"]} for a in aliases]
+            return LLMResponse(json.dumps({"labels": labels}), 100, 10, "stop")
+        finally:
+            with self.lock:
+                self.in_flight -= 1
+
+
+def test_parallel_labeling_matches_one_at_a_time(tmp_path: Path) -> None:
+    reviews = [review(i, f"review number {i}") for i in range(1, 101)]  # 5 batches
+    one = LabelCache(tmp_path / "one.sqlite")
+    four = LabelCache(tmp_path / "four.sqlite")
+    server = Parallel()
+
+    sequential = label_reviews(Parallel(), one, reviews, model=MODEL)
+    parallel = label_reviews(server, four, reviews, model=MODEL, workers=4)
+
+    assert parallel == sequential == LabelRun(100, 0, 0, stopped_for_quota=False)
+    assert server.peak > 1
+    ids = range(1, 101)
+    assert four.get_many(ids, model=MODEL, prompt_hash=prompt_hash()) == one.get_many(
+        ids, model=MODEL, prompt_hash=prompt_hash()
+    )
+
+
+def test_a_parallel_outage_keeps_finished_batches_and_skips_nothing(tmp_path: Path) -> None:
+    cache = LabelCache(tmp_path / "c.sqlite")
+    reviews = [review(i, f"review number {i}") for i in range(1, 201)]  # 10 batches
+
+    run = label_reviews(Parallel(fail_after=3), cache, reviews, model=MODEL, workers=2)
+
+    assert run.stopped_for_outage
+    stored = cache.get_many(range(1, 201), model=MODEL, prompt_hash=prompt_hash())
+    assert len(stored) == run.labeled >= 60
+    assert run.labeled + run.remaining == 200

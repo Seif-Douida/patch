@@ -56,6 +56,9 @@ class LabSettings(BaseSettings):
     # Review ids, splits and labels only: committed (spec C4).
     gold_dir: Path = Path("data/gold")
     gemini_api_key: SecretStr | None = None
+    # A self-hosted, OpenAI-style teacher server (ADR-020): its /v1 address and key, not committed.
+    llm_server_url: str | None = None
+    llm_server_key: SecretStr | None = None
     # DagsHub's hosted MLflow (design D7).
     mlflow_tracking_uri: str | None = Field(default=None, validation_alias="MLFLOW_TRACKING_URI")
     mlflow_tracking_username: str | None = Field(

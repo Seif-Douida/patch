@@ -54,17 +54,19 @@ from patchpulse.labeling.gold import (
     write_gold,
 )
 from patchpulse.labeling.limits import USAGE_FILE, RequestLimiter
+from patchpulse.labeling.openai_compat import OpenAICompatClient
 from patchpulse.labeling.silver import (
     IDS_FILE,
     SILVER_DIR,
     SILVER_SIZE,
     label_silver,
+    label_silver_until_done,
     prevalence_report,
     sample_silver,
     split_holdout,
     write_silver_ids,
 )
-from patchpulse.labeling.teacher import review_inputs
+from patchpulse.labeling.teacher import TextModel, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
 from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
 from patchpulse.models.tracking import TrackingError, require_tracking
@@ -201,8 +203,6 @@ def _gold_agreement(settings: LabSettings) -> int:
 
 
 def _teacher_bakeoff(settings: LabSettings, *, names: list[str] | None) -> int:
-    if settings.gemini_api_key is None:
-        raise SettingsError("missing or invalid settings: PP_GEMINI_API_KEY")
     require_tracking()  # before any request, so a missing setting costs nothing
     config = load_model_config()
     unknown = sorted(set(names or []) - set(config.candidates))
@@ -210,29 +210,24 @@ def _teacher_bakeoff(settings: LabSettings, *, names: list[str] | None) -> int:
         print(f"patchpulse-ml: unknown candidates {unknown}", file=sys.stderr)
         return 2
     candidates = {name: config.candidates[name] for name in names or config.candidates}
+    http = httpx2.Client()
+    clients = {name: _client_for(settings, model, http) for name, model in candidates.items()}
     sample = pd.read_csv(settings.gold_dir / SAMPLE_FILE)
     dev = sorted(int(i) for i in sample.loc[sample["split"] == "dev", "review_id"])
     reviews = review_inputs(load_snapshot(settings.data_dir), dev)
     gold = read_labels(settings.gold_dir / CLAUDE_LABELS_FILE)
-    key = settings.gemini_api_key.get_secret_value()
-    http = httpx2.Client()
-
-    def make_client(_: str, model: ModelConfig) -> GeminiClient:
-        limiter = RequestLimiter(model, state_path=settings.data_dir / USAGE_FILE)
-        return GeminiClient(key, http, limiter, model)
-
     result = run_bakeoff(
         candidates,
         reviews,
         gold,
-        make_client=make_client,
+        make_client=lambda name, _: clients[name],
         cache=LabelCache(settings.data_dir / TEACHER_CACHE_FILE),
     )
     quota = [c.name for c in result.candidates if c.stopped_for_quota]
     outage = [c.name for c in result.candidates if c.stopped_for_outage]
     if quota or outage:
         reasons = [f"the daily quota ran out for {', '.join(quota)}"] if quota else []
-        reasons += [f"Google stayed unavailable for {', '.join(outage)}"] if outage else []
+        reasons += [f"the server stayed unavailable for {', '.join(outage)}"] if outage else []
         print(
             f"patchpulse-ml: no verdict: {'; '.join(reasons)}. The labels so far are cached; "
             "run the same command again later (after midnight Pacific time for the quota).",
@@ -273,9 +268,22 @@ def _silver_sample(settings: LabSettings, *, seed: int, n: int, force: bool) -> 
     return 0
 
 
-def _teacher_label(settings: LabSettings, *, candidate: str | None) -> int:
+def _client_for(settings: LabSettings, model: ModelConfig, http: httpx2.Client) -> TextModel:
+    """The teacher client for a model's provider; a missing setting is named before any request."""
+    if model.provider == "openai_compat":
+        if settings.llm_server_url is None or settings.llm_server_key is None:
+            raise SettingsError("missing or invalid settings: PP_LLM_SERVER_URL, PP_LLM_SERVER_KEY")
+        key = settings.llm_server_key.get_secret_value()
+        return OpenAICompatClient(key, settings.llm_server_url, http, model)
     if settings.gemini_api_key is None:
         raise SettingsError("missing or invalid settings: PP_GEMINI_API_KEY")
+    limiter = RequestLimiter(model, state_path=settings.data_dir / USAGE_FILE)
+    return GeminiClient(settings.gemini_api_key.get_secret_value(), http, limiter, model)
+
+
+def _teacher_label(
+    settings: LabSettings, *, candidate: str | None, keep_going: bool, workers: int
+) -> int:
     config = load_model_config()
     name = candidate or config.teacher
     if name is None:
@@ -289,13 +297,23 @@ def _teacher_label(settings: LabSettings, *, candidate: str | None) -> int:
         print(f"patchpulse-ml: unknown candidate {name!r}", file=sys.stderr)
         return 2
     model = config.candidates[name]
-    limiter = RequestLimiter(model, state_path=settings.data_dir / USAGE_FILE)
-    client = GeminiClient(
-        settings.gemini_api_key.get_secret_value(), httpx2.Client(), limiter, model
-    )
+    if model.provider == "gemini" and workers > 1:
+        print(
+            "patchpulse-ml: Gemini's free tier is paced one request at a time; drop --workers",
+            file=sys.stderr,
+        )
+        return 2
+    client = _client_for(settings, model, httpx2.Client())
     snapshot = load_snapshot(settings.data_dir)
     cache = LabelCache(settings.data_dir / TEACHER_CACHE_FILE)
-    run = label_silver(client, cache, snapshot, settings.data_dir, model=model.id)
+    if keep_going:
+        run = label_silver_until_done(
+            client, cache, snapshot, settings.data_dir, model=model.cache_name, workers=workers
+        )
+    else:
+        run = label_silver(
+            client, cache, snapshot, settings.data_dir, model=model.cache_name, workers=workers
+        )
     log.info(
         "%s: %d labeled now, %d cached before, %d remaining",
         name,
@@ -307,7 +325,7 @@ def _teacher_label(settings: LabSettings, *, candidate: str | None) -> int:
     if run.stopped_for_quota:
         log.warning("the daily quota ran out; run the same command after midnight Pacific time")
     if run.stopped_for_outage:
-        log.warning("Google stayed unavailable; run the same command again later")
+        log.warning("the teacher's server stayed unavailable; run the same command again later")
     return 0
 
 
@@ -343,6 +361,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     label = teacher.add_parser("label", help="label a review set with the chosen teacher")
     label.add_argument("--set", dest="review_set", choices=["silver"], required=True)
     label.add_argument("--candidate", help="a name from config/models.yaml (default: teacher)")
+    label.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="after an outage stop, wait 15 minutes and resume (for up to 24 hours)",
+    )
+    label.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="batches in flight at once; a self-hosted server only (default 1)",
+    )
     silver = commands.add_parser("silver", help="the silver set").add_subparsers(
         dest="silver_command", required=True
     )
@@ -360,7 +389,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "silver":
             return _silver_sample(settings, seed=args.seed, n=args.n, force=args.force)
         if args.command == "teacher" and args.teacher_command == "label":
-            return _teacher_label(settings, candidate=args.candidate)
+            return _teacher_label(
+                settings,
+                candidate=args.candidate,
+                keep_going=args.keep_going,
+                workers=args.workers,
+            )
         if args.command == "teacher":
             names = args.candidates.split(",") if args.candidates else None
             return _teacher_bakeoff(settings, names=names)

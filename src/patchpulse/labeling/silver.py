@@ -12,9 +12,12 @@
 
 from __future__ import annotations
 
+import logging
 import math
-from collections.abc import Iterable, Sequence
+import time
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +43,11 @@ SILVER_SIZE = 30_000
 HOLDOUT_FRACTION = 0.1
 DEFAULT_CAP_SHARE = 0.2  # no game gets more than a fifth of the silver set, if it can be avoided
 TRAIN, HOLDOUT = "train", "holdout"
+# --keep-going: after an outage stop, wait this long and resume, for at most this long in all.
+OUTAGE_PAUSE_S = 15 * 60
+KEEP_GOING_MAX_S = 24 * 3600
+
+log = logging.getLogger("patchpulse.labeling.silver")
 
 
 @dataclass(frozen=True)
@@ -146,13 +154,61 @@ def export_silver_labels(cache: LabelCache, data_dir: Path, *, model: str) -> in
 
 
 def label_silver(
-    client: TextModel, cache: LabelCache, snapshot: Snapshot, data_dir: Path, *, model: str
+    client: TextModel,
+    cache: LabelCache,
+    snapshot: Snapshot,
+    data_dir: Path,
+    *,
+    model: str,
+    workers: int = 1,
 ) -> LabelRun:
     """Label the silver reviews not yet cached; resumable, and exported even after a quota stop."""
     ids = [int(i) for i in read_silver_ids(data_dir)["review_id"]]
-    run = label_reviews(client, cache, review_inputs(snapshot, ids), model=model)
+    run = label_reviews(client, cache, review_inputs(snapshot, ids), model=model, workers=workers)
     export_silver_labels(cache, data_dir, model=model)
     return run
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def label_silver_until_done(
+    client: TextModel,
+    cache: LabelCache,
+    snapshot: Snapshot,
+    data_dir: Path,
+    *,
+    model: str,
+    pause_s: float = OUTAGE_PAUSE_S,
+    max_s: float = KEEP_GOING_MAX_S,
+    clock: Callable[[], datetime] = _utc_now,
+    sleep: Callable[[float], None] = time.sleep,
+    workers: int = 1,
+) -> LabelRun:
+    """`label_silver`, resumed after each outage stop until done or until `max_s` has passed.
+
+    A quota stop isn't retried: the quota resets at midnight Pacific time, not in minutes.
+    """
+    started = clock()
+    first = run = label_silver(client, cache, snapshot, data_dir, model=model, workers=workers)
+    labeled = run.labeled
+    while run.stopped_for_outage:
+        elapsed = (clock() - started).total_seconds()
+        if elapsed + pause_s > max_s:
+            log.warning("Google is still unavailable after %.1f h; giving up", elapsed / 3600)
+            break
+        log.warning("Google unavailable; resuming in %.0f minutes", pause_s / 60)
+        sleep(pause_s)
+        run = label_silver(client, cache, snapshot, data_dir, model=model, workers=workers)
+        labeled += run.labeled
+    return LabelRun(
+        labeled=labeled,
+        cached=first.cached,
+        remaining=run.remaining,
+        stopped_for_quota=run.stopped_for_quota,
+        stopped_for_outage=run.stopped_for_outage,
+    )
 
 
 def _expand(frame: pd.DataFrame) -> pd.DataFrame:

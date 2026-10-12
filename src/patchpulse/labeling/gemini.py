@@ -25,45 +25,33 @@ from typing import Any
 import httpx2
 
 from patchpulse.labeling.limits import QuotaExhaustedError, RequestLimiter
+from patchpulse.labeling.llm import (
+    BACKOFF_S,
+    MAX_ATTEMPTS,
+    LLMResponse,
+    TeacherRequestError,
+    TeacherUnavailableError,
+)
 from patchpulse.labeling.teachers import ModelConfig
 
 log = logging.getLogger("patchpulse.labeling.gemini")
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 REQUEST_TIMEOUT_S = 120.0
-MAX_ATTEMPTS = 6
-_BACKOFF_S = (5.0, 15.0, 45.0, 90.0, 120.0)  # 275 s in all: overloads usually pass by then
+_BACKOFF_S = BACKOFF_S
 _DEFAULT_RETRY_S = 60.0  # a per-minute 429 without a retryDelay
 _CHARS_PER_TOKEN = 3  # a cautious estimate until Google counts the real tokens
 
 
-@dataclass(frozen=True)
-class GeminiResponse:
-    text: str
-    input_tokens: int
-    output_tokens: int  # the answer plus any thinking: both count against TPM
-    finish_reason: str
+GeminiResponse = LLMResponse  # the shared answer type (llm.py), under its original name
 
 
-class GeminiError(RuntimeError):
-    """Google refused or failed a request; `status` is the HTTP status (0 for a network error)."""
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(f"{status}: {message}")
-        self.status = status
-        self.message = message
+class GeminiError(TeacherRequestError):
+    """Google refused a request or blocked the prompt; `status` is the HTTP status."""
 
 
-class GeminiUnavailableError(RuntimeError):
-    """Google kept failing (5xx, rate limits, network) through every retry: try again later.
-
-    Not a `GeminiError`, so nobody mistakes an outage for a problem with the request.
-    """
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(f"{status}: {message}")
-        self.status = status
-        self.message = message
+class GeminiUnavailableError(TeacherUnavailableError):
+    """Google kept failing (5xx, rate limits, network) through every retry: try again later."""
 
 
 @dataclass(frozen=True)

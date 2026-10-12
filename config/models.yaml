@@ -29,6 +29,15 @@ candidates:
     json_mode: true
     system_instruction: true
     use_fraction: 0.5
+  # The bake-off winner's model, self-hosted on an OpenAI-style server with no rate limits
+  # (ADR-020). Its address and key are PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY in .env. On gold dev
+  # it tied Google's copy (macro-F1 0.890 vs 0.886; 137 of 150 label sets identical, 2026-10-12).
+  selfhosted-gemma-4-31b:
+    provider: openai_compat
+    id: gemma-31b
+    json_mode: true
+    system_instruction: true
 
-# The bake-off winner (plan Task 9, 2026-10-12): reports/aspects/teacher-bakeoff.md.
-teacher: gemma-4-31b
+# The bake-off winner was gemma-4-31b (plan Task 9, 2026-10-12, reports/aspects/teacher-bakeoff.md).
+# Google's free tier kept failing it, so the silver set is labeled by the same model self-hosted.
+teacher: selfhosted-gemma-4-31b

@@ -23,7 +23,7 @@ from patchpulse.labeling.bakeoff import (
 )
 from patchpulse.labeling.cache import LabelCache
 from patchpulse.labeling.gemini import GeminiResponse, GeminiUnavailableError
-from patchpulse.labeling.teacher import REVIEWS_MARKER, ReviewIn
+from patchpulse.labeling.teacher import REVIEWS_MARKER, ReviewIn, prompt_hash
 from patchpulse.labeling.teachers import ModelConfig
 from patchpulse.models.cli import main
 
@@ -218,6 +218,19 @@ def test_bakeoff_command_needs_the_gemini_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     requests = no_settings(monkeypatch, tmp_path)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}")
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text(
+        "candidates:\n"
+        "  gemma:\n"
+        "    id: gemma-4-31b-it\n"
+        "    rpm: 30\n"
+        "    tpm: 16000\n"
+        "    rpd: 14400\n"
+        "    json_mode: true\n"
+        "    system_instruction: true\n",
+        encoding="utf-8",
+    )
 
     assert main(["teacher", "bakeoff"]) == 2
     assert "PP_GEMINI_API_KEY" in capsys.readouterr().err
@@ -312,3 +325,29 @@ def test_throughput_survives_a_rerun_from_the_cache(tmp_path: Path) -> None:
     assert again.reviews_per_day == first.candidates[0].reviews_per_day == pytest.approx(57_600)
     assert again.calls == 3
     assert not again.stopped_for_outage
+
+
+def test_a_self_hosted_model_has_no_free_tier_throughput(tmp_path: Path) -> None:
+    reviews, gold = dev_set(20)
+    server = ModelConfig(
+        provider="openai_compat", id="gemma-4-31b-it", json_mode=True, system_instruction=True
+    )
+
+    result = run_bakeoff(
+        {"server": server},
+        reviews,
+        gold,
+        make_client=lambda name, _: Teacher(gold),
+        cache=LabelCache(tmp_path / "cache.sqlite"),
+        samples=50,
+    )
+
+    (scored,) = result.candidates
+    assert scored.reviews_per_day is None
+    assert scored.labeled == 20
+    cached = LabelCache(tmp_path / "cache.sqlite").get_many(
+        [r.review_id for r in reviews],
+        model="openai_compat/gemma-4-31b-it",
+        prompt_hash=prompt_hash(),
+    )
+    assert len(cached) == 20  # stored under the server's own name

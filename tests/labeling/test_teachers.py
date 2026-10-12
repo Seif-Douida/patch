@@ -60,3 +60,46 @@ def test_repo_models_config_is_valid() -> None:
 
     assert {"gemma-4-31b", "gemma-4-26b-a4b", "gemini-3.5-flash-lite"} <= set(config.candidates)
     assert all(model.use_fraction == 0.5 for model in config.candidates.values())
+
+
+SERVER = """
+candidates:
+  google-31b:
+    id: gemma-4-31b-it
+    rpm: 30
+    tpm: 16000
+    rpd: 14400
+    json_mode: true
+    system_instruction: true
+    use_fraction: 0.5
+  server-31b:
+    provider: openai_compat
+    id: gemma-4-31b-it
+    json_mode: true
+    system_instruction: true
+teacher: server-31b
+"""
+
+
+def test_a_self_hosted_model_needs_no_rate_limits_and_caches_under_its_own_name(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(SERVER, encoding="utf-8")
+
+    config = load_model_config(path)
+
+    google, server = config.candidates["google-31b"], config.candidates["server-31b"]
+    assert (google.provider, server.provider) == ("gemini", "openai_compat")
+    assert server.rpm is None
+    assert google.cache_name == "gemma-4-31b-it"
+    # The same model id on another server must never share Google's cached labels.
+    assert server.cache_name == "openai_compat/gemma-4-31b-it"
+
+
+def test_a_gemini_model_still_needs_its_free_tier_limits(tmp_path: Path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(VALID.replace("    rpd: 14400\n", ""), encoding="utf-8")
+
+    with pytest.raises(ModelConfigError, match="rpd"):
+        load_model_config(path)
