@@ -249,6 +249,17 @@ def test_nightly_job_publishes_with_the_github_app(resources: list[dict[str, Any
     assert "PP_GITHUB_APP_ID" in env
 
 
+def test_nightly_job_has_the_score_budget(resources: list[dict[str, Any]]) -> None:
+    # Design D8: 5 minutes of scoring while the backfill runs keeps a night well inside its
+    # timeout, with up to 5 more for one Steam rate-limit pause (ingest/http.py).
+    (nightly,) = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] == "pp-nightly"]
+    (container,) = nightly["properties"]["template"]["containers"]
+    env = {variable["name"]: variable.get("value") for variable in container["env"]}
+    assert env["PP_SCORE_BUDGET_MINUTES"] == "5"
+    minutes = int(env["PP_BACKFILL_BUDGET_MINUTES"]) + int(env["PP_SCORE_BUDGET_MINUTES"]) + 5
+    assert minutes * 60 <= literal_number(nightly["properties"]["configuration"]["replicaTimeout"])
+
+
 def test_metric_alerts_stay_inside_the_free_time_series(resources: list[dict[str, Any]]) -> None:
     # The first 10 monitored metric time series a month are free. One resource, one metric and no
     # dimension split is one time series; a dimension would multiply them.

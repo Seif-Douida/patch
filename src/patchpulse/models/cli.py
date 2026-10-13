@@ -24,6 +24,8 @@
                        teacher's gold labels (`teacher label --set gold`).
     champion register  Register the evaluated models on DagsHub's MLflow registry (aliases
                        `champion` and `challenger`) and pin the champion in models/champion.yaml.
+    champion download  Download the pinned champion (`--to build/champion`), refusing it unless
+                       it matches the pin; deploy.yml runs it before building the jobs image.
 
 Exit codes: 0 success, 1 the command failed, 2 bad configuration or a refused action.
 """
@@ -89,7 +91,15 @@ from patchpulse.labeling.silver import (
 from patchpulse.labeling.teacher import TextModel, label_reviews, prompt_hash, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
 from patchpulse.models.artifact import MODEL_FILE, Scorer, load_scorer, record_metrics
-from patchpulse.models.champion import pin_for, register_models, write_pin
+from patchpulse.models.champion import (
+    PIN_FILE,
+    ChampionError,
+    download_champion,
+    pin_for,
+    read_pin,
+    register_models,
+    write_pin,
+)
 from patchpulse.models.embed_gpu import EMBEDDINGS_DIR, cached_embeddings
 from patchpulse.models.encoder import (
     E5_MODEL_ID,
@@ -891,6 +901,24 @@ def _champion_register(settings: LabSettings) -> int:
     return 0
 
 
+def _champion_download(to: Path) -> int:
+    require_tracking()
+    if not PIN_FILE.is_file():
+        print(f"patchpulse-ml: no {PIN_FILE.as_posix()}: run `champion register`", file=sys.stderr)
+        return 2
+    pin = read_pin()
+    try:
+        artifact = download_champion(pin, to)
+    except ChampionError as error:
+        print(f"patchpulse-ml: {error}", file=sys.stderr)
+        return 1
+    print(
+        f"{pin.name} version {pin.version} ({artifact.family} {artifact.version}) "
+        f"checked and written to {to.as_posix()}"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="patchpulse-ml", description="PatchPulse Phase 2: local snapshot, labeling, training."
@@ -963,6 +991,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="champion_command", required=True
     )
     champion.add_parser("register", help="register the evaluated models and pin the champion")
+    download = champion.add_parser("download", help="download the pinned champion and check it")
+    download.add_argument("--to", type=Path, required=True, help="the directory to write it to")
     args = parser.parse_args(argv)
 
     # A character the console can't encode (Windows' cp1252, redirected to a file) prints as "?"
@@ -976,6 +1006,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = get_lab_settings()
         if args.command == "pull":
             return _pull(settings, yes=args.yes)
+        if args.command == "champion" and args.champion_command == "download":
+            return _champion_download(args.to)
         if args.command == "champion":
             return _champion_register(settings)
         if args.command == "evaluate" and args.evaluate_command == "choose":

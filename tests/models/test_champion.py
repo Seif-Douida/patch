@@ -13,7 +13,7 @@ from tiny_encoder import write_tiny_encoder
 from toy_reviews import toy_reviews
 
 from patchpulse.labeling.taxonomy import TAXONOMY_VERSION
-from patchpulse.models.artifact import MODEL_FILE, load_scorer, sha256_file
+from patchpulse.models.artifact import MODEL_FILE, load_scorer, read_artifact, sha256_file
 from patchpulse.models.champion import (
     REGISTERED_MODEL,
     ChampionError,
@@ -24,6 +24,7 @@ from patchpulse.models.champion import (
     register_models,
     write_pin,
 )
+from patchpulse.models.cli import main
 from patchpulse.models.encoder import OnnxEncoder
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.models.s1a import save_s1a, train_s1a
@@ -89,3 +90,30 @@ def test_champion_pin_is_validated_and_the_checksum_checked_on_download(
     ):
         with pytest.raises(ValidationError):
             ChampionPin.model_validate(bad)
+
+
+def test_champion_download_command_writes_the_pinned_model(
+    models: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    registered = register_models(models, champion="s0", challenger=None)
+    write_pin(pin_for(registered["s0"], models["s0"]))
+
+    assert main(["champion", "download", "--to", "build/champion"]) == 0
+
+    assert read_artifact(Path("build/champion")).family == "s0"
+    assert f"aspect-classifier version {registered['s0'].version}" in capsys.readouterr().out
+
+
+def test_champion_download_command_refuses_a_model_that_doesnt_match_the_pin(
+    models: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["champion", "download", "--to", "build/champion"]) == 2  # no pin yet
+    assert "models/champion.yaml" in capsys.readouterr().err
+    registered = register_models(models, champion="s0", challenger=None)
+    pin = pin_for(registered["s0"], models["s0"])
+    write_pin(pin.model_copy(update={"model_json_sha256": "0" * 64}))
+
+    assert main(["champion", "download", "--to", "build/champion"]) == 1
+
+    assert "doesn't match the pin" in capsys.readouterr().err
+    assert not Path("build/champion").exists()
