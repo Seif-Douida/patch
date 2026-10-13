@@ -4,8 +4,9 @@
 missing setting can't quietly log to a local folder instead. Only reports (`reports/`) may be
 logged as artifacts:
 - never anything under `data/`, where review text and the annotators' notes live (spec C4);
-- never model files (`build/`): a model's vocabulary holds phrasing from reviews, so models stay on
-  this machine (Seif, 12 Oct). Runs record each model file's SHA-256 instead.
+- model directories only through `log_model_dir`, from `build/models/`, for the registry
+  (`champion.register_models`; ADR-021 as amended on 13 Oct: S0 hashes its n-grams, so no model
+  file holds review words). Training runs record each model file's SHA-256 instead.
 """
 
 from __future__ import annotations
@@ -52,6 +53,17 @@ def require_tracking() -> str:
     return os.environ["MLFLOW_TRACKING_URI"]
 
 
+def use_tracking() -> str:
+    """Point MLflow at the configured store before any client is made; returns the URI.
+
+    MLflow's own global URI wins over the environment, so a process that switches stores (tests,
+    or a later command) must set it before creating a client.
+    """
+    uri = require_tracking()
+    mlflow.set_tracking_uri(uri)
+    return uri
+
+
 @contextmanager
 def tracking_run(
     experiment: str,
@@ -60,7 +72,7 @@ def tracking_run(
     tags: Mapping[str, str] | None = None,
     run_name: str | None = None,
 ) -> Iterator[ActiveRun]:
-    mlflow.set_tracking_uri(require_tracking())
+    use_tracking()
     mlflow.set_experiment(experiment)
     with mlflow.start_run(run_name=run_name, tags=dict(tags or {})) as run:
         if params:
@@ -88,3 +100,14 @@ def _may_leave(path: Path) -> Path:
 
 def log_report(path: Path) -> None:
     mlflow.log_artifact(str(_may_leave(path)))
+
+
+MODELS_ROOT = Path("build/models")
+
+
+def log_model_dir(path: Path) -> None:
+    """A model directory under build/models, logged whole under `model/` (for the registry)."""
+    resolved = path.resolve()
+    if not resolved.is_relative_to((Path.cwd() / MODELS_ROOT).resolve()) or not resolved.is_dir():
+        raise TrackingError(f"refused to log {path}: only model directories under build/models/")
+    mlflow.log_artifacts(str(resolved), artifact_path="model")

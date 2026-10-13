@@ -15,7 +15,13 @@ import pytest
 from toy_reviews import toy_reviews
 
 from patchpulse.labeling.taxonomy import ASPECTS, TAXONOMY_VERSION
-from patchpulse.models.artifact import MODEL_FILE, ArtifactError, load_scorer, read_artifact
+from patchpulse.models.artifact import (
+    MODEL_FILE,
+    ArtifactError,
+    load_scorer,
+    read_artifact,
+    record_metrics,
+)
 from patchpulse.models.s0 import S0_FILE, S0Params, save_s0, train_s0
 from patchpulse.models.text import CLEANING_VERSION
 
@@ -23,7 +29,7 @@ from patchpulse.models.text import CLEANING_VERSION
 @pytest.fixture
 def saved(tmp_path: Path) -> Path:
     texts, labels = toy_reviews(200, seed=4)
-    model = train_s0(texts, labels, params=S0Params(min_df=1))
+    model = train_s0(texts, labels, params=S0Params())
     save_s0(model, tmp_path, thresholds=np.linspace(0.3, 0.7, 10), version="20261012T200000Z")
     return tmp_path
 
@@ -31,7 +37,7 @@ def saved(tmp_path: Path) -> Path:
 def test_artifact_round_trip_gives_identical_probabilities(tmp_path: Path) -> None:
     texts, labels = toy_reviews(200, seed=4)
     unseen, _ = toy_reviews(30, seed=5)
-    model = train_s0(texts, labels, params=S0Params(min_df=1))
+    model = train_s0(texts, labels, params=S0Params())
     cuts = np.linspace(0.3, 0.7, 10)
 
     written = save_s0(model, tmp_path, thresholds=cuts, version="20261012T200000Z")
@@ -106,3 +112,15 @@ def test_scoring_needs_only_the_scoring_group() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_test_scores_are_recorded_in_the_model_record(saved: Path) -> None:
+    before = read_artifact(saved)
+    scores = {"test_macro_f1": 0.61, "test_macro_f1_low": 0.55, "test_macro_f1_high": 0.66}
+
+    after = record_metrics(saved, scores)
+
+    assert after.metrics == scores
+    assert read_artifact(saved) == after
+    assert (after.files, after.thresholds) == (before.files, before.thresholds)
+    assert load_scorer(saved).artifact == after

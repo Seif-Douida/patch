@@ -3,17 +3,19 @@ regression, trained on invented reviews here."""
 
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pytest
-from toy_reviews import toy_reviews
+from toy_reviews import WORDS, toy_reviews
 
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.models.artifact import load_scorer
-from patchpulse.models.s0 import S0Params, save_s0, train_s0
+from patchpulse.models.s0 import S0_FILE, S0Params, save_s0, train_s0
 
-TOY = S0Params(min_df=1)
+TOY = S0Params()
 
 
 def test_s0_learns_a_toy_multilabel_set() -> None:
@@ -54,3 +56,15 @@ def test_scorer_accepts_odd_reviews(tmp_path: Path) -> None:
     assert np.isfinite(probs).all()
     assert ((probs >= 0) & (probs <= 1)).all()
     assert scorer.labels(probs).dtype == bool
+
+
+def test_a_saved_s0_holds_no_words_from_its_reviews(tmp_path: Path) -> None:
+    """ADR-021: S0 hashes its n-grams, so the model file keeps no vocabulary of review phrases."""
+    texts, labels = toy_reviews(400, seed=7)
+    save_s0(train_s0(texts, labels), tmp_path, thresholds=np.full(10, 0.5), version="t")
+
+    unpacked = pickle.dumps(joblib.load(tmp_path / S0_FILE))
+
+    words = {word for phrases in WORDS.values() for phrase in phrases for word in phrase.split()}
+    found = sorted(word for word in words if len(word) > 3 and word.encode() in unpacked)
+    assert found == []

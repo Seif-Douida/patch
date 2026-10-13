@@ -5,8 +5,9 @@ carries languages without spaces, like Chinese), then one logistic regression pe
 balanced class weights. Texts are cleaned with the shared `clean_texts` before both training and
 scoring, so the two always see the same input.
 
-`min_df` keeps only n-grams found in at least that many different reviews: the saved vocabulary
-holds shared phrases and fragments, never a review's text.
+The n-grams are hashed into 2^hash_bits buckets (`HashingVectorizer`), so the saved model holds no
+vocabulary: no word or phrase from a review is in it, only numbers per bucket (ADR-021). On gold
+dev that cost nothing against a 500k-term vocabulary (0.647 vs 0.627 macro-F1, within noise).
 
 scikit-learn, joblib and NumPy only (the `scoring` group), so the jobs image can score with it.
 """
@@ -21,7 +22,7 @@ from typing import Any
 import joblib
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer, TfidfTransformer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import FeatureUnion, Pipeline
@@ -37,9 +38,7 @@ S0_FILE = "s0.joblib"
 class S0Params:
     word_ngrams: tuple[int, int] = (1, 2)
     char_ngrams: tuple[int, int] = (3, 5)
-    min_df: int = 3
-    max_word_features: int = 200_000
-    max_char_features: int = 300_000
+    hash_bits: int = 18  # 2^18 buckets per analyzer: 2^20 scored no better on dev, 2.3x larger
     c: float = 4.0  # inverse regularisation strength of each logistic regression
     max_iter: int = 1_000
 
@@ -55,32 +54,31 @@ class S0Model:
         return np.asarray(self.pipeline.predict_proba(clean_texts(texts)), dtype=np.float64)
 
 
-def _pipeline(params: S0Params) -> Pipeline:
-    shared: dict[str, Any] = {
-        "min_df": params.min_df,
-        "sublinear_tf": True,
-        "dtype": np.float32,
-    }
-    features = FeatureUnion(
+def _hashed(analyzer: str, ngrams: tuple[int, int], bits: int) -> Pipeline:
+    """Counts of hashed n-grams, then TF-IDF weights: no vocabulary is kept."""
+    return Pipeline(
         [
             (
-                "words",
-                TfidfVectorizer(
-                    analyzer="word",
-                    ngram_range=params.word_ngrams,
-                    max_features=params.max_word_features,
-                    **shared,
+                "hash",
+                HashingVectorizer(
+                    analyzer=analyzer,
+                    ngram_range=ngrams,
+                    n_features=2**bits,
+                    alternate_sign=False,
+                    norm=None,
+                    dtype=np.float32,
                 ),
             ),
-            (
-                "chars",
-                TfidfVectorizer(
-                    analyzer="char_wb",
-                    ngram_range=params.char_ngrams,
-                    max_features=params.max_char_features,
-                    **shared,
-                ),
-            ),
+            ("tfidf", TfidfTransformer(sublinear_tf=True)),
+        ]
+    )
+
+
+def _pipeline(params: S0Params) -> Pipeline:
+    features = FeatureUnion(
+        [
+            ("words", _hashed("word", params.word_ngrams, params.hash_bits)),
+            ("chars", _hashed("char_wb", params.char_ngrams, params.hash_bits)),
         ]
     )
     head = OneVsRestClassifier(

@@ -8,7 +8,8 @@
     teacher bakeoff    Label gold dev with each teacher candidate and pick one (reports/aspects/,
                        MLflow). Needs PP_GEMINI_API_KEY and the MLFLOW_TRACKING_* settings.
     silver sample      Draw the ~30k silver reviews and their holdout (data/local/silver/).
-    teacher label      Label the silver set with the chosen teacher; resumable after a quota stop.
+    teacher label      Label the silver set (or `--set gold`, for the eval report) with the chosen
+                       teacher; resumable after a quota stop.
     train s0           Train S0 (TF-IDF + logistic regression) on silver train, tune its thresholds
                        on gold dev, save it under build/models/ and log it to MLflow (`students`).
     train s1a          The same for S1a (frozen e5 embeddings + logistic regression). Downloads e5
@@ -16,6 +17,13 @@
     train s1b          The same for S1b (e5 fine-tuned on the GTX 1650, exported to int8 ONNX).
                        Needs the gpu group: `uv run --group gpu patchpulse-ml train s1b`.
                        `--checkpoint build/checkpoints/s1b-...` reuses a finished fine-tune.
+    evaluate choose    Pick the champion on gold dev by the fixed rules, after timing each model
+                       in a 1-CPU, 2 GiB Docker container (reports/aspects/champion-choice.json).
+    evaluate report    Score the teacher and the students on gold test and Seif's 150, once, and
+                       write reports/aspects/phase-2-eval.md. Needs `evaluate choose` and the
+                       teacher's gold labels (`teacher label --set gold`).
+    champion register  Register the evaluated models on DagsHub's MLflow registry (aliases
+                       `champion` and `challenger`) and pin the champion in models/champion.yaml.
 
 Exit codes: 0 success, 1 the command failed, 2 bad configuration or a refused action.
 """
@@ -32,6 +40,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx2
+import mlflow
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -77,9 +86,10 @@ from patchpulse.labeling.silver import (
     split_holdout,
     write_silver_ids,
 )
-from patchpulse.labeling.teacher import TextModel, review_inputs
+from patchpulse.labeling.teacher import TextModel, label_reviews, prompt_hash, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
-from patchpulse.models.artifact import Scorer
+from patchpulse.models.artifact import MODEL_FILE, Scorer, load_scorer, record_metrics
+from patchpulse.models.champion import pin_for, register_models, write_pin
 from patchpulse.models.embed_gpu import EMBEDDINGS_DIR, cached_embeddings
 from patchpulse.models.encoder import (
     E5_MODEL_ID,
@@ -89,6 +99,19 @@ from patchpulse.models.encoder import (
     OnnxClassifier,
     OnnxEncoder,
     build_encoder,
+)
+from patchpulse.models.evaluate import (
+    COST_ORDER,
+    TEACHER,
+    Candidate,
+    Choice,
+    GoldSet,
+    ModelFacts,
+    Outputs,
+    benchmark_cpu,
+    choose_champion,
+    evaluate_models,
+    render_eval_report,
 )
 from patchpulse.models.s0 import S0Params, save_s0, train_s0
 from patchpulse.models.s1a import HEAD_FILE, S1aParams, S1aScorer, load_head, save_s1a, train_s1a
@@ -103,11 +126,21 @@ from patchpulse.models.s1b import (
 )
 from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
 from patchpulse.models.text import clean_texts
-from patchpulse.models.tracking import TrackingError, require_tracking
+from patchpulse.models.thresholds import cv_predictions
+from patchpulse.models.tracking import (
+    TrackingError,
+    log_ids_hash,
+    log_report,
+    require_tracking,
+    tracking_run,
+)
 from patchpulse.models.training import (
+    CV_FOLDS,
+    CV_SEED,
     MODELS_DIR,
     DevScores,
     TrainingData,
+    label_matrix,
     load_training_data,
     log_student,
     new_version,
@@ -119,6 +152,11 @@ log = logging.getLogger("patchpulse.ml")
 ENCODERS_DIR = Path("build/encoders")
 CHECKPOINTS_DIR = Path("build/checkpoints")
 CPU_PREVIEW_REVIEWS = 500
+CHOICE_PATH = Path("reports/aspects/champion-choice.json")
+EVAL_REPORT_PATH = Path("reports/aspects/phase-2-eval.md")
+EVAL_EXPERIMENT = "evaluation"
+EVAL_SEED = 20261012
+BENCHMARK_REVIEWS = 2_000
 
 PULL_COST = (
     "`pull` wakes Azure SQL, which costs about 2,000-2,500 of the month's 100,000 free vCore-s. "
@@ -329,8 +367,16 @@ def _client_for(settings: LabSettings, model: ModelConfig, http: httpx2.Client) 
 
 
 def _teacher_label(
-    settings: LabSettings, *, candidate: str | None, keep_going: bool, workers: int
+    settings: LabSettings,
+    *,
+    review_set: str,
+    candidate: str | None,
+    keep_going: bool,
+    workers: int,
 ) -> int:
+    if review_set == "gold" and keep_going:
+        print("patchpulse-ml: --keep-going is for the silver set only", file=sys.stderr)
+        return 2
     config = load_model_config()
     name = candidate or config.teacher
     if name is None:
@@ -353,6 +399,22 @@ def _teacher_label(
     client = _client_for(settings, model, httpx2.Client())
     snapshot = load_snapshot(settings.data_dir)
     cache = LabelCache(settings.data_dir / TEACHER_CACHE_FILE)
+    if review_set == "gold":
+        sample = pd.read_csv(settings.gold_dir / SAMPLE_FILE)
+        ids = sorted(int(i) for i in sample["review_id"])
+        gold_run = label_reviews(
+            client, cache, review_inputs(snapshot, ids), model=model.cache_name, workers=workers
+        )
+        log.info(
+            "%s on gold: %d labeled now, %d cached before, %d remaining",
+            name,
+            gold_run.labeled,
+            gold_run.cached,
+            gold_run.remaining,
+        )
+        if gold_run.stopped_for_quota or gold_run.stopped_for_outage:
+            log.warning("the teacher stopped early; run the same command again later")
+        return 0
     if keep_going:
         run = label_silver_until_done(
             client, cache, snapshot, settings.data_dir, model=model.cache_name, workers=workers
@@ -395,9 +457,7 @@ def _train_s0(settings: LabSettings) -> int:
         params={
             "word_ngrams": params.word_ngrams,
             "char_ngrams": params.char_ngrams,
-            "min_df": params.min_df,
-            "max_word_features": params.max_word_features,
-            "max_char_features": params.max_char_features,
+            "hash_bits": params.hash_bits,
             "c": params.c,
         },
         data=data,
@@ -605,6 +665,232 @@ def _train_s1b(settings: LabSettings, *, checkpoint: Path | None = None) -> int:
     return 0
 
 
+def _latest_models() -> list[Path]:
+    """The newest build of each student family in build/models (versions sort by time)."""
+    latest: dict[str, Path] = {}
+    for path in sorted(MODELS_DIR.glob("*-*")):
+        family = path.name.partition("-")[0]
+        if family in COST_ORDER and (path / MODEL_FILE).is_file():
+            latest[family] = path
+    return [latest[family] for family in COST_ORDER if family in latest]
+
+
+def _benchmark(model_dirs: list[Path], texts: list[str]) -> dict[str, float]:
+    return benchmark_cpu(model_dirs, texts)
+
+
+def _gold_ids(settings: LabSettings) -> pd.DataFrame:
+    return pd.read_csv(settings.gold_dir / SAMPLE_FILE)
+
+
+def _evaluate_choose(settings: LabSettings, *, model_dirs: list[Path] | None) -> int:
+    require_tracking()  # before any work, so a missing setting costs nothing
+    dirs = model_dirs or _latest_models()
+    if not dirs:
+        print("patchpulse-ml: no models in build/models: run `train s0` first", file=sys.stderr)
+        return 2
+    data = load_training_data(settings.data_dir, settings.gold_dir)
+    scorers = {path: load_scorer(path) for path in dirs}
+    predicted = {
+        path: cv_predictions(
+            data.dev.labels, scorer.predict_proba(data.dev.texts), folds=CV_FOLDS, seed=CV_SEED
+        )
+        for path, scorer in scorers.items()
+    }
+    reviews = load_snapshot(settings.data_dir).reviews
+    pool = reviews[~reviews["review_id"].isin(_gold_ids(settings)["review_id"])]
+    sample = pool.sample(n=min(BENCHMARK_REVIEWS, len(pool)), random_state=EVAL_SEED)
+    log.info(
+        "timing %d models in a 1-CPU container (it installs the scoring group first)", len(dirs)
+    )
+    rates = _benchmark(dirs, [str(text) for text in sample["text"]])
+    candidates = [
+        Candidate(
+            scorer.artifact.family,
+            scorer.artifact.version,
+            rates[scorer.artifact.family],
+            predicted[path],
+        )
+        for path, scorer in scorers.items()
+    ]
+    choice = choose_champion(candidates, data.dev.labels, seed=EVAL_SEED)
+    CHOICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CHOICE_PATH.write_text(choice.to_json(), encoding="utf-8", newline="\n")
+    with tracking_run(
+        EVAL_EXPERIMENT,
+        params={f"{family}.version": version for family, version in choice.versions.items()},
+        tags={"step": "choose", "champion": choice.champion or "none"},
+        run_name="champion-choice",
+    ):
+        log_ids_hash("gold_dev", data.dev.ids)
+        mlflow.log_metrics(
+            {
+                **{f"{f}.reviews_per_s": r for f, r in choice.reviews_per_s.items()},
+                **{f"{f}.dev_cv_macro_f1": m for f, m in choice.dev_macro_f1.items()},
+            }
+        )
+        log_report(CHOICE_PATH)
+    for family in choice.dev_macro_f1:
+        print(
+            f"  {family:<4} {choice.reviews_per_s[family]:>9,.1f} reviews a second (1 CPU), dev "
+            f"macro-F1 {choice.dev_macro_f1[family]:.3f}"
+            f"{'' if family in choice.eligible else '  (too slow: ineligible)'}"
+        )
+    print(f"Champion: {choice.champion or 'none'} ({choice.reason}); {CHOICE_PATH}")
+    return 0
+
+
+def _evaluate_report(settings: LabSettings, *, force: bool) -> int:
+    require_tracking()
+    if not CHOICE_PATH.is_file():
+        print(
+            "patchpulse-ml: run `patchpulse-ml evaluate choose` first: the champion is chosen on "
+            "dev before gold test is read",
+            file=sys.stderr,
+        )
+        return 2
+    if EVAL_REPORT_PATH.exists() and not force:
+        print(
+            f"patchpulse-ml: {EVAL_REPORT_PATH} exists: gold test is read once (design D6). "
+            "--force regenerates the report for the same models",
+            file=sys.stderr,
+        )
+        return 2
+    choice = Choice.from_json(CHOICE_PATH.read_text(encoding="utf-8"))
+    config = load_model_config()
+    if config.teacher is None:
+        print("patchpulse-ml: no teacher in config/models.yaml", file=sys.stderr)
+        return 2
+    sample = _gold_ids(settings)
+    test_ids = sorted(int(i) for i in sample.loc[sample["split"] == "test", "review_id"])
+    audit_ids = sorted(int(i) for i in pd.read_csv(settings.gold_dir / AUDIT_FILE)["review_id"])
+    teacher_labels = LabelCache(settings.data_dir / TEACHER_CACHE_FILE).get_many(
+        test_ids, model=config.candidates[config.teacher].cache_name, prompt_hash=prompt_hash()
+    )
+    if len(teacher_labels) < len(test_ids):
+        print(
+            f"patchpulse-ml: the teacher has labeled {len(teacher_labels)} of {len(test_ids)} "
+            "gold test reviews: run `patchpulse-ml teacher label --set gold` first",
+            file=sys.stderr,
+        )
+        return 2
+    languages = dict(
+        zip(sample["review_id"].astype(int), sample["language"].astype(str), strict=True)
+    )
+    claude = read_labels(settings.gold_dir / CLAUDE_LABELS_FILE)
+    seif = read_labels(settings.gold_dir / SEIF_LABELS_FILE)
+    sets = [
+        GoldSet("test", test_ids, label_matrix(claude, test_ids), [languages[i] for i in test_ids]),
+        GoldSet(
+            "audit", audit_ids, label_matrix(seif, audit_ids), [languages[i] for i in audit_ids]
+        ),
+    ]
+    data = load_training_data(settings.data_dir, settings.gold_dir)
+    texts = load_snapshot(settings.data_dir).reviews.set_index("review_id")["text"]
+    outputs: dict[str, dict[str, Outputs]] = {
+        TEACHER: {s.name: Outputs(label_matrix(teacher_labels, s.ids)) for s in sets}
+    }
+    holdout: dict[str, NDArray[np.bool_]] = {}
+    dirs = {
+        family: MODELS_DIR / f"{family}-{version}" for family, version in choice.versions.items()
+    }
+    for family, model_dir in dirs.items():
+        scorer = load_scorer(model_dir)
+        log.info("scoring gold test, Seif's 150 and the silver holdout with %s", family)
+        outputs[family] = {}
+        for gold in sets:
+            probs = scorer.predict_proba([str(texts[i]) for i in gold.ids])
+            outputs[family][gold.name] = Outputs(scorer.labels(probs), probs)
+        holdout[family] = scorer.labels(scorer.predict_proba(data.holdout.texts))
+    result = evaluate_models(
+        sets, outputs, holdout_teacher=data.holdout.labels, holdout_students=holdout, seed=EVAL_SEED
+    )
+    facts = {}
+    for family, model_dir in dirs.items():
+        test = result.score("test", family)
+        artifact = record_metrics(
+            model_dir,
+            {
+                "test_macro_f1": test.macro_f1,
+                "test_macro_f1_low": test.macro_f1_ci[0],
+                "test_macro_f1_high": test.macro_f1_ci[1],
+            },
+        )
+        size_mb = sum((model_dir / name).stat().st_size for name in artifact.files) / 1e6
+        facts[family] = ModelFacts(
+            family,
+            artifact.version,
+            size_mb,
+            choice.reviews_per_s[family],
+            choice.dev_macro_f1[family],
+        )
+    EVAL_REPORT_PATH.write_text(
+        render_eval_report(result, choice, facts), encoding="utf-8", newline="\n"
+    )
+    with tracking_run(
+        EVAL_EXPERIMENT,
+        params={f"{family}.version": version for family, version in choice.versions.items()},
+        tags={"step": "report", "champion": choice.champion or "none"},
+        run_name="eval-report",
+    ):
+        log_ids_hash("gold_test", test_ids)
+        log_ids_hash("seif_audit", audit_ids)
+        mlflow.log_metrics(
+            {f"{s.model}.{s.set_name}_macro_f1": s.macro_f1 for s in result.scores}
+            | {f"{m}.holdout_agreement": a for m, a in result.agreement.items()}
+        )
+        log_report(EVAL_REPORT_PATH)
+    for model in result.models:
+        test, audit = result.score("test", model), result.score("audit", model)
+        print(
+            f"  {model:<8} gold test macro-F1 {test.macro_f1:.3f} "
+            f"({test.macro_f1_ci[0]:.3f} to {test.macro_f1_ci[1]:.3f}); "
+            f"Seif's 150 {audit.macro_f1:.3f}"
+        )
+    print(f"Champion: {choice.champion or 'none'}; report: {EVAL_REPORT_PATH}")
+    return 0
+
+
+def _champion_register(settings: LabSettings) -> int:
+    require_tracking()
+    if not CHOICE_PATH.is_file() or not EVAL_REPORT_PATH.is_file():
+        print(
+            "patchpulse-ml: run `evaluate choose` and `evaluate report` first: models are "
+            "registered with their gold-test scores in model.json",
+            file=sys.stderr,
+        )
+        return 2
+    choice = Choice.from_json(CHOICE_PATH.read_text(encoding="utf-8"))
+    if choice.champion is None:
+        print(f"patchpulse-ml: no champion ({choice.reason})", file=sys.stderr)
+        return 2
+    others = [family for family in choice.dev_macro_f1 if family != choice.champion]
+    challenger = max(others, key=lambda family: choice.dev_macro_f1[family]) if others else None
+    # Only the two the aliases name are uploaded: the champion, and the runner-up on dev.
+    dirs = {
+        family: MODELS_DIR / f"{family}-{choice.versions[family]}"
+        for family in (choice.champion, challenger)
+        if family is not None
+    }
+    registered = register_models(dirs, champion=choice.champion, challenger=challenger)
+    pin = pin_for(registered[choice.champion], dirs[choice.champion])
+    write_pin(pin)
+    for family, entry in registered.items():
+        role = (
+            "champion"
+            if family == choice.champion
+            else "challenger"
+            if family == challenger
+            else ""
+        )
+        print(
+            f"  {family:<4} {entry.artifact.version}: aspect-classifier version "
+            f"{entry.version} {role}"
+        )
+    print(f"pinned {pin.family} (version {pin.version}) in models/champion.yaml")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="patchpulse-ml", description="PatchPulse Phase 2: local snapshot, labeling, training."
@@ -635,7 +921,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--candidates", help="comma-separated names from config/models.yaml (default: all)"
     )
     label = teacher.add_parser("label", help="label a review set with the chosen teacher")
-    label.add_argument("--set", dest="review_set", choices=["silver"], required=True)
+    label.add_argument("--set", dest="review_set", choices=["silver", "gold"], required=True)
     label.add_argument("--candidate", help="a name from config/models.yaml (default: teacher)")
     label.add_argument(
         "--keep-going",
@@ -664,6 +950,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     s1b.add_argument(
         "--checkpoint", type=Path, help="reuse a finished fine-tune instead of training again"
     )
+    evaluate = commands.add_parser("evaluate", help="champion and eval report").add_subparsers(
+        dest="evaluate_command", required=True
+    )
+    choose = evaluate.add_parser("choose", help="pick the champion on gold dev (needs Docker)")
+    choose.add_argument(
+        "--models", nargs="+", type=Path, help="model directories (default: newest of each)"
+    )
+    report = evaluate.add_parser("report", help="score gold test once and write the report")
+    report.add_argument("--force", action="store_true", help="regenerate it for the same models")
+    champion = commands.add_parser("champion", help="the registered champion").add_subparsers(
+        dest="champion_command", required=True
+    )
+    champion.add_parser("register", help="register the evaluated models and pin the champion")
     args = parser.parse_args(argv)
 
     # A character the console can't encode (Windows' cp1252, redirected to a file) prints as "?"
@@ -677,6 +976,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = get_lab_settings()
         if args.command == "pull":
             return _pull(settings, yes=args.yes)
+        if args.command == "champion":
+            return _champion_register(settings)
+        if args.command == "evaluate" and args.evaluate_command == "choose":
+            return _evaluate_choose(settings, model_dirs=args.models)
+        if args.command == "evaluate":
+            return _evaluate_report(settings, force=args.force)
         if args.command == "train":
             if args.train_command == "s1b":
                 return _train_s1b(settings, checkpoint=args.checkpoint)
@@ -686,6 +991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "teacher" and args.teacher_command == "label":
             return _teacher_label(
                 settings,
+                review_set=args.review_set,
                 candidate=args.candidate,
                 keep_going=args.keep_going,
                 workers=args.workers,

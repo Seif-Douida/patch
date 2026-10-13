@@ -12,6 +12,7 @@ import pytest
 from patchpulse.models.tracking import (
     TrackingError,
     log_ids_hash,
+    log_model_dir,
     log_report,
     tracking_run,
 )
@@ -90,3 +91,24 @@ def test_runs_never_print_mlflows_run_link(
 
     with tracking_run("t", params={}):
         assert os.environ["MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT"] == "true"
+
+
+def test_a_model_folder_under_build_models_is_logged_whole(local_store: Path) -> None:
+    """For the registry only (ADR-021 as amended 13 Oct): S0 hashes its n-grams, so no model file
+    holds review words."""
+    write(Path("build/models/s0-1/model.json"), "{}")
+    write(Path("build/models/s0-1/s0.joblib"), "weights")
+
+    with tracking_run("t", params={}, tags={}) as run:
+        log_model_dir(Path("build/models/s0-1"))
+
+    logged = mlflow.MlflowClient().list_artifacts(run.info.run_id, "model")
+    assert {a.path for a in logged} == {"model/model.json", "model/s0.joblib"}
+
+
+@pytest.mark.parametrize("folder", ["data/local/model", "reports/model", "build/other/model"])
+def test_other_folders_are_not_models_to_log(local_store: Path, folder: str) -> None:
+    write(Path(folder) / "model.json", "{}")
+
+    with tracking_run("t", params={}, tags={}), pytest.raises(TrackingError, match="refused"):
+        log_model_dir(Path(folder))

@@ -27,7 +27,8 @@ from patchpulse.labeling.silver import (
     write_silver_ids,
 )
 from patchpulse.labeling.taxonomy import ASPECTS
-from patchpulse.labeling.teacher import REVIEWS_MARKER, LabelRun
+from patchpulse.labeling.teacher import REVIEWS_MARKER, LabelRun, prompt_hash
+from patchpulse.models import cli
 from patchpulse.models.cli import main
 from patchpulse.models.snapshot import Snapshot
 
@@ -371,3 +372,42 @@ class DownAfter(Teacher):
             raise GeminiUnavailableError(500, "Internal error encountered.")
         self.ok -= 1
         return super().generate(system, user, json_schema=json_schema)
+
+
+def test_the_teacher_labels_the_gold_set_into_its_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The eval report scores the teacher on gold test too (plan Task 14)."""
+    clean_env(monkeypatch, tmp_path)
+    models_yaml(tmp_path, teacher="server")
+    monkeypatch.setenv("PP_LLM_SERVER_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PP_LLM_SERVER_KEY", "test-key")
+    data, gold = tmp_path / "data" / "local", tmp_path / "data" / "gold"
+    data.mkdir(parents=True)
+    gold.mkdir(parents=True)
+    snap = snapshot()
+    snap.reviews.to_parquet(data / "reviews.parquet", index=False)
+    snap.games.to_parquet(data / "games.parquet", index=False)
+    pd.DataFrame({"appid": [], "title": []}).to_parquet(data / "patches.parquet")
+    gold_ids = [2, 3, 5, 8, 13, 21, 34]
+    split = ["dev", "dev", "test", "test", "test", "test", "test"]
+    pd.DataFrame({"review_id": gold_ids, "split": split}).to_csv(gold / "sample.csv", index=False)
+    teacher = Teacher()
+    monkeypatch.setattr(cli, "_client_for", lambda *_: teacher)
+
+    assert main(["teacher", "label", "--set", "gold", "--workers", "2"]) == 0
+
+    cached = LabelCache(data / "teacher_labels.sqlite").get_many(
+        gold_ids, model="openai_compat/gemma-31b", prompt_hash=prompt_hash()
+    )
+    assert sorted(cached) == gold_ids
+    assert teacher.calls == 1  # seven reviews fit one batch
+
+
+def test_keep_going_is_for_the_silver_set_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clean_env(monkeypatch, tmp_path)
+
+    assert main(["teacher", "label", "--set", "gold", "--keep-going"]) == 2
+    assert "--keep-going" in capsys.readouterr().err

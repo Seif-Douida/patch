@@ -11,12 +11,10 @@ from pathlib import Path
 
 import mlflow
 import numpy as np
-import pandas as pd
 import pytest
+from student_inputs import N_DEV, N_SILVER, write_inputs
 from tiny_encoder import write_tiny_classifier, write_tiny_encoder
-from toy_reviews import toy_reviews
 
-from patchpulse.labeling.gold import format_aspects
 from patchpulse.labeling.taxonomy import ASPECTS, TAXONOMY_VERSION
 from patchpulse.models import cli
 from patchpulse.models.artifact import MODEL_FILE, load_scorer
@@ -33,55 +31,6 @@ from patchpulse.models.s1a import HEAD_FILE
 from patchpulse.models.s1b import S1B_FILE, S1bParams, S1bTraining, write_training
 from patchpulse.models.text import clean_texts
 from patchpulse.models.training import TrainingData
-
-N_SILVER, N_DEV = 300, 60
-
-
-def aspects_of(row: list[bool]) -> str:
-    return format_aspects(frozenset(code for code, on in zip(ASPECTS, row, strict=True) if on))
-
-
-def write_inputs(root: Path) -> list[str]:
-    """A snapshot, silver labels and gold dev, all invented; returns every review text."""
-    texts, labels = toy_reviews(N_SILVER + N_DEV, seed=9)
-    data, gold = root / "data" / "local", root / "data" / "gold"
-    (data / "silver").mkdir(parents=True)
-    gold.mkdir(parents=True)
-    ids = list(range(1, N_SILVER + N_DEV + 1))
-    pd.DataFrame(
-        {
-            "review_id": ids,
-            "appid": 10,
-            "language": "english",
-            "voted_up": True,
-            "text": texts,
-        }
-    ).to_parquet(data / "reviews.parquet", index=False)
-    pd.DataFrame({"appid": [10], "name": ["Toy Game"]}).to_parquet(data / "games.parquet")
-    pd.DataFrame({"appid": [], "title": []}).to_parquet(data / "patches.parquet")
-    silver = ids[:N_SILVER]
-    pd.DataFrame(
-        {
-            "review_id": silver,
-            "split": ["holdout" if i % 10 == 0 else "train" for i in silver],
-            "aspects": [aspects_of(list(labels[i - 1])) for i in silver],
-            "model": "openai_compat/gemma-31b",
-            "prompt_hash": "abc123",
-        }
-    ).to_parquet(data / "silver" / "labels.parquet", index=False)
-    dev = ids[N_SILVER:]
-    pd.DataFrame({"review_id": [*dev, 9_999], "split": ["dev"] * N_DEV + ["test"]}).to_csv(
-        gold / "sample.csv", index=False
-    )
-    pd.DataFrame(
-        {
-            "review_id": dev,
-            "aspects": [aspects_of(list(labels[i - 1])) for i in dev],
-            "annotator": "claude",
-            "guidelines_version": "v4",
-        }
-    ).to_csv(gold / "labels_claude.csv", index=False)
-    return texts
 
 
 @pytest.fixture

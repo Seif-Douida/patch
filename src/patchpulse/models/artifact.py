@@ -4,7 +4,10 @@ A model directory holds `model.json` and the files it lists:
 
     {"family": "s0", "version": "20261012T200000Z", "taxonomy_version": "v1",
      "cleaning_version": "c1", "aspects": [...], "thresholds": {"performance": 0.31, ...},
-     "files": {"s0.joblib": "<sha256>"}}
+     "files": {"s0.joblib": "<sha256>"}, "metrics": {"test_macro_f1": 0.61, ...}}
+
+`metrics` starts empty; the eval report records each model's gold-test scores there
+(`record_metrics`), so a pin on `model.json`'s checksum covers them too.
 
 `load_scorer` refuses a taxonomy or cleaning version this code doesn't speak, an aspect order that
 isn't the taxonomy's, and any listed file that is missing or whose SHA-256 doesn't match, before a
@@ -18,8 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, get_args
 
@@ -47,6 +50,7 @@ class ModelArtifact:
     aspects: tuple[str, ...]
     thresholds: tuple[float, ...]  # one cut per aspect, in `aspects` order
     files: dict[str, str]  # file name in the model directory -> SHA-256
+    metrics: dict[str, float] = field(default_factory=dict)  # gold-test scores, once evaluated
 
     def cuts(self) -> NDArray[np.float64]:
         return np.array(self.thresholds, dtype=np.float64)
@@ -97,6 +101,11 @@ def write_artifact(
         thresholds=tuple(float(cut) for cut in cuts),
         files={name: sha256_file(model_dir / name) for name in files},
     )
+    _write_record(model_dir, artifact)
+    return artifact
+
+
+def _write_record(model_dir: Path, artifact: ModelArtifact) -> None:
     record = {
         "family": artifact.family,
         "version": artifact.version,
@@ -105,11 +114,21 @@ def write_artifact(
         "aspects": list(artifact.aspects),
         "thresholds": dict(zip(artifact.aspects, artifact.thresholds, strict=True)),
         "files": artifact.files,
+        "metrics": artifact.metrics,
     }
     (model_dir / MODEL_FILE).write_text(
         json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n"
     )
-    return artifact
+
+
+def record_metrics(model_dir: Path, metrics: Mapping[str, float]) -> ModelArtifact:
+    """Add scores to a checked model's `model.json`; its files and thresholds stay as they are."""
+    artifact = read_artifact(model_dir)
+    updated = replace(
+        artifact, metrics={**artifact.metrics, **{k: float(v) for k, v in metrics.items()}}
+    )
+    _write_record(model_dir, updated)
+    return updated
 
 
 def _parse(record: dict[str, Any]) -> ModelArtifact:
@@ -134,6 +153,11 @@ def _parse(record: dict[str, Any]) -> ModelArtifact:
     bad = [name for name in files if not isinstance(name, str) or not _plain_name(name)]
     if bad:
         raise ArtifactError(f"model file name outside the model directory: {bad}")
+    metrics = record.get("metrics", {})
+    if not isinstance(metrics, dict) or not all(
+        isinstance(v, int | float) and not isinstance(v, bool) for v in metrics.values()
+    ):
+        raise ArtifactError("the model's metrics must be numbers")
     return ModelArtifact(
         family=record["family"],
         version=str(record.get("version", "")),
@@ -142,6 +166,7 @@ def _parse(record: dict[str, Any]) -> ModelArtifact:
         aspects=ASPECTS,
         thresholds=tuple(float(thresholds[code]) for code in ASPECTS),
         files={str(name): str(digest) for name, digest in files.items()},
+        metrics={str(name): float(value) for name, value in metrics.items()},
     )
 
 
