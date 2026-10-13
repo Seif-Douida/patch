@@ -9,8 +9,12 @@ from pathlib import Path
 
 import yaml
 
+from patchpulse.labeling.taxonomy import ASPECTS, TAXONOMY_VERSION
+
 DBT = Path(__file__).resolve().parents[2] / "dbt"
 SEASONS = ("Spring", "Summer", "Autumn", "Winter")
+# Incremental core models that may be rebuilt: everything they hold is still in `raw`.
+REBUILDABLE = {"bridge_review_aspect"}  # from raw.review_aspect_score, which keeps every score
 
 
 def sale_calendar() -> list[dict[str, str]]:
@@ -31,9 +35,10 @@ def test_incremental_core_models_cannot_be_full_refreshed() -> None:
         for path in (DBT / "models" / "core").glob("*.sql")
         if "materialized='incremental'" in config_block(path.read_text(encoding="utf-8"))
     ]
-    assert incremental, "expected incremental core models"
+    assert {path.stem for path in incremental} >= REBUILDABLE
     for path in incremental:
-        assert "full_refresh=false" in config_block(path.read_text(encoding="utf-8")), path.name
+        protected = "full_refresh=false" in config_block(path.read_text(encoding="utf-8"))
+        assert protected != (path.stem in REBUILDABLE), path.name
 
 
 def test_wilson_interval_is_90_percent() -> None:
@@ -80,3 +85,14 @@ def test_sales_are_in_order_and_cite_valve() -> None:
         assert re.search(
             r"//(partner\.steamgames|store\.steampowered|steamcommunity)\.com/", sale["source_url"]
         ), sale["sale_name"]
+
+
+def test_aspect_seed_matches_the_taxonomy() -> None:
+    # dim_aspect, the bridge's unpivot and the export all follow the Python taxonomy's order.
+    with (DBT / "seeds" / "aspects.csv").open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert [row["code"] for row in rows] == list(ASPECTS)
+    assert {row["taxonomy_version"] for row in rows} == {TAXONOMY_VERSION}
+    assert all(row["name"] and row["description"] for row in rows)
+    project = yaml.safe_load((DBT / "dbt_project.yml").read_text(encoding="utf-8"))
+    assert project["vars"]["aspects"] == list(ASPECTS)

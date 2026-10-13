@@ -11,6 +11,10 @@ sources:
       - name: steam_news
       - name: news_classification
       - name: steam_price
+      - name: review_aspect_score
+        description: >-
+          Aspect scores (migration 0002): one row per review version and model version, with each
+          aspect's probability (p_<code>) and label (l_<code>). Every model's scores are kept.
       - name: steam_page
         description: Raw Steam responses, personal fields removed, kept 30 days.
         config:

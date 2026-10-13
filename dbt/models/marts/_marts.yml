@@ -21,6 +21,35 @@ models:
       - name: share_new_players
         data_tests: [between_0_and_1]
 
+  - name: daily_aspect_share
+    description: >-
+      One row per game, day with reviews and aspect: mentions among the day's negative and
+      positive reviews, out of the scored ones.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [game_key, date_key, aspect_key]
+      - mentions_within_scored
+    columns:
+      - name: game_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_key
+      - name: aspect_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_aspect')
+                field: aspect_key
+      - name: share_of_negative
+        data_tests: [between_0_and_1]
+      - name: share_of_positive
+        data_tests: [between_0_and_1]
+
   - name: patch_window
     description: Descriptive before/after aggregates per treatment candidate (not causal).
     columns:

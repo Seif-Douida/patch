@@ -16,6 +16,17 @@ models:
       - name: language_key
         data_tests: [unique, not_null]
 
+  - name: dim_aspect
+    description: The aspect taxonomy (seeds/aspects.csv), in the order of patchpulse's ASPECTS.
+    columns:
+      - name: aspect_key
+        data_tests: [unique, not_null]
+      - name: code
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: "{{ var('aspects') }}"
+
   - name: fact_review
     description: One row per review (its latest version). Incremental; never full-refreshed.
     columns:
@@ -71,3 +82,29 @@ models:
       - unique_combination:
           arguments:
             columns: [game_key, date_key]
+
+  - name: bridge_review_aspect
+    description: >-
+      The positive aspect labels of the latest score of each review's latest version. Rebuildable
+      from raw.review_aspect_score.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [review_id, aspect_key]
+    columns:
+      - name: review_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fact_review')
+                field: review_id
+      - name: aspect_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_aspect')
+                field: aspect_key
+      - name: prob
+        data_tests: [not_null, between_0_and_1]
