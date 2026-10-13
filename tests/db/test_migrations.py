@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "raw.steam_news",
     "raw.news_classification",
     "raw.steam_price",
+    "raw.review_aspect_score",
     "ops.pipeline_run",
     "ops.ingest_state",
     "ops.data_quality_result",

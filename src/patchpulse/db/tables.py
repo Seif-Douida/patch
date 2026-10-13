@@ -1,13 +1,14 @@
 """SQLAlchemy Core definitions of the tables Alembic owns, for the loaders.
 
-They mirror migration 0001; `test_table_definitions_match_the_migrated_schema` keeps the two in
-step. Datetime columns hold naive UTC (DATETIME2 has no time zone).
+They mirror migrations 0001 and 0002; `test_table_definitions_match_the_migrated_schema` keeps
+them in step. Datetime columns hold naive UTC (DATETIME2 has no time zone).
 """
 
 from __future__ import annotations
 
 from sqlalchemy import (
     CHAR,
+    REAL,
     BigInteger,
     Boolean,
     Column,
@@ -161,4 +162,33 @@ data_quality_result = Table(
     Column("detail", Unicode(2000), nullable=False),
     Column("created_at", DateTime),
     schema="ops",
+)
+
+
+# Taxonomy v1's aspects, as migration 0002 created their columns.
+_ASPECTS = (
+    "performance",
+    "stability_bugs",
+    "gameplay_balance",
+    "content",
+    "monetization",
+    "online_servers",
+    "story_world",
+    "ux_controls",
+    "platform_policy",
+    "off_topic",
+)
+
+review_aspect_score = Table(
+    "review_aspect_score",
+    metadata,
+    Column("recommendation_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("timestamp_updated", DateTime, primary_key=True),
+    Column("model_version", Unicode(64), primary_key=True),
+    Column("model_name", Unicode(64), nullable=False),
+    Column("scored_run_id", BigInteger, nullable=False),
+    Column("scored_at", DateTime),
+    *(Column(f"p_{code}", REAL, nullable=False) for code in _ASPECTS),
+    *(Column(f"l_{code}", Boolean, nullable=False) for code in _ASPECTS),
+    schema="raw",
 )

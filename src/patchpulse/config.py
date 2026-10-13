@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Never rotate: author hashes are the deduplication key for review authors.
     author_hash_salt: SecretStr | None = None
     backfill_budget_minutes: int = 30
+    # Phase 2 scoring (design D8): the champion baked into the jobs image, and the stage's
+    # time budget. No model directory means the stage is skipped.
+    model_dir: Path | None = None
+    score_budget_minutes: int = 5
     github_repository: str | None = None
     github_app_id: str | None = None
     github_app_private_key: SecretStr | None = None
