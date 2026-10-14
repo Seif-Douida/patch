@@ -37,7 +37,7 @@ from typing import Any, Protocol
 from sqlalchemy import Connection, Engine
 
 from patchpulse.config import Settings, SettingsError
-from patchpulse.export.site import build_site_export
+from patchpulse.export.site import AspectModel, build_site_export, read_aspect_model
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
 from patchpulse.ingest.games import GAMES_FILE, Game, load_games
 from patchpulse.ingest.http import SteamError, SteamHttp, SteamUnavailableError
@@ -93,7 +93,12 @@ class DbtRunner(Protocol):
 
 class Exporter(Protocol):
     def __call__(
-        self, connection: Connection, *, data_version: int, generated_at: datetime
+        self,
+        connection: Connection,
+        *,
+        data_version: int,
+        generated_at: datetime,
+        aspect_model: AspectModel | None = None,
     ) -> dict[str, bytes]: ...
 
 
@@ -300,7 +305,12 @@ def _run_stages(
 
     with run.stage("export"):
         with run.engine.connect() as connection:
-            files = export(connection, data_version=run.run_id, generated_at=now)
+            files = export(
+                connection,
+                data_version=run.run_id,
+                generated_at=now,
+                aspect_model=read_aspect_model(settings.model_dir),
+            )
         run.stages["export"] = {"files": len(files)}
 
     with run.stage("publish"):

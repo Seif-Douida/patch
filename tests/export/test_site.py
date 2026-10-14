@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from patchpulse.export.site import (
     ATTRIBUTION,
     SCHEMA_VERSION,
+    AspectDayRow,
+    AspectModel,
+    Aspects,
     DayRow,
     GameRow,
     PatchRow,
+    read_aspect_model,
     shape_site_export,
 )
+from patchpulse.labeling.taxonomy import ASPECTS
 
 GENERATED = datetime(2026, 9, 29, 3, 30, tzinfo=UTC)
 HD2 = GameRow(appid=553850, name="Helldivers 2", genres="Action")
@@ -46,8 +52,34 @@ def patch(appid: int, when: date, title: str, patch_type: str = "patch") -> Patc
     )
 
 
-def export(games: list[GameRow], days: list[DayRow], patches: list[PatchRow]) -> dict[str, bytes]:
-    return shape_site_export(games, days, patches, data_version=42, generated_at=GENERATED)
+MODEL = AspectModel(family="s0", version="20261012T223218Z", test_macro_f1=0.61391133)
+
+
+def export(
+    games: list[GameRow],
+    days: list[DayRow],
+    patches: list[PatchRow],
+    aspects: Aspects | None = None,
+) -> dict[str, bytes]:
+    return shape_site_export(
+        games, days, patches, data_version=42, generated_at=GENERATED, aspects=aspects
+    )
+
+
+def mentions(**counts: int) -> tuple[int, ...]:
+    return tuple(counts.get(code, 0) for code in ASPECTS)
+
+
+def aspect_day(
+    appid: int,
+    when: date,
+    scored: tuple[int, int],
+    neg: tuple[int, ...] = mentions(),
+    pos: tuple[int, ...] = mentions(),
+) -> AspectDayRow:
+    return AspectDayRow(
+        appid, when, n_neg_scored=scored[0], n_pos_scored=scored[1], neg=neg, pos=pos
+    )
 
 
 def load(files: dict[str, bytes], path: str) -> Any:
@@ -129,3 +161,75 @@ def test_files_end_with_a_newline_and_are_utf8() -> None:
 
     assert all(content.endswith(b"\n") for content in files.values())
     assert "—" in files["games/949230.json"].decode("utf-8")
+
+
+def test_export_v2_shape_is_deterministic() -> None:
+    days = [day(553850, D1, 5, 3), day(553850, D1 + timedelta(days=1), 4, 1)]
+    aspect_days = [
+        aspect_day(553850, D1, (2, 3), neg=mentions(performance=2), pos=mentions(content=1)),
+        aspect_day(
+            553850, D1 + timedelta(days=1), (3, 1), neg=mentions(performance=1, monetization=2)
+        ),
+    ]
+
+    first = export([HD2, CS2], days, [], Aspects(MODEL, aspect_days))
+    shuffled = export([CS2, HD2], days[::-1], [], Aspects(MODEL, aspect_days[::-1]))
+
+    assert first == shuffled
+    game = load(first, "games/553850.json")
+    assert game["schema_version"] == SCHEMA_VERSION == 2
+    assert game["aspects"]["codes"] == list(ASPECTS)
+    assert game["aspects"]["days"][0] == {
+        "date": "2026-09-20",
+        "scored": [2, 3],
+        "neg": [2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "pos": [0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+    }
+    assert [d["date"] for d in game["aspects"]["days"]] == ["2026-09-20", "2026-09-21"]
+    index = load(first, "index.json")
+    assert index["aspect_model"] == {
+        "family": "s0",
+        "version": "20261012T223218Z",
+        "test_macro_f1": 0.6139,
+    }
+    hd2 = next(g for g in index["games"] if g["appid"] == 553850)
+    assert hd2["top_complaint_30d"] == {"code": "performance", "share": 0.6, "n": 5}
+    cs2 = next(g for g in index["games"] if g["appid"] == 949230)
+    assert cs2["top_complaint_30d"] is None
+    assert load(first, "games/949230.json")["aspects"] == {"codes": list(ASPECTS), "days": []}
+
+
+def test_top_complaint_covers_the_last_30_days_and_skips_off_topic() -> None:
+    # Off-topic reviews (memes, jokes) aren't complaints about the game.
+    last = D1 + timedelta(days=40)
+    days = [day(553850, D1, 10, 0), day(553850, last, 10, 0)]
+    aspect_days = [
+        aspect_day(553850, D1, (10, 0), neg=mentions(monetization=10)),
+        aspect_day(553850, last, (10, 0), neg=mentions(off_topic=6, stability_bugs=3)),
+    ]
+
+    (game,) = load(export([HD2], days, [], Aspects(MODEL, aspect_days)), "index.json")["games"]
+
+    assert game["top_complaint_30d"] == {"code": "stability_bugs", "share": 0.3, "n": 10}
+
+
+def test_without_a_model_the_aspect_fields_are_null() -> None:
+    files = export([HD2], [day(553850, D1, 3, 2)], [])
+
+    index = load(files, "index.json")
+    assert index["schema_version"] == 2
+    assert index["aspect_model"] is None
+    assert index["games"][0]["top_complaint_30d"] is None
+    assert load(files, "games/553850.json")["aspects"] is None
+
+
+def test_aspect_model_is_read_from_model_json(tmp_path: Path) -> None:
+    (tmp_path / "model.json").write_text(
+        json.dumps({"family": "s0", "version": "v1", "metrics": {"test_macro_f1": 0.6}}),
+        encoding="utf-8",
+    )
+
+    assert read_aspect_model(tmp_path) == AspectModel("s0", "v1", 0.6)
+    assert read_aspect_model(None) is None
+    # An unreadable model.json loses the model block for a night; it never fails the export.
+    assert read_aspect_model(tmp_path / "missing") is None

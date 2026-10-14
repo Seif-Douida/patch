@@ -18,7 +18,9 @@ from toy_reviews import toy_reviews
 from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import upgrade_to_head
+from patchpulse.export.site import AspectModel
 from patchpulse.ingest.coverage import REREAD, start_of_day
+from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
 from patchpulse.pipeline.runner import PipelineError, run_nightly
@@ -54,9 +56,29 @@ def failing_dbt(args: Any, **_: Any) -> DbtResult:
 
 
 def stub_export(
-    connection: Connection, *, data_version: int, generated_at: datetime
+    connection: Connection,
+    *,
+    data_version: int,
+    generated_at: datetime,
+    aspect_model: AspectModel | None = None,
 ) -> dict[str, bytes]:
     return {"index.json": b"{}\n"}
+
+
+@dataclass
+class RecordingExport:
+    models: list[AspectModel | None] = field(default_factory=list)
+
+    def __call__(
+        self,
+        connection: Connection,
+        *,
+        data_version: int,
+        generated_at: datetime,
+        aspect_model: AspectModel | None = None,
+    ) -> dict[str, bytes]:
+        self.models.append(aspect_model)
+        return {"index.json": b"{}\n"}
 
 
 @dataclass
@@ -279,3 +301,19 @@ def test_the_night_scores_its_reviews_between_backfill_and_dbt(env: Env, tmp_pat
     assert env.rows("SELECT COUNT(*) FROM raw.review_aspect_score")[0][0] == 10
     order = list(result.stages["durations_s"])
     assert order.index("backfill") < order.index("score") < order.index("dbt")
+
+
+def test_the_export_names_the_model_from_pp_model_dir(env: Env, tmp_path: Path) -> None:
+    model = toy_s0(tmp_path / "model")
+    record_metrics(model, {"test_macro_f1": 0.61})
+    with_model, without = RecordingExport(), RecordingExport()
+
+    env.run(
+        settings=env.settings.model_copy(update={"model_dir": model}),
+        dbt=ok_dbt,
+        export=with_model,
+    )
+    env.run(dbt=ok_dbt, export=without)
+
+    assert with_model.models == [AspectModel("s0", "20261013T0", 0.61)]
+    assert without.models == [None]

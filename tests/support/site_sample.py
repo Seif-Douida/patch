@@ -3,7 +3,9 @@
 The dashboard builds and tests against these files, so they must have exactly the shape the
 nightly job publishes; `tests/export/test_web_fixtures.py` fails if they drift. The games and
 numbers are invented (no Steam data, no review text): two fictional titles over 120 days, one
-with a patch that drops sentiment and a Steam sale that lifts volume.
+with a patch that drops sentiment and a Steam sale that lifts volume. Aspect counts are invented
+too: the first two weeks aren't scored yet (as during a backlog), and the bad patch brings a wave
+of gameplay-balance complaints.
 
 Regenerate after changing the exporter: `uv run python tests/support/site_sample.py web/fixtures`
 """
@@ -16,12 +18,27 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from patchpulse.export.site import DayRow, GameRow, PatchRow, shape_site_export
+from patchpulse.export.site import (
+    AspectDayRow,
+    AspectModel,
+    Aspects,
+    DayRow,
+    GameRow,
+    PatchRow,
+    shape_site_export,
+)
+from patchpulse.labeling.taxonomy import ASPECTS
 
 Z90 = 1.6449
 START = date(2026, 6, 1)
 DAYS = 120
 GENERATED_AT = datetime(2026, 9, 29, 3, 32, tzinfo=UTC)
+UNSCORED_DAYS = 14
+MODEL = AspectModel(family="s0", version="20260901T000000Z", test_macro_f1=0.61)
+# How often a negative or a positive review mentions each aspect, in ASPECTS order.
+NEG_RATES = (0.25, 0.2, 0.15, 0.12, 0.1, 0.1, 0.03, 0.06, 0.04, 0.08)
+POS_RATES = (0.05, 0.03, 0.3, 0.35, 0.05, 0.05, 0.25, 0.05, 0.01, 0.15)
+BALANCE = ASPECTS.index("gameplay_balance")
 
 
 def _wilson(positive: int, n: int) -> tuple[float | None, float | None]:
@@ -67,13 +84,41 @@ def _series(
     return rows
 
 
+def _aspect_days(rows: list[DayRow], *, spike_day: int | None, seed: int) -> list[AspectDayRow]:
+    rng = random.Random(seed)  # noqa: S311 - invents sample numbers; nothing secret
+    out = []
+    for offset, row in enumerate(rows):
+        if offset < UNSCORED_DAYS or row.n_reviews == 0:
+            continue
+        neg_rates = list(NEG_RATES)
+        if spike_day is not None and offset >= spike_day:
+            neg_rates[BALANCE] += 0.45 * math.exp(-(offset - spike_day) / 12)
+        n_neg = row.n_reviews - row.n_positive
+        out.append(
+            AspectDayRow(
+                appid=row.appid,
+                date=row.date,
+                n_neg_scored=n_neg,
+                n_pos_scored=row.n_positive,
+                neg=tuple(sum(rng.random() < rate for _ in range(n_neg)) for rate in neg_rates),
+                pos=tuple(
+                    sum(rng.random() < rate for _ in range(row.n_positive)) for rate in POS_RATES
+                ),
+            )
+        )
+    return out
+
+
 def sample_files() -> dict[str, bytes]:
     games = [
         GameRow(900001, "Example Arena (sample data)", "Action"),
         GameRow(900002, "Example Colony (sample data)", "Simulation, Strategy"),
     ]
-    days = _series(900001, volume=180, base=0.78, dip_day=70, sale=range(25, 32), seed=1)
-    days += _series(900002, volume=45, base=0.62, dip_day=None, sale=range(25, 32), seed=2)
+    arena = _series(900001, volume=180, base=0.78, dip_day=70, sale=range(25, 32), seed=1)
+    colony = _series(900002, volume=45, base=0.62, dip_day=None, sale=range(25, 32), seed=2)
+    days = arena + colony
+    aspect_days = _aspect_days(arena, spike_day=70, seed=3)
+    aspect_days += _aspect_days(colony, spike_day=None, seed=4)
     patches = [
         PatchRow(
             900001,
@@ -108,7 +153,14 @@ def sample_files() -> dict[str, bytes]:
             False,
         ),
     ]
-    return shape_site_export(games, days, patches, data_version=42, generated_at=GENERATED_AT)
+    return shape_site_export(
+        games,
+        days,
+        patches,
+        data_version=42,
+        generated_at=GENERATED_AT,
+        aspects=Aspects(MODEL, aspect_days),
+    )
 
 
 def write(directory: Path) -> None:

@@ -2,12 +2,14 @@
 
 `core.bridge_review_aspect` holds the positive labels of the latest score of each review's latest
 version; `mart.daily_aspect_share` counts them per game, day and aspect, beside the number of
-scored negative and positive reviews, so partial scoring is visible. The tests run in order: the
-first build, then an edit, then a re-score, each followed by an incremental build.
+scored negative and positive reviews, so partial scoring is visible. The site export reads the
+mart (plan Task 18). The tests run in order: the first build, then an edit, then a re-score, each
+followed by an incremental build.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -23,6 +25,7 @@ from patchpulse.db import tables
 from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import upgrade_to_head
 from patchpulse.db.provision import WRITER_USER, provision_writer
+from patchpulse.export.site import AspectModel, build_site_export
 from patchpulse.ingest.games import Game, Role
 from patchpulse.ingest.load import upsert_games, upsert_reviews
 from patchpulse.ingest.models import ReviewRecord
@@ -191,6 +194,31 @@ def test_aspect_shares_are_computed_from_scored_reviews(built: Built) -> None:
         f"SELECT COUNT(*) AS n FROM mart.daily_aspect_share WHERE date_key = {date_key(DAY1)}"
     )
     assert n.n == len(ASPECTS)
+
+
+def test_site_export_reads_the_aspect_mart(built: Built) -> None:
+    model = AspectModel("s0", FIRST.model_version, 0.61)
+    with built.admin.connect() as connection:
+        files = build_site_export(
+            connection, data_version=2, generated_at=TODAY, aspect_model=model
+        )
+
+    aspects = json.loads(files[f"games/{GAME}.json"])["aspects"]
+    (day1,) = aspects["days"]  # day 2's review isn't scored: no aspect day
+    assert day1["date"] == DAY1.date().isoformat()
+    assert day1["scored"] == [2, 2]
+    neg, pos = (
+        dict(zip(ASPECTS, day1["neg"], strict=True)),
+        dict(zip(ASPECTS, day1["pos"], strict=True)),
+    )
+    assert (neg["performance"], neg["stability_bugs"], pos["performance"], pos["content"]) == (
+        1,
+        1,
+        2,
+        1,
+    )
+    (game,) = json.loads(files["index.json"])["games"]
+    assert game["top_complaint_30d"] == {"code": "performance", "share": 0.5, "n": 2}
 
 
 def test_partial_scoring_shows_in_the_scored_counts(built: Built) -> None:
