@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { MethodNote } from "@/components/MethodNote";
 import { Pulse } from "@/components/Pulse";
 import { topComplaint } from "@/lib/aspects";
 import { loadGame, loadIndex } from "@/lib/data";
@@ -62,6 +63,7 @@ export default function Home() {
           ))}
         </tbody>
       </table>
+      {withAspects && <MethodNote model={index.aspect_model} />}
     </>
   );
 }

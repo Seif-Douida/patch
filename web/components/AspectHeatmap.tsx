@@ -23,6 +23,10 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 type Cell = { row: number; col: number };
 
+function round4(value: number): number {
+  return Math.round(value * 1e4) / 1e4;
+}
+
 /** "performance", "stability and bugs", but "UX and controls": for use mid-sentence. */
 function inSentence(label: string): string {
   return /^[A-Z]{2}/.test(label) ? label : label.charAt(0).toLowerCase() + label.slice(1);
@@ -158,10 +162,11 @@ export function AspectHeatmap({
                   const share = week.shares[row] ?? null;
                   const level = shareLevel(share);
                   const isActive = active?.row === row && active.col === col;
+                  const where = `${aspectLabel(code)}, week of ${formatDate(week.start)}`;
                   const label =
                     share === null
-                      ? `${aspectLabel(code)}, week of ${formatDate(week.start)}: ${week.n} ${noun} reviews scored, too few for a share`
-                      : `${aspectLabel(code)}, week of ${formatDate(week.start)}: ${formatShare(share)} of ${week.n} ${noun} reviews`;
+                      ? `${where}: ${week.n} ${noun} reviews scored, too few for a share`
+                      : `${where}: ${formatShare(share)} of ${week.n} ${noun} reviews`;
                   return (
                     <div
                       key={week.start}
@@ -176,7 +181,7 @@ export function AspectHeatmap({
                       data-row={row}
                       data-col={col}
                       data-week={week.start}
-                      data-share={share === null ? undefined : String(Math.round(share * 1e4) / 1e4)}
+                      data-share={share === null ? undefined : String(round4(share))}
                       data-level={level ?? undefined}
                       data-thin={share === null ? "" : undefined}
                       onPointerEnter={() => setActive({ row, col })}

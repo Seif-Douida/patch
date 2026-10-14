@@ -619,6 +619,15 @@ a:hover {
 }
 
 @media (max-width: 640px) {
+  .patch-aspect table {
+    font-size: 0.8125rem;
+  }
+
+  .patch-aspect th,
+  .patch-aspect td {
+    padding-right: 0.6rem;
+  }
+
   .heatmap-scroll {
     --label: 7.25rem;
   }
@@ -635,6 +644,103 @@ a:hover {
   .heat-cell {
     height: 28px;
   }
+}
+
+/* Before and after each patch: one collapsible table per major update or patch. */
+
+.patch-aspects {
+  margin: 0 0 2.5rem;
+}
+
+.patch-aspects > .chart-note {
+  margin: 0.4rem 0 1rem;
+  max-width: 44rem;
+}
+
+.patch-aspect {
+  border-top: 1px solid var(--hairline);
+  padding: 0.75rem 0;
+}
+
+.patch-aspect:last-of-type {
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* The summary keeps its list-item display, so the browser's open/closed marker stays. */
+.patch-aspect summary {
+  cursor: pointer;
+}
+
+.patch-aspect-title {
+  font-weight: 700;
+}
+
+.patch-aspect-date {
+  margin-left: 0.75rem;
+  font-size: var(--step--1);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.patch-aspects + .method-note {
+  margin: 0 0 3rem;
+}
+
+.patch-aspect-notes {
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--step--1);
+  color: var(--ink-2);
+}
+
+.patch-aspect table {
+  width: 100%;
+  margin-top: 0.5rem;
+  font-size: var(--step--1);
+}
+
+.patch-aspect caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: 0.4rem;
+  color: var(--ink-3);
+}
+
+.patch-aspect .table-scroll {
+  max-height: none;
+}
+
+.patch-aspect th,
+.patch-aspect td {
+  text-align: left;
+  padding: 0.45rem 1rem 0.45rem 0;
+  border-bottom: 1px solid var(--hairline);
+  font-variant-numeric: tabular-nums;
+}
+
+.patch-aspect td {
+  white-space: nowrap;
+}
+
+.patch-aspect th:last-child,
+.patch-aspect td:last-child {
+  padding-right: 0;
+}
+
+.patch-aspect thead th,
+.patch-aspect tbody th {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.patch-aspect tbody th {
+  color: var(--ink-2);
+}
+
+.change-clear {
+  font-weight: 700;
+  color: var(--ink);
 }
 
 /* The day readout: the value leads, the label follows. */

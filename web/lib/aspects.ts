@@ -99,3 +99,110 @@ export function topComplaint(entry: GameSummary): Complaint | null {
   if (!top || top.n < MIN_COMPLAINT_SUPPORT) return null;
   return { code: top.code, label: aspectLabel(top.code), share: top.share, n: top.n };
 }
+
+/** Each side of a before/after comparison needs this many scored negative reviews. */
+export const MIN_WINDOW_SCORED = 30;
+export const WINDOW_DAYS = 14;
+const Z95 = 1.959963984540054;
+
+function wilson(x: number, n: number): [number, number] {
+  const p = x / n;
+  const centre = p + (Z95 * Z95) / (2 * n);
+  const spread = Z95 * Math.sqrt((p * (1 - p)) / n + (Z95 * Z95) / (4 * n * n));
+  const denominator = 1 + (Z95 * Z95) / n;
+  return [(centre - spread) / denominator, (centre + spread) / denominator];
+}
+
+/** 95% interval for x1/n1 - x2/n2 by Newcombe's hybrid score method (1998, method 10): each
+ * proportion's Wilson interval, combined. Well behaved at 0%, 100% and small n. */
+export function newcombeInterval(x1: number, n1: number, x2: number, n2: number): [number, number] {
+  const p1 = x1 / n1;
+  const p2 = x2 / n2;
+  const [l1, u1] = wilson(x1, n1);
+  const [l2, u2] = wilson(x2, n2);
+  const difference = p1 - p2;
+  return [
+    difference - Math.sqrt((p1 - l1) ** 2 + (u2 - p2) ** 2),
+    difference + Math.sqrt((u1 - p1) ** 2 + (p2 - l2) ** 2),
+  ];
+}
+
+export type Window = { days: number; n: number }; // days of data in the window, scored negatives
+
+export type AspectChange = {
+  code: string;
+  label: string;
+  before: number | null; // share of scored negative reviews mentioning it
+  after: number | null;
+  change: number | null; // after - before
+  interval: [number, number] | null; // 95%, for the change
+};
+
+export type PatchComparison = {
+  before: Window;
+  after: Window;
+  shortBefore: boolean; // fewer than `days` days of data before the patch
+  shortAfter: boolean; // the after window isn't over yet
+  enough: boolean; // both windows have MIN_WINDOW_SCORED scored negative reviews
+  aspects: AspectChange[];
+};
+
+/** Negative reviews' aspect shares in the `days` days before a patch against its day and the
+ * `days - 1` after (the windows of mart.patch_window). Descriptive, not causal. */
+export function beforeAfter(
+  series: AspectSeries,
+  patchDate: string,
+  days: number = WINDOW_DAYS,
+): PatchComparison {
+  const size = series.codes.length;
+  const patch = toTime(patchDate);
+  const first = series.days[0];
+  const last = series.days.at(-1);
+  function covered(from: number, to: number): number {
+    if (!first || !last) return 0;
+    const start = Math.max(from, toTime(first.date));
+    const end = Math.min(to, toTime(last.date));
+    return end < start ? 0 : (end - start) / DAY_MS + 1;
+  }
+  function window(from: number, to: number) {
+    let n = 0;
+    const mentions = new Array<number>(size).fill(0);
+    for (const day of series.days) {
+      const time = toTime(day.date);
+      if (time < from || time > to) continue;
+      n += day.scored[0];
+      day.neg.forEach((count, i) => {
+        mentions[i] = (mentions[i] ?? 0) + count;
+      });
+    }
+    return { n, mentions };
+  }
+  const beforeFrom = patch - days * DAY_MS;
+  const afterTo = patch + (days - 1) * DAY_MS;
+  const before = window(beforeFrom, patch - DAY_MS);
+  const after = window(patch, afterTo);
+  const beforeDays = covered(beforeFrom, patch - DAY_MS);
+  const afterDays = covered(patch, afterTo);
+  const enough = before.n >= MIN_WINDOW_SCORED && after.n >= MIN_WINDOW_SCORED;
+  return {
+    before: { days: beforeDays, n: before.n },
+    after: { days: afterDays, n: after.n },
+    shortBefore: beforeDays < days,
+    shortAfter: afterDays < days,
+    enough,
+    aspects: series.codes.map((code, i) => {
+      const label = aspectLabel(code);
+      const empty = { code, label, before: null, after: null, change: null, interval: null };
+      if (!enough) return empty;
+      const x1 = after.mentions[i] ?? 0;
+      const x0 = before.mentions[i] ?? 0;
+      return {
+        ...empty,
+        before: x0 / before.n,
+        after: x1 / after.n,
+        change: x1 / after.n - x0 / before.n,
+        interval: newcombeInterval(x1, after.n, x0, before.n),
+      };
+    }),
+  };
+}

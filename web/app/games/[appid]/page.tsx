@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { GameCharts } from "@/components/GameCharts";
+import { MethodNote } from "@/components/MethodNote";
+import { PatchAspectTables } from "@/components/PatchAspectTable";
 import { loadGame, loadIndex } from "@/lib/data";
 import { PATCH_LABELS, formatCount, formatDate, formatShare } from "@/lib/series";
 
@@ -21,7 +23,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 export default async function GamePage({ params }: Props) {
   const { appid } = await params;
   const game = loadGame(Number(appid));
-  const latest = loadIndex().games.find((g) => g.appid === game.appid)?.latest ?? null;
+  const index = loadIndex();
+  const latest = index.games.find((g) => g.appid === game.appid)?.latest ?? null;
+  const aspects = game.aspects && game.aspects.days.length > 0 ? game.aspects : null;
   const posts = [...game.patches].reverse();
 
   return (
@@ -42,7 +46,14 @@ export default async function GamePage({ params }: Props) {
         )}
       </header>
 
-      <GameCharts series={game.series} patches={game.patches} aspects={game.aspects ?? null} />
+      <GameCharts series={game.series} patches={game.patches} aspects={aspects} />
+
+      {aspects && (
+        <>
+          <PatchAspectTables aspects={aspects} patches={game.patches} />
+          <MethodNote model={index.aspect_model} />
+        </>
+      )}
 
       <section className="posts">
         <h2>Patches and posts</h2>
