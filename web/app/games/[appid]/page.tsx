@@ -42,7 +42,7 @@ export default async function GamePage({ params }: Props) {
         )}
       </header>
 
-      <GameCharts series={game.series} patches={game.patches} />
+      <GameCharts series={game.series} patches={game.patches} aspects={game.aspects ?? null} />
 
       <section className="posts">
         <h2>Patches and posts</h2>
