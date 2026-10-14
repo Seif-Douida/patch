@@ -1,7 +1,7 @@
 // Aspect counts (schema 2) turned into what the heatmap and the home page show. Shares are always
 // pooled - mentions summed over scored reviews summed - never an average of daily shares.
 
-import type { AspectSeries, GameSummary } from "./types";
+import type { AspectModel, AspectSeries, GameSummary } from "./types";
 
 export type Polarity = "neg" | "pos";
 
@@ -31,6 +31,18 @@ export const ASPECT_LABELS: Record<string, string> = {
 export function aspectLabel(code: string): string {
   return ASPECT_LABELS[code] ?? code;
 }
+
+/** An aspect the model detects with a gold-test F1 under this is marked as less reliable (the
+ * exporter's MIN_ASPECT_F1, which keeps it out of the top complaint). */
+export const MIN_ASPECT_F1 = 0.5;
+
+/** The aspects the model detects less reliably; none when it records no per-aspect F1. */
+export function weakAspects(model: AspectModel | null | undefined): Set<string> {
+  const f1 = model?.aspect_f1 ?? {};
+  return new Set(Object.keys(f1).filter((code) => (f1[code] ?? 1) < MIN_ASPECT_F1));
+}
+
+export const WEAK_NOTE = `* Detected less reliably: F1 under ${MIN_ASPECT_F1} on our test set.`;
 
 /** The colour level (1-5) of a share; null for a week without one. */
 export function shareLevel(share: number | null): number | null {

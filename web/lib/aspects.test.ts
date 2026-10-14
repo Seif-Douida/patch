@@ -5,6 +5,7 @@ import {
   MIN_WEEK_SCORED,
   MIN_WINDOW_SCORED,
   beforeAfter,
+  weakAspects,
   newcombeInterval,
   topComplaint,
   weeklyAspectShares,
@@ -219,5 +220,19 @@ describe("beforeAfter", () => {
         null,
       ]);
     }
+  });
+});
+
+describe("weakAspects", () => {
+  it("names_aspects_under_the_f1_bar", () => {
+    const model = {
+      family: "s0",
+      version: "v1",
+      test_macro_f1: 0.61,
+      aspect_f1: { performance: 0.87, ux_controls: 0.48, platform_policy: 0.18 },
+    };
+    expect([...weakAspects(model)].sort()).toEqual(["platform_policy", "ux_controls"]);
+    expect(weakAspects({ ...model, aspect_f1: undefined }).size).toBe(0);
+    expect(weakAspects(null).size).toBe(0);
   });
 });

@@ -33,11 +33,13 @@ export type GameSummary = {
   top_complaint_30d?: TopComplaint | null; // schema 2
 };
 
-// The model that detects aspects, with its macro-F1 on the gold test set.
+// The model that detects aspects, with its macro-F1 on the gold test set and, when recorded,
+// each aspect's F1 there.
 export type AspectModel = {
   family: string;
   version: string;
   test_macro_f1: number | null;
+  aspect_f1?: Record<string, number>;
 };
 
 export type SiteIndex = Header & {

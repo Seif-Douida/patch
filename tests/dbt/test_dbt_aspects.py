@@ -257,3 +257,27 @@ def test_rescored_review_replaces_its_old_labels(built: Built) -> None:
     assert tuple(built.share(DAY1, "online_servers")) == (1, 0, 2, 2, 0.5, 0.0)
     (prob,) = built.rows("SELECT prob FROM core.bridge_review_aspect WHERE review_id = 3")
     assert prob.prob == pytest.approx(0.9)
+
+
+def test_returning_to_the_first_model_brings_back_its_labels(built: Built) -> None:
+    # Runs after the re-score: the pin goes back to the first model, whose rows the scoring
+    # stage re-stamps with the returning run (it doesn't predict again).
+    with built.admin.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE raw.review_aspect_score SET scored_run_id = 5, scored_at = :at "
+                "WHERE model_version = :model AND recommendation_id IN (2, 3)"
+            ),
+            {"at": (DAY3 + timedelta(days=2)).replace(tzinfo=None), "model": FIRST.model_version},
+        )
+
+    again = built.build()
+
+    assert again.ok, again.failures
+    assert built.bridge() == [
+        (1, "ux_controls", SECOND.model_version),  # the first model never scored this version
+        (2, "content", FIRST.model_version),
+        (2, "performance", FIRST.model_version),
+        (3, "performance", FIRST.model_version),
+        (3, "stability_bugs", FIRST.model_version),
+    ]

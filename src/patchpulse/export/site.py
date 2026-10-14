@@ -4,11 +4,12 @@ Files (paths relative to the site's data folder):
 
 * `index.json`: `schema_version`, `data_version` (the pipeline run), `generated_at` (UTC, ISO),
   `attribution` ("Data from Steam"), `aspect_model` (the model that detects aspects: `family`,
-  `version`, `test_macro_f1` on the gold test set), and `games`: one entry per game, sorted by
-  name, with `appid`, `name`, `genres`, `first_date`, `last_date`, `latest` (the last 30 days:
-  `days`, `to`, `n`, `share`; null before the game has data) and `top_complaint_30d` (over the
-  same 30 days, the aspect mentioned by the largest share of scored negative reviews: `code`,
-  `share`, `n` scored negative reviews; off-topic doesn't count; null without any).
+  `version`, `test_macro_f1` on the gold test set, and `aspect_f1`, each aspect's F1 there, when
+  the model records it), and `games`: one entry per game, sorted by name, with `appid`, `name`,
+  `genres`, `first_date`, `last_date`, `latest` (the last 30 days: `days`, `to`, `n`, `share`; null
+  before the game has data) and `top_complaint_30d` (over the same 30 days, the aspect mentioned
+  by the largest share of scored negative reviews: `code`, `share`, `n` scored negative reviews;
+  off-topic and aspects with an F1 under MIN_ASPECT_F1 don't count; null without any).
 * `games/{appid}.json`: the same header fields plus `appid`, `name`, `genres`, `series` (one
   point per day: `date`, `n`, `pos`, `share`, `lo`, `hi`, `sale`, `discount`), `patches`
   (`date`, `title`, `url`, `type`, `treatment`) and `aspects`: `codes` (the taxonomy, in order)
@@ -27,8 +28,8 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,9 @@ ATTRIBUTION = "Data from Steam"
 LATEST_DAYS = 30
 _PLACES = 4
 NOT_A_COMPLAINT = "off_topic"  # memes and jokes, not a complaint about the game
+# An aspect the model detects with a gold-test F1 under this isn't named as a top complaint; the
+# site marks it (web/lib/aspects.ts uses the same bar).
+MIN_ASPECT_F1 = 0.5
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class AspectModel:
     family: str  # s0, s1a or s1b
     version: str
     test_macro_f1: float | None  # on the gold test set, from the eval report
+    aspect_f1: Mapping[str, float] = field(default_factory=dict)  # each aspect's, when recorded
 
 
 @dataclass(frozen=True)
@@ -109,11 +114,17 @@ def read_aspect_model(model_dir: Path | None) -> AspectModel | None:
         return None
     try:
         record = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
-        metric = record.get("metrics", {}).get("test_macro_f1")
+        metrics = record.get("metrics", {})
+        metric = metrics.get("test_macro_f1")
         return AspectModel(
             family=str(record["family"]),
             version=str(record["version"]),
             test_macro_f1=None if metric is None else float(metric),
+            aspect_f1={
+                code: float(metrics[f"test_f1_{code}"])
+                for code in ASPECTS
+                if f"test_f1_{code}" in metrics
+            },
         )
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         log.warning("aspect model unreadable in %s: %s", model_dir, error)
@@ -145,7 +156,9 @@ def _latest(series: Sequence[DayRow]) -> dict[str, Any] | None:
 
 
 def _top_complaint(
-    aspect_days: Sequence[AspectDayRow], latest: dict[str, Any] | None
+    aspect_days: Sequence[AspectDayRow],
+    latest: dict[str, Any] | None,
+    aspect_f1: Mapping[str, float],
 ) -> dict[str, Any] | None:
     if latest is None:
         return None
@@ -155,7 +168,11 @@ def _top_complaint(
     if n == 0:
         return None
     mentions = [sum(d.neg[i] for d in window) for i in range(len(ASPECTS))]
-    candidates = [i for i, code in enumerate(ASPECTS) if code != NOT_A_COMPLAINT and mentions[i]]
+    candidates = [
+        i
+        for i, code in enumerate(ASPECTS)
+        if code != NOT_A_COMPLAINT and aspect_f1.get(code, 1.0) >= MIN_ASPECT_F1 and mentions[i]
+    ]
     if not candidates:
         return None
     top = max(candidates, key=lambda i: (mentions[i], -i))  # a tie goes to the taxonomy's order
@@ -218,7 +235,11 @@ def shape_site_export(
                 "first_date": series[0].date.isoformat() if series else None,
                 "last_date": series[-1].date.isoformat() if series else None,
                 "latest": latest,
-                "top_complaint_30d": _top_complaint(aspect_days, latest) if aspects else None,
+                "top_complaint_30d": (
+                    _top_complaint(aspect_days, latest, aspects.model.aspect_f1)
+                    if aspects
+                    else None
+                ),
             }
         )
         files[f"games/{game.appid}.json"] = _dump(
@@ -259,6 +280,7 @@ def shape_site_export(
             "family": aspects.model.family,
             "version": aspects.model.version,
             "test_macro_f1": _round(aspects.model.test_macro_f1),
+            "aspect_f1": {code: _round(f1) for code, f1 in aspects.model.aspect_f1.items()},
         }
     files["index.json"] = _dump({**header, "aspect_model": model, "games": listing})
     return files

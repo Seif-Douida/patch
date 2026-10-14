@@ -118,3 +118,38 @@ describe("AspectHeatmap", () => {
     expect(readout.textContent).toContain("negative reviews scored, too few for a share");
   });
 });
+
+describe("AspectHeatmap, more", () => {
+  afterEach(cleanup);
+
+  it("keyboard_entry_survives_a_shorter_range", () => {
+    const { rerender } = renderHeatmap();
+    const last = document.querySelector<HTMLElement>(
+      '[data-aspect-row="performance"] [data-week="2026-10-12"]',
+    ) as HTMLElement;
+    fireEvent.focus(last);
+
+    rerender(<AspectHeatmap aspects={ASPECTS} from="2026-09-28" to="2026-10-04" />);
+
+    const entries = document.querySelectorAll('[role="gridcell"][tabindex="0"]');
+    expect(entries).toHaveLength(1);
+  });
+
+  it("weak_aspects_are_marked", () => {
+    render(
+      <AspectHeatmap
+        aspects={ASPECTS}
+        from="2026-09-28"
+        to="2026-10-18"
+        weak={["ux_controls"]}
+      />,
+    );
+
+    const headers = screen.getAllByRole("rowheader");
+    const ux = headers.find((h) => h.textContent?.startsWith("UX and controls"));
+    expect(ux?.textContent).toContain("UX and controls*");
+    expect(headers[0]?.textContent).toBe("Performance");
+    const note = /^\* Detected less reliably: F1 under 0.5 on our test set/;
+    expect(screen.getByText(note)).toBeTruthy();
+  });
+});

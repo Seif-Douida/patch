@@ -113,10 +113,12 @@ export function GameCharts({
   series,
   patches,
   aspects = null,
+  weak = [],
 }: {
   series: DayPoint[];
   patches: Patch[];
   aspects?: AspectSeries | null;
+  weak?: readonly string[]; // aspects the model detects less reliably
 }) {
   const filled = useMemo(() => fillDays(series), [series]);
   const [days, setDays] = useState<number | null>(90);
@@ -268,6 +270,7 @@ export function GameCharts({
           aspects={aspects}
           from={rows[0]?.date ?? ""}
           to={rows.at(-1)?.date ?? ""}
+          weak={weak}
         />
       )}
 

@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { AspectDay, AspectSeries, Patch } from "@/lib/types";
+import type { AspectDay, AspectModel, AspectSeries, Patch } from "@/lib/types";
 
 import { PatchAspectTables } from "./PatchAspectTable";
 
@@ -70,6 +70,33 @@ describe("PatchAspectTables", () => {
     ]);
     // The earlier patch has only 4 days of data before it.
     expect(earlier?.closest("details")?.textContent).toContain("only 4 days of data before");
+    // No emphasis: with ten aspects a patch, some changes look clear by chance alone.
+    expect(document.querySelector("strong, b, .change-clear")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/bold/i);
+  });
+
+  it("weak_aspects_are_marked", () => {
+    const model: AspectModel = {
+      family: "s0",
+      version: "v1",
+      test_macro_f1: 0.61,
+      aspect_f1: { performance: 0.87, ux_controls: 0.48 },
+    };
+    render(
+      <PatchAspectTables
+        aspects={september(10)}
+        patches={[patch("2026-09-16", "Patch 1.1", true)]}
+        model={model}
+      />,
+    );
+
+    const ux = screen.getByRole("rowheader", { name: /UX and controls/ });
+    expect(ux.textContent).toContain("UX and controls*");
+    expect(ux.textContent).toContain("detected less reliably");
+    const performance = screen.getByRole("rowheader", { name: /Performance/ });
+    expect(performance.textContent).toBe("Performance");
+    const note = /^\* Detected less reliably: F1 under 0.5 on our test set/;
+    expect(screen.getByText(note)).toBeTruthy();
   });
 
   it("too_few_reviews_show_dashes_not_numbers", () => {

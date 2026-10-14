@@ -1,12 +1,13 @@
 -- For each review version, its latest score, one row per aspect. Every model's scores stay in raw;
--- the latest is the newest scored_at, so a new champion's score replaces the old one as soon as
--- the scoring stage reaches the review.
+-- the latest is the one with the highest run id (the scoring stage's own rule), so a new champion's
+-- score replaces the old one as soon as the stage reaches the review, and a return to an earlier
+-- champion re-stamps that model's rows with the returning run.
 with ranked as (
     select
         s.*,
         row_number() over (
             partition by s.recommendation_id, s.timestamp_updated
-            order by s.scored_at desc, s.scored_run_id desc, s.model_version desc
+            order by s.scored_run_id desc, s.scored_at desc, s.model_version desc
         ) as score_rank
     from {{ source('raw', 'review_aspect_score') }} as s
 )

@@ -3,7 +3,12 @@
 One rule covers new reviews, edited reviews and a new champion: score each review's latest version
 that has no score from the current model version, newest first, until the time budget runs out.
 Each page is committed on its own, so a stop at the budget, or a failure, keeps what was scored
-and the next night carries on. Old scores are never touched.
+and the next night carries on. Every model's scores stay in raw.
+
+dbt reads a version's latest score as the one with the highest run id. A return to an earlier
+champion (a rollback) would leave the later model's scores the latest, so the stage first re-stamps
+the current model's rows that another model has scored since with this run: they become the
+latest again without predicting anything. A cheap check skips this on every other night.
 
 Newest first is keyset paging on (timestamp_created, recommendation_id), descending, through
 `ix_steam_review_created` (migration 0002): each page starts where the last one ended, so a
@@ -70,6 +75,28 @@ _INSERT = (
     f"SELECT {', '.join(name for name, _ in _COLUMNS)} FROM OPENJSON(:page) WITH "
     f"({', '.join(f'{name} {kind}' for name, kind in _COLUMNS)})"
 )
+# Has another model scored anything since the current one last did? Only after a return to an
+# earlier champion; every other night this is one pass over the run ids and the answer is no.
+_BEHIND = """
+SELECT CASE WHEN EXISTS (
+    SELECT 1 FROM raw.review_aspect_score
+    WHERE model_version <> :model_version
+      AND scored_run_id > (
+          SELECT MAX(scored_run_id) FROM raw.review_aspect_score
+          WHERE model_version = :model_version)
+) THEN 1 ELSE 0 END
+"""
+_RESTAMP = """
+UPDATE TOP (:batch) s SET scored_run_id = :run_id, scored_at = SYSUTCDATETIME()
+FROM raw.review_aspect_score AS s
+WHERE s.model_version = :model_version
+  AND EXISTS (
+      SELECT 1 FROM raw.review_aspect_score AS o
+      WHERE o.recommendation_id = s.recommendation_id
+        AND o.timestamp_updated = s.timestamp_updated
+        AND o.scored_run_id > s.scored_run_id)
+"""
+RESTAMP_BATCH = 50_000
 
 
 @dataclass(frozen=True)
@@ -77,6 +104,7 @@ class ScoreStats:
     scored: int
     remaining: int  # latest review versions this model version hasn't scored yet
     model_version: str
+    restamped: int = 0  # this model's scores made the latest again after a rollback
 
 
 def _iso(value: object) -> str:
@@ -101,7 +129,19 @@ def score_reviews(
     model_version = model_version_of(scorer)
     deadline = clock() + budget_s
     after: tuple[datetime, int] | None = None
-    scored = 0
+    scored = restamped = 0
+    with engine.connect() as connection:
+        behind: bool = bool(
+            connection.execute(text(_BEHIND), {"model_version": model_version}).scalar_one()
+        )
+    while behind and clock() < deadline:
+        with engine.begin() as connection:
+            count = connection.execute(
+                text(_RESTAMP),
+                {"batch": RESTAMP_BATCH, "run_id": run_id, "model_version": model_version},
+            ).rowcount
+        restamped += count
+        behind = count == RESTAMP_BATCH
     while clock() < deadline:
         parameters: dict[str, Any] = {"batch": batch, "model_version": model_version}
         if after is not None:
@@ -134,5 +174,13 @@ def score_reviews(
         remaining: int = connection.execute(
             text(_REMAINING), {"model_version": model_version}
         ).scalar_one()
-    log.info("scored %d reviews with %s; %d left", scored, model_version, remaining)
-    return ScoreStats(scored=scored, remaining=int(remaining), model_version=model_version)
+    log.info(
+        "scored %d reviews with %s, re-stamped %d; %d left",
+        scored,
+        model_version,
+        restamped,
+        remaining,
+    )
+    return ScoreStats(
+        scored=scored, remaining=int(remaining), model_version=model_version, restamped=restamped
+    )

@@ -26,6 +26,7 @@ def test_web_fixtures_match_the_exporter() -> None:
     index = json.loads(expected["index.json"])
     assert index["schema_version"] == 2
     assert index["aspect_model"] is not None
+    assert set(index["aspect_model"]["aspect_f1"]) == set(ASPECTS)
     for game in index["games"]:
         assert game["top_complaint_30d"] is not None
         aspects = json.loads(expected[f"games/{game['appid']}.json"])["aspects"]

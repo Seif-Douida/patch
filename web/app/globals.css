@@ -738,11 +738,6 @@ a:hover {
   color: var(--ink-2);
 }
 
-.change-clear {
-  font-weight: 700;
-  color: var(--ink);
-}
-
 /* The day readout: the value leads, the label follows. */
 
 .day-details {

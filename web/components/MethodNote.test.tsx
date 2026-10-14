@@ -15,7 +15,8 @@ describe("MethodNote", () => {
 
     const note = screen.getByText(/Aspects are detected by a model/);
     expect(note.textContent).toContain(
-      "Aspects are detected by a model (S0 20261012T223218Z, macro-F1 0.61 on our test set)",
+      "Aspects are detected by a model (S0 20261012T223218Z, macro-F1 0.61 on our test set of " +
+        "English and French reviews)",
     );
     const link = screen.getByRole("link", { name: "How the model was evaluated" });
     expect(link.getAttribute("href")).toBe(EVAL_REPORT_URL);

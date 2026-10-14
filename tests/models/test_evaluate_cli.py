@@ -16,6 +16,7 @@ from tiny_encoder import write_tiny_encoder
 
 from patchpulse.labeling.cache import TEACHER_CACHE_FILE, LabelCache
 from patchpulse.labeling.gold import parse_aspects
+from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import prompt_hash
 from patchpulse.models import cli
 from patchpulse.models.artifact import read_artifact
@@ -113,9 +114,10 @@ def test_evaluate_report_reads_gold_test_once(
     assert f"{N_AUDIT} reviews" in report
     assert not any(text in report for text in trained)
     for model_dir in Path("build/models").glob("*-*"):
-        assert {"test_macro_f1", "test_macro_f1_low", "test_macro_f1_high"} <= set(
-            read_artifact(model_dir).metrics
-        )
+        metrics = read_artifact(model_dir).metrics
+        assert {"test_macro_f1", "test_macro_f1_low", "test_macro_f1_high"} <= set(metrics)
+        # Each aspect's F1 too: the site marks the aspects the model detects less reliably.
+        assert {f"test_f1_{code}" for code in ASPECTS} <= set(metrics)
     (run,) = mlflow.search_runs(
         experiment_names=["evaluation"], filter_string="tags.step = 'report'", output_format="list"
     )

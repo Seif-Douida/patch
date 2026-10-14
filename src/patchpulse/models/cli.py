@@ -824,6 +824,8 @@ def _evaluate_report(settings: LabSettings, *, force: bool) -> int:
                 "test_macro_f1": test.macro_f1,
                 "test_macro_f1_low": test.macro_f1_ci[0],
                 "test_macro_f1_high": test.macro_f1_ci[1],
+                # Per aspect, so the site can mark the aspects detected less reliably.
+                **{f"test_f1_{code}": f1 for code, f1 in test.f1.items()},
             },
         )
         size_mb = sum((model_dir / name).stat().st_size for name in artifact.files) / 1e6

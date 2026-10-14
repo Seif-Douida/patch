@@ -9,6 +9,7 @@ from typing import Any
 
 from patchpulse.export.site import (
     ATTRIBUTION,
+    MIN_ASPECT_F1,
     SCHEMA_VERSION,
     AspectDayRow,
     AspectModel,
@@ -191,6 +192,7 @@ def test_export_v2_shape_is_deterministic() -> None:
         "family": "s0",
         "version": "20261012T223218Z",
         "test_macro_f1": 0.6139,
+        "aspect_f1": {},
     }
     hd2 = next(g for g in index["games"] if g["appid"] == 553850)
     assert hd2["top_complaint_30d"] == {"code": "performance", "share": 0.6, "n": 5}
@@ -230,6 +232,31 @@ def test_aspect_model_is_read_from_model_json(tmp_path: Path) -> None:
     )
 
     assert read_aspect_model(tmp_path) == AspectModel("s0", "v1", 0.6)
+    (tmp_path / "model.json").write_text(
+        json.dumps(
+            {
+                "family": "s0",
+                "version": "v1",
+                "metrics": {"test_macro_f1": 0.6, "test_f1_performance": 0.87, "other": 1.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert read_aspect_model(tmp_path) == AspectModel("s0", "v1", 0.6, {"performance": 0.87})
     assert read_aspect_model(None) is None
     # An unreadable model.json loses the model block for a night; it never fails the export.
     assert read_aspect_model(tmp_path / "missing") is None
+
+
+def test_weak_aspects_are_named_and_left_out_of_the_top_complaint() -> None:
+    # An aspect the model detects with F1 under MIN_ASPECT_F1 on gold test isn't a headline.
+    model = AspectModel("s0", "v1", 0.61, {"ux_controls": 0.48, "performance": 0.87})
+    days = [day(553850, D1, 10, 0)]
+    aspect_days = [aspect_day(553850, D1, (10, 0), neg=mentions(ux_controls=6, performance=3))]
+
+    files = export([HD2], days, [], Aspects(model, aspect_days))
+
+    index = load(files, "index.json")
+    assert index["aspect_model"]["aspect_f1"] == {"performance": 0.87, "ux_controls": 0.48}
+    assert MIN_ASPECT_F1 == 0.5
+    assert index["games"][0]["top_complaint_30d"] == {"code": "performance", "share": 0.3, "n": 10}

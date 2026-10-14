@@ -34,7 +34,15 @@ START = date(2026, 6, 1)
 DAYS = 120
 GENERATED_AT = datetime(2026, 9, 29, 3, 32, tzinfo=UTC)
 UNSCORED_DAYS = 14
-MODEL = AspectModel(family="s0", version="20260901T000000Z", test_macro_f1=0.61)
+# Invented per-aspect F1, three under the site's 0.5 bar so the sample shows them marked.
+MODEL = AspectModel(
+    family="s0",
+    version="20260901T000000Z",
+    test_macro_f1=0.61,
+    aspect_f1=dict(
+        zip(ASPECTS, (0.85, 0.66, 0.82, 0.72, 0.56, 0.4, 0.77, 0.48, 0.2, 0.7), strict=True)
+    ),
+)
 # How often a negative or a positive review mentions each aspect, in ASPECTS order.
 NEG_RATES = (0.25, 0.2, 0.15, 0.12, 0.1, 0.1, 0.03, 0.06, 0.04, 0.08)
 POS_RATES = (0.05, 0.03, 0.3, 0.35, 0.05, 0.05, 0.25, 0.05, 0.01, 0.15)

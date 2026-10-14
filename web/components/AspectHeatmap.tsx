@@ -2,10 +2,12 @@
 
 import { type CSSProperties, type KeyboardEvent, useMemo, useRef, useState } from "react";
 
+import { WeakMark } from "@/components/PatchAspectTable";
 import {
   MIN_WEEK_SCORED,
   type Polarity,
   SHARE_LEVELS,
+  WEAK_NOTE,
   type Week,
   aspectLabel,
   shareLevel,
@@ -85,10 +87,12 @@ export function AspectHeatmap({
   aspects,
   from,
   to,
+  weak = [],
 }: {
   aspects: AspectSeries;
   from: string;
   to: string;
+  weak?: readonly string[]; // aspects the model detects less reliably
 }) {
   const [polarity, setPolarity] = useState<Polarity>("neg");
   const [active, setActive] = useState<Cell | null>(null);
@@ -99,9 +103,11 @@ export function AspectHeatmap({
   );
   const noun = polarity === "neg" ? "negative" : "positive";
   const rows = aspects.codes.length;
-  // The keyboard enters the grid on the latest week of the first aspect.
-  const current = active ?? { row: 0, col: weeks.length - 1 };
-  const shown = active ? weeks[active.col] : undefined;
+  // The keyboard enters the grid on the last active cell, or the latest week of the first
+  // aspect; a shorter range can leave the last active week outside the grid, so it's clamped.
+  const inRange = active !== null && active.col < weeks.length ? active : null;
+  const current = inRange ?? { row: Math.min(active?.row ?? 0, rows - 1), col: weeks.length - 1 };
+  const shown = inRange ? weeks[inRange.col] : undefined;
 
   function move(event: KeyboardEvent<HTMLDivElement>, cell: Cell) {
     const steps: Record<string, Cell> = {
@@ -157,6 +163,7 @@ export function AspectHeatmap({
               <div role="row" key={code} className="heatmap-row" data-aspect-row={code}>
                 <div role="rowheader" className="heatmap-label">
                   {aspectLabel(code)}
+                  {weak.includes(code) && <WeakMark />}
                 </div>
                 {weeks.map((week, col) => {
                   const share = week.shares[row] ?? null;
@@ -202,11 +209,11 @@ export function AspectHeatmap({
         </div>
 
         <p className="heatmap-readout" data-testid="heatmap-readout" aria-live="polite">
-          {active && shown ? (
+          {inRange && shown ? (
             <Readout
               week={shown}
-              code={aspects.codes[active.row] ?? ""}
-              share={shown.shares[active.row] ?? null}
+              code={aspects.codes[inRange.row] ?? ""}
+              share={shown.shares[inRange.row] ?? null}
               noun={noun}
             />
           ) : (
@@ -228,6 +235,9 @@ export function AspectHeatmap({
             Under {MIN_WEEK_SCORED} scored reviews
           </li>
         </ul>
+        {aspects.codes.some((code) => weak.includes(code)) && (
+          <p className="chart-note">{WEAK_NOTE}</p>
+        )}
       </figure>
 
       <details className="table-view">

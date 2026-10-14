@@ -7,7 +7,8 @@ export const EVAL_REPORT_URL =
 export function MethodNote({ model }: { model: AspectModel | null | undefined }) {
   if (!model) return null;
   const f1 = model.test_macro_f1;
-  const score = f1 === null ? "" : `, macro-F1 ${f1.toFixed(2)} on our test set`;
+  const score =
+    f1 === null ? "" : `, macro-F1 ${f1.toFixed(2)} on our test set of English and French reviews`;
   return (
     <p className="method-note">
       Aspects are detected by a model ({model.family.toUpperCase()} {model.version}

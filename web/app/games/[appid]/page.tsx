@@ -4,6 +4,7 @@ import Link from "next/link";
 import { GameCharts } from "@/components/GameCharts";
 import { MethodNote } from "@/components/MethodNote";
 import { PatchAspectTables } from "@/components/PatchAspectTable";
+import { weakAspects } from "@/lib/aspects";
 import { loadGame, loadIndex } from "@/lib/data";
 import { PATCH_LABELS, formatCount, formatDate, formatShare } from "@/lib/series";
 
@@ -46,11 +47,20 @@ export default async function GamePage({ params }: Props) {
         )}
       </header>
 
-      <GameCharts series={game.series} patches={game.patches} aspects={aspects} />
+      <GameCharts
+        series={game.series}
+        patches={game.patches}
+        aspects={aspects}
+        weak={[...weakAspects(index.aspect_model)]}
+      />
 
       {aspects && (
         <>
-          <PatchAspectTables aspects={aspects} patches={game.patches} />
+          <PatchAspectTables
+            aspects={aspects}
+            patches={game.patches}
+            model={index.aspect_model}
+          />
           <MethodNote model={index.aspect_model} />
         </>
       )}

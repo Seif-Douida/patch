@@ -1,6 +1,12 @@
-import { type PatchComparison, WINDOW_DAYS, beforeAfter } from "@/lib/aspects";
+import {
+  type PatchComparison,
+  WEAK_NOTE,
+  WINDOW_DAYS,
+  beforeAfter,
+  weakAspects,
+} from "@/lib/aspects";
 import { formatCount, formatDate, formatShare } from "@/lib/series";
-import type { AspectSeries, Patch } from "@/lib/types";
+import type { AspectModel, AspectSeries, Patch } from "@/lib/types";
 
 /** Percentage points with their sign: "+20", "−4", "0". */
 function signed(value: number): string {
@@ -12,6 +18,16 @@ function signed(value: number): string {
 
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** The less reliable aspects' marker: a visible asterisk, and words for screen readers. */
+export function WeakMark() {
+  return (
+    <>
+      <span aria-hidden="true">*</span>
+      <span className="visually-hidden"> (detected less reliably)</span>
+    </>
+  );
 }
 
 function Notes({ comparison }: { comparison: PatchComparison }) {
@@ -36,9 +52,9 @@ function Notes({ comparison }: { comparison: PatchComparison }) {
   ) : null;
 }
 
-type TableProps = { patch: Patch; aspects: AspectSeries; open: boolean };
+type TableProps = { patch: Patch; aspects: AspectSeries; open: boolean; weak: Set<string> };
 
-function PatchTable({ patch, aspects, open }: TableProps) {
+function PatchTable({ patch, aspects, open, weak }: TableProps) {
   const comparison = beforeAfter(aspects, patch.date);
   return (
     <details className="patch-aspect" open={open}>
@@ -62,15 +78,15 @@ function PatchTable({ patch, aspects, open }: TableProps) {
           <tbody>
             {comparison.aspects.map((aspect) => {
               const [low, high] = aspect.interval ?? [0, 0];
-              const clear = aspect.interval !== null && (low > 0 || high < 0);
               return (
                 <tr key={aspect.code}>
-                  <th scope="row">{aspect.label}</th>
+                  <th scope="row">
+                    {aspect.label}
+                    {weak.has(aspect.code) && <WeakMark />}
+                  </th>
                   <td>{formatShare(aspect.before)}</td>
                   <td>{formatShare(aspect.after)}</td>
-                  <td className={clear ? "change-clear" : undefined}>
-                    {aspect.change === null ? "–" : signed(aspect.change)}
-                  </td>
+                  <td>{aspect.change === null ? "–" : signed(aspect.change)}</td>
                   <td>
                     {aspect.interval === null ? "–" : `${signed(low)} to ${signed(high)}`}
                   </td>
@@ -88,10 +104,13 @@ function PatchTable({ patch, aspects, open }: TableProps) {
 export function PatchAspectTables({
   aspects,
   patches,
+  model = null,
 }: {
   aspects: AspectSeries;
   patches: Patch[];
+  model?: AspectModel | null;
 }) {
+  const weak = weakAspects(model);
   const treatments = patches
     .filter((patch) => patch.treatment)
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -102,8 +121,8 @@ export function PatchAspectTables({
       <p className="chart-note">
         For each major update or patch, the share of scored negative reviews that mention each
         aspect before it (the {WINDOW_DAYS} days before) and after it (its day and the{" "}
-        {WINDOW_DAYS - 1} after), and the change in percentage points. A change is in bold when its
-        95% interval doesn&apos;t include zero.
+        {WINDOW_DAYS - 1} after), and the change in percentage points with its 95% interval. With
+        ten aspects a patch, about one change in twenty will look clear by chance alone.
       </p>
       {treatments.map((patch, index) => (
         <PatchTable
@@ -111,8 +130,10 @@ export function PatchAspectTables({
           patch={patch}
           aspects={aspects}
           open={index === 0}
+          weak={weak}
         />
       ))}
+      {aspects.codes.some((code) => weak.has(code)) && <p className="chart-note">{WEAK_NOTE}</p>}
     </section>
   );
 }
