@@ -14,6 +14,19 @@ clean-targets: ["target"]
 vars:
   # The patch classifier version whose labels feed core.fact_patch.
   classifier_version: rules-v1
+  # Aspect taxonomy v1 in its fixed order (patchpulse.labeling.taxonomy.ASPECTS, seeds/aspects.csv):
+  # the p_<code> and l_<code> columns of raw.review_aspect_score.
+  aspects:
+    - performance
+    - stability_bugs
+    - gameplay_balance
+    - content
+    - monetization
+    - online_servers
+    - story_world
+    - ux_controls
+    - platform_policy
+    - off_topic
 
 models:
   patchpulse:
@@ -40,6 +53,12 @@ seeds:
       +column_types:
         code: nvarchar(32)
         name: nvarchar(64)
+    aspects:
+      +column_types:
+        code: nvarchar(32)
+        name: nvarchar(64)
+        description: nvarchar(200)
+        taxonomy_version: nvarchar(8)
 
 flags:
   send_anonymous_usage_stats: false

@@ -1,4 +1,5 @@
-"""The nightly run (spec §5, plan Decision 3): ingest → classify → dbt → export → publish.
+"""The nightly run (spec §5, plan Decision 3): ingest → classify → score → dbt → export →
+publish.
 
 1. Start an ops.pipeline_run; its id is the data_version.
 2. Upsert the games from config/games.yaml.
@@ -8,10 +9,14 @@
 5. Backfill: history older than each game's coverage, newest first, round-robin across games
    until the time budget runs out, so every game's history fills in together. If Steam stops
    answering (a rate limit), backfill stops for the night with a warning; the run still succeeds.
-6. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
+6. Score (Phase 2, design D8): aspect scores from the champion in PP_MODEL_DIR for each review's
+   latest version not yet scored by it, newest first, within PP_SCORE_BUDGET_MINUTES. No model
+   is an INFO line; a model that won't load or a scoring error is a `scoring_skipped` warning,
+   and the night goes on without fresh aspects.
+7. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
    advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
-7. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
-8. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
+8. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
+9. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
    success). A failure to report is logged and never changes the run's own result.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
@@ -24,7 +29,7 @@ import os
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -32,7 +37,7 @@ from typing import Any, Protocol
 from sqlalchemy import Connection, Engine
 
 from patchpulse.config import Settings, SettingsError
-from patchpulse.export.site import build_site_export
+from patchpulse.export.site import AspectModel, build_site_export, read_aspect_model
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
 from patchpulse.ingest.games import GAMES_FILE, Game, load_games
 from patchpulse.ingest.http import SteamError, SteamHttp, SteamUnavailableError
@@ -88,7 +93,12 @@ class DbtRunner(Protocol):
 
 class Exporter(Protocol):
     def __call__(
-        self, connection: Connection, *, data_version: int, generated_at: datetime
+        self,
+        connection: Connection,
+        *,
+        data_version: int,
+        generated_at: datetime,
+        aspect_model: AspectModel | None = None,
     ) -> dict[str, bytes]: ...
 
 
@@ -276,6 +286,9 @@ def _run_stages(
     with run.stage("backfill"):
         reached = _backfill(run, settings, steam, games, plans, clock)
 
+    with run.stage("score"):
+        run.stages["score"] = _score(run, settings, clock)
+
     with run.stage("dbt"):
         result = dbt(["build"], settings=settings, target_path=target_root / f"run-{run.run_id}")
         run.stages["dbt"] = result.counts
@@ -292,7 +305,12 @@ def _run_stages(
 
     with run.stage("export"):
         with run.engine.connect() as connection:
-            files = export(connection, data_version=run.run_id, generated_at=now)
+            files = export(
+                connection,
+                data_version=run.run_id,
+                generated_at=now,
+                aspect_model=read_aspect_model(settings.model_dir),
+            )
         run.stages["export"] = {"files": len(files)}
 
     with run.stage("publish"):
@@ -300,6 +318,39 @@ def _run_stages(
 
     with run.engine.begin() as connection:
         run.stages["purged_pages"] = purge_raw_pages(connection, older_than=now - RAW_RETENTION)
+
+
+def _score(run: _Run, settings: Settings, clock: Callable[[], float]) -> dict[str, Any]:
+    """The score stage's record for ops.pipeline_run.stages; never raises."""
+    if settings.model_dir is None:
+        log.info("scoring skipped: no model (PP_MODEL_DIR unset)")
+        return {"skipped": "no model (PP_MODEL_DIR unset)"}
+    try:
+        # Imported here: scoring needs the `scoring` group, which an older image may lack.
+        from patchpulse.models.artifact import load_scorer
+        from patchpulse.pipeline.scoring import score_reviews
+
+        stats = score_reviews(
+            run.engine,
+            load_scorer(settings.model_dir),
+            run_id=run.run_id,
+            budget_s=settings.score_budget_minutes * 60,
+            clock=clock,
+        )
+    except Exception as error:  # aspects lag a night; ingest, dbt and the site go on
+        detail = f"{type(error).__name__}: {error}"
+        log.warning("scoring skipped: %s", detail)
+        with run.engine.begin() as connection:
+            record_dq(
+                connection,
+                run_id=run.run_id,
+                check="scoring_skipped",
+                appid=None,
+                severity="warn",
+                detail=detail,
+            )
+        return {"skipped": detail[:500]}
+    return asdict(stats)
 
 
 def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:

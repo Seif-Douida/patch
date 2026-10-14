@@ -1,0 +1,11 @@
+code,name,description,taxonomy_version
+performance,Performance,"FPS, stutter, optimisation, loading times, hardware requirements",v1
+stability_bugs,Stability and bugs,"Crashes, bugs, save corruption, broken quests",v1
+gameplay_balance,Gameplay and balance,"Difficulty, nerfs and buffs, mechanic changes",v1
+content,Content,"Amount and quality of content, length, replayability, new update content",v1
+monetization,Monetization,"Price, microtransactions, DLC, battle pass, value for money",v1
+online_servers,Online and servers,"Matchmaking, servers, netcode, cheaters, always-online",v1
+story_world,Story and world,"Narrative, characters, lore, art direction",v1
+ux_controls,UX and controls,"UI, controls, accessibility, controller support",v1
+platform_policy,Platform and policy,"Account linking, DRM, kernel anti-cheat, publisher and region decisions",v1
+off_topic,Off topic,"Memes, jokes, reviews that aren't about the game",v1

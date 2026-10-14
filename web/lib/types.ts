@@ -1,4 +1,6 @@
-// The site data (schema version 1), as written by src/patchpulse/export/site.py.
+// The site data (schema versions 1 and 2), as written by src/patchpulse/export/site.py.
+// Schema 2 adds the aspect fields; they are absent in schema 1 and null on a night without a
+// model, so every one of them is optional.
 
 export type Header = {
   schema_version: number;
@@ -14,6 +16,13 @@ export type Latest = {
   share: number | null;
 };
 
+// Over the last 30 days: the aspect mentioned by the largest share of scored negative reviews.
+export type TopComplaint = {
+  code: string;
+  share: number;
+  n: number; // scored negative reviews
+};
+
 export type GameSummary = {
   appid: number;
   name: string;
@@ -21,9 +30,22 @@ export type GameSummary = {
   first_date: string | null;
   last_date: string | null;
   latest: Latest | null;
+  top_complaint_30d?: TopComplaint | null; // schema 2
 };
 
-export type SiteIndex = Header & { games: GameSummary[] };
+// The model that detects aspects, with its macro-F1 on the gold test set and, when recorded,
+// each aspect's F1 there.
+export type AspectModel = {
+  family: string;
+  version: string;
+  test_macro_f1: number | null;
+  aspect_f1?: Record<string, number>;
+};
+
+export type SiteIndex = Header & {
+  games: GameSummary[];
+  aspect_model?: AspectModel | null; // schema 2
+};
 
 export type DayPoint = {
   date: string; // "2026-09-28"
@@ -46,10 +68,24 @@ export type Patch = {
   treatment: boolean; // a major update or a patch: the posts the analysis tests
 };
 
+// One day with scored reviews; days without any are absent.
+export type AspectDay = {
+  date: string;
+  scored: [number, number]; // [negative, positive] reviews scored
+  neg: number[]; // per aspect, in `codes` order: scored negative reviews that mention it
+  pos: number[];
+};
+
+export type AspectSeries = {
+  codes: string[];
+  days: AspectDay[];
+};
+
 export type GameData = Header & {
   appid: number;
   name: string;
   genres: string[];
   series: DayPoint[];
   patches: Patch[];
+  aspects?: AspectSeries | null; // schema 2
 };

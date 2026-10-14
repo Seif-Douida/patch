@@ -101,9 +101,14 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
             }
             {
               // Of the 45 min: 25 backfill, up to 5 for one Steam rate-limit pause (ingest/http.py),
-              // and the rest for the incremental stages, dbt and the export.
+              // 5 scoring, and the rest for the incremental stages, dbt and the export.
               name: 'PP_BACKFILL_BUDGET_MINUTES'
               value: '25'
+            }
+            {
+              // Aspect scoring with the champion baked into the image (design D8).
+              name: 'PP_SCORE_BUDGET_MINUTES'
+              value: '5'
             }
           ]
           resources: {

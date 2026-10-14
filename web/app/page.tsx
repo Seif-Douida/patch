@@ -1,6 +1,8 @@
 import Link from "next/link";
 
+import { MethodNote } from "@/components/MethodNote";
 import { Pulse } from "@/components/Pulse";
+import { topComplaint } from "@/lib/aspects";
 import { loadGame, loadIndex } from "@/lib/data";
 import { fillDays, formatCount, formatShare, lastDays, rollingShare } from "@/lib/series";
 
@@ -8,6 +10,8 @@ const PULSE_DAYS = 90;
 
 export default function Home() {
   const index = loadIndex();
+  // Aspects need schema 2 and a night with a model; until then the column stays off.
+  const withAspects = Boolean(index.aspect_model);
   const games = index.games.map((game) => {
     const series = fillDays(loadGame(game.appid).series);
     return { game, pulse: lastDays(rollingShare(series, 7), PULSE_DAYS) };
@@ -31,6 +35,7 @@ export default function Home() {
             <th scope="col">Game</th>
             <th scope="col">Last {PULSE_DAYS} days</th>
             <th scope="col">Recommend it (30 days)</th>
+            {withAspects && <th scope="col">Top complaint (30 days)</th>}
           </tr>
         </thead>
         <tbody>
@@ -53,10 +58,36 @@ export default function Home() {
                   {game.latest ? `of ${formatCount(game.latest.n)} reviews` : "no reviews yet"}
                 </span>
               </td>
+              {withAspects && <ComplaintCell complaint={topComplaint(game)} />}
             </tr>
           ))}
         </tbody>
       </table>
+      {withAspects && <MethodNote model={index.aspect_model} />}
     </>
+  );
+}
+
+function ComplaintCell({ complaint }: { complaint: ReturnType<typeof topComplaint> }) {
+  return (
+    <td className="game-complaint">
+      {/* The column header is hidden on narrow screens; this names the figure there. */}
+      <span className="complaint-context" aria-hidden="true">
+        Top complaint (30 days)
+      </span>
+      {complaint ? (
+        <>
+          <span className="complaint-name">{complaint.label}</span>
+          <span className="share-count">
+            in {formatShare(complaint.share)} of {formatCount(complaint.n)} negative reviews
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="complaint-name">&ndash;</span>
+          <span className="share-count">too few negative reviews</span>
+        </>
+      )}
+    </td>
   );
 }

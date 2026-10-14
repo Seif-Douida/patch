@@ -9,14 +9,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from fake_steam import FakeSteam
 from sqlalchemy import Connection, Engine, text
+from toy_reviews import toy_reviews
 
 from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import upgrade_to_head
+from patchpulse.export.site import AspectModel
 from patchpulse.ingest.coverage import REREAD, start_of_day
+from patchpulse.models.artifact import record_metrics
+from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
 from patchpulse.pipeline.runner import PipelineError, run_nightly
 
@@ -51,9 +56,29 @@ def failing_dbt(args: Any, **_: Any) -> DbtResult:
 
 
 def stub_export(
-    connection: Connection, *, data_version: int, generated_at: datetime
+    connection: Connection,
+    *,
+    data_version: int,
+    generated_at: datetime,
+    aspect_model: AspectModel | None = None,
 ) -> dict[str, bytes]:
     return {"index.json": b"{}\n"}
+
+
+@dataclass
+class RecordingExport:
+    models: list[AspectModel | None] = field(default_factory=list)
+
+    def __call__(
+        self,
+        connection: Connection,
+        *,
+        data_version: int,
+        generated_at: datetime,
+        aspect_model: AspectModel | None = None,
+    ) -> dict[str, bytes]:
+        self.models.append(aspect_model)
+        return {"index.json": b"{}\n"}
 
 
 @dataclass
@@ -234,3 +259,61 @@ def test_a_second_night_resumes_the_backfill_where_the_first_stopped(env: Env) -
     assert env.rows("SELECT COUNT(*) FROM raw.steam_review")[0][0] == 10
     (coverage,) = env.rows(f"SELECT covered_from FROM ops.ingest_state WHERE appid = {GAME_A}")
     assert coverage.covered_from == start_of_day(BACKFILL_START).replace(tzinfo=None)
+
+
+def toy_s0(directory: Path) -> Path:
+    texts, labels = toy_reviews(200, seed=41)
+    save_s0(train_s0(texts, labels), directory, thresholds=np.full(10, 0.5), version="20261013T0")
+    return directory
+
+
+def test_no_model_skips_scoring(env: Env) -> None:
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"
+    assert result.stages["score"] == {"skipped": "no model (PP_MODEL_DIR unset)"}
+
+
+def test_broken_model_is_a_warning_and_the_night_succeeds(env: Env, tmp_path: Path) -> None:
+    broken = toy_s0(tmp_path / "model")
+    (broken / "s0.joblib").write_bytes(b"not the model")
+    settings = env.settings.model_copy(update={"model_dir": broken})
+
+    result = env.run(settings=settings, dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"
+    assert result.stages["score"]["skipped"].startswith("ArtifactError")
+    (finding,) = env.rows(
+        "SELECT severity, detail FROM ops.data_quality_result WHERE check_name = 'scoring_skipped'"
+    )
+    assert finding.severity == "warn"
+    assert "checksum" in finding.detail
+
+
+def test_the_night_scores_its_reviews_between_backfill_and_dbt(env: Env, tmp_path: Path) -> None:
+    settings = env.settings.model_copy(update={"model_dir": toy_s0(tmp_path / "model")})
+
+    result = env.run(settings=settings, dbt=ok_dbt, export=stub_export)
+
+    assert result.stages["score"]["scored"] == 10
+    assert result.stages["score"]["remaining"] == 0
+    assert result.stages["score"]["model_version"] == "s0-20261013T0"
+    assert env.rows("SELECT COUNT(*) FROM raw.review_aspect_score")[0][0] == 10
+    order = list(result.stages["durations_s"])
+    assert order.index("backfill") < order.index("score") < order.index("dbt")
+
+
+def test_the_export_names_the_model_from_pp_model_dir(env: Env, tmp_path: Path) -> None:
+    model = toy_s0(tmp_path / "model")
+    record_metrics(model, {"test_macro_f1": 0.61})
+    with_model, without = RecordingExport(), RecordingExport()
+
+    env.run(
+        settings=env.settings.model_copy(update={"model_dir": model}),
+        dbt=ok_dbt,
+        export=with_model,
+    )
+    env.run(dbt=ok_dbt, export=without)
+
+    assert with_model.models == [AspectModel("s0", "20261013T0", 0.61)]
+    assert without.models == [None]

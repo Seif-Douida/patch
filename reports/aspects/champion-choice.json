@@ -1,0 +1,24 @@
+{
+  "champion": "s0",
+  "best": "s0",
+  "eligible": [
+    "s0"
+  ],
+  "reviews_per_s": {
+    "s0": 4134.4,
+    "s1a": 9.0,
+    "s1b": 8.8
+  },
+  "dev_macro_f1": {
+    "s0": 0.6467824793800117,
+    "s1a": 0.5810816840696915,
+    "s1b": 0.6503124818610051
+  },
+  "versions": {
+    "s0": "20261012T223218Z",
+    "s1a": "20261012T205209Z",
+    "s1b": "20261012T215556Z"
+  },
+  "comparisons": [],
+  "reason": "s0 has the best dev macro-F1 of the models fast enough"
+}

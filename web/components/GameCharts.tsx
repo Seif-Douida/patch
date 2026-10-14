@@ -16,6 +16,7 @@ import {
   YAxis,
 } from "recharts";
 
+import { AspectHeatmap } from "@/components/AspectHeatmap";
 import {
   dateTicks,
   fillDays,
@@ -28,7 +29,7 @@ import {
   saleRanges,
   tickLabel,
 } from "@/lib/series";
-import type { DayPoint, Patch } from "@/lib/types";
+import type { AspectSeries, DayPoint, Patch } from "@/lib/types";
 
 const RANGES: { label: string; days: number | null }[] = [
   { label: "Last 90 days", days: 90 },
@@ -108,7 +109,17 @@ function Key() {
   );
 }
 
-export function GameCharts({ series, patches }: { series: DayPoint[]; patches: Patch[] }) {
+export function GameCharts({
+  series,
+  patches,
+  aspects = null,
+  weak = [],
+}: {
+  series: DayPoint[];
+  patches: Patch[];
+  aspects?: AspectSeries | null;
+  weak?: readonly string[]; // aspects the model detects less reliably
+}) {
   const filled = useMemo(() => fillDays(series), [series]);
   const [days, setDays] = useState<number | null>(90);
 
@@ -253,6 +264,15 @@ export function GameCharts({ series, patches }: { series: DayPoint[]; patches: P
           </ResponsiveContainer>
         </div>
       </figure>
+
+      {aspects && aspects.days.length > 0 && (
+        <AspectHeatmap
+          aspects={aspects}
+          from={rows[0]?.date ?? ""}
+          to={rows.at(-1)?.date ?? ""}
+          weak={weak}
+        />
+      )}
 
       <details className="table-view">
         <summary>Show the daily numbers for this range</summary>

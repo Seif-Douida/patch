@@ -5,27 +5,29 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import type { GameData, SiteIndex } from "./types";
+import type { GameData, Header, SiteIndex } from "./types";
 
-export const SCHEMA_VERSION = 1;
+// Schema 2 only adds fields (aspects), so this site reads both: the live data may still be at 1
+// for a night after a deploy, and old site-data commits stay readable.
+export const SUPPORTED_SCHEMAS: readonly number[] = [1, 2];
 
-const DATA_DIR = path.join(process.cwd(), process.env.SITE_DATA_DIR ?? "fixtures");
+const DATA_DIR = path.resolve(process.cwd(), process.env.SITE_DATA_DIR ?? "fixtures");
 
-function read<T>(relative: string): T {
-  return JSON.parse(readFileSync(path.join(DATA_DIR, relative), "utf8")) as T;
-}
-
-export function loadIndex(): SiteIndex {
-  const index = read<SiteIndex>("index.json");
-  if (index.schema_version !== SCHEMA_VERSION) {
+function read<T extends Header>(dataDir: string, relative: string): T {
+  const document = JSON.parse(readFileSync(path.join(dataDir, relative), "utf8")) as T;
+  if (!SUPPORTED_SCHEMAS.includes(document.schema_version)) {
     // A new exporter with an old site (or the reverse) must fail the build, not render garbage.
     throw new Error(
-      `site data has schema ${index.schema_version}; this site reads ${SCHEMA_VERSION}`,
+      `site data has schema ${document.schema_version}; this site reads ${SUPPORTED_SCHEMAS.join(" or ")}`,
     );
   }
-  return index;
+  return document;
 }
 
-export function loadGame(appid: number): GameData {
-  return read<GameData>(`games/${appid}.json`);
+export function loadIndex(dataDir: string = DATA_DIR): SiteIndex {
+  return read<SiteIndex>(dataDir, "index.json");
+}
+
+export function loadGame(appid: number, dataDir: string = DATA_DIR): GameData {
+  return read<GameData>(dataDir, `games/${appid}.json`);
 }

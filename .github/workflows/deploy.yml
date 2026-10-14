@@ -1,7 +1,9 @@
 name: deploy
 
 # Build the API and jobs images, migrate the database, then roll pp-api and the jobs (spec §13).
-# Replaces Phase 0's api-image.yml. The order matters:
+# Replaces Phase 0's api-image.yml. The jobs image carries the aspect champion that
+# models/champion.yaml pins (design D8), so a rollback restores code and model together.
+# The order matters:
 #   1. pp-migrate runs this commit's migrations and must succeed (migrations stay backward
 #      compatible, so the running API keeps working against the new schema).
 #   2. pp-api moves to this commit's image and must report its SHA on /health, else it is rolled
@@ -19,6 +21,7 @@ on:
       - "Dockerfile"
       - "Dockerfile.jobs"
       - ".dockerignore"
+      - "models/champion.yaml"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
@@ -43,6 +46,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # For MLFLOW_TRACKING_URI, where the champion is downloaded from.
+    environment: production
     permissions:
       contents: read
       packages: write
@@ -57,6 +62,23 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        if: matrix.image == 'patchpulse-jobs'
+        with:
+          version: "0.12.19"
+          enable-cache: true
+
+      # The version models/champion.yaml pins, kept only if its model.json matches the pin and
+      # every file matches model.json; otherwise the jobs image is not built and nothing deploys.
+      # DagsHub serves the public repo's models without a token, so none is passed here.
+      - name: Download the champion model
+        if: matrix.image == 'patchpulse-jobs'
+        env:
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+        run: >-
+          uv run --locked --no-dev --group ml --group pipeline --group scoring
+          patchpulse-ml champion download --to build/champion
 
       - uses: docker/setup-buildx-action@v4
 
