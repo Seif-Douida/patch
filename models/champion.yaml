@@ -1,8 +1,8 @@
 # The aspect model the nightly job scores with (plan Task 14, spec §13). The deploy
 # downloads this registered version and refuses it unless model.json matches the hash.
 name: aspect-classifier
-version: 1
+version: 3
 family: s0
 model_version: 20261012T223218Z
-model_json_sha256: b7f0b92ecfa0c960155d9203eff2fcb11dfdefc8be32a0479da3b4bcf29f6a56
+model_json_sha256: fc2638421988ae3a4b8610bd5f3a144670b7360d9eae484586332dc3b194dc6a
 taxonomy_version: v1
