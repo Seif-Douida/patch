@@ -162,8 +162,12 @@ export function AspectHeatmap({
             {aspects.codes.map((code, row) => (
               <div role="row" key={code} className="heatmap-row" data-aspect-row={code}>
                 <div role="rowheader" className="heatmap-label">
-                  {aspectLabel(code)}
-                  {weak.includes(code) && <WeakMark />}
+                  {/* One child: narrow screens lay the label out as a flex row, and a name that
+                      wraps must keep its mark beside its last word. */}
+                  <span>
+                    {aspectLabel(code)}
+                    {weak.includes(code) && <WeakMark />}
+                  </span>
                 </div>
                 {weeks.map((week, col) => {
                   const share = week.shares[row] ?? null;

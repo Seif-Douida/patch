@@ -2,11 +2,14 @@ import Link from "next/link";
 
 import { MethodNote } from "@/components/MethodNote";
 import { Pulse } from "@/components/Pulse";
-import { topComplaint } from "@/lib/aspects";
+import { MIN_ASPECT_F1, topComplaint } from "@/lib/aspects";
 import { loadGame, loadIndex } from "@/lib/data";
 import { fillDays, formatCount, formatShare, lastDays, rollingShare } from "@/lib/series";
 
 const PULSE_DAYS = 90;
+// The model finds mentions, not whether a mention is praise or a complaint (per-aspect
+// polarity is a later version), so the column says what it counts.
+const ASPECT_COLUMN = "Most mentioned in negative reviews (30 days)";
 
 export default function Home() {
   const index = loadIndex();
@@ -35,7 +38,7 @@ export default function Home() {
             <th scope="col">Game</th>
             <th scope="col">Last {PULSE_DAYS} days</th>
             <th scope="col">Recommend it (30 days)</th>
-            {withAspects && <th scope="col">Top complaint (30 days)</th>}
+            {withAspects && <th scope="col">{ASPECT_COLUMN}</th>}
           </tr>
         </thead>
         <tbody>
@@ -63,6 +66,12 @@ export default function Home() {
           ))}
         </tbody>
       </table>
+      {withAspects && (
+        <p className="method-note">
+          The most mentioned aspect leaves out off-topic and the aspects detected less reliably
+          (F1 under {MIN_ASPECT_F1} on our test set).
+        </p>
+      )}
       {withAspects && <MethodNote model={index.aspect_model} />}
     </>
   );
@@ -73,7 +82,7 @@ function ComplaintCell({ complaint }: { complaint: ReturnType<typeof topComplain
     <td className="game-complaint">
       {/* The column header is hidden on narrow screens; this names the figure there. */}
       <span className="complaint-context" aria-hidden="true">
-        Top complaint (30 days)
+        {ASPECT_COLUMN}
       </span>
       {complaint ? (
         <>

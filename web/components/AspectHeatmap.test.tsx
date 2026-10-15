@@ -151,5 +151,9 @@ describe("AspectHeatmap, more", () => {
     expect(headers[0]?.textContent).toBe("Performance");
     const note = /^\* Detected less reliably: F1 under 0.5 on our test set/;
     expect(screen.getByText(note)).toBeTruthy();
+    // One child holds the name and its mark, so a name that wraps on a phone keeps the mark
+    // beside its last word (narrow screens lay the label out as a flex row).
+    expect(ux?.children).toHaveLength(1);
+    expect(ux?.children[0]?.textContent).toBe("UX and controls* (detected less reliably)");
   });
 });
