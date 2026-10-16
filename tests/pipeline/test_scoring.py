@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import Engine, insert, text
+from sqlalchemy import Engine, event, insert, text
 from toy_reviews import toy_reviews
 
 from patchpulse.config import Settings
@@ -134,6 +134,31 @@ def test_budget_stops_scoring_and_the_next_run_resumes(
 
     assert (stats.scored, stats.remaining) == (3, 0)
     assert [rid for rid, _ in scored(migrated_engine)] == [1, 2, 3, 4, 5]
+
+
+def test_one_to_do_list_a_night_whatever_the_pages(
+    migrated_engine: Engine, champion: Scorer
+) -> None:
+    # Run 19 (16 Oct): every page looked for unscored reviews by checking the score table row by
+    # row from the newest review down, so a night first stepped over every review already scored
+    # (746k) and the backlog slowed to a crawl. The night's to-do list is now built once.
+    add_reviews(migrated_engine, [review(rid, NOW - timedelta(days=rid)) for rid in range(1, 8)])
+    statements: list[str] = []
+
+    def record(*args: Any) -> None:
+        statements.append(str(args[2]))  # (connection, cursor, statement, ...)
+
+    event.listen(migrated_engine, "before_cursor_execute", record)
+    try:
+        stats = score_reviews(
+            migrated_engine, champion, run_id=7, budget_s=60, clock=Ticks(0.0), batch=2
+        )
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", record)
+
+    assert (stats.scored, stats.remaining) == (7, 0)
+    unscored_checks = [s for s in statements if "NOT EXISTS" in s and "review_aspect_score" in s]
+    assert len(unscored_checks) == 1  # 4 pages, one to-do list
 
 
 def test_edited_review_is_rescored(migrated_engine: Engine, champion: Scorer) -> None:

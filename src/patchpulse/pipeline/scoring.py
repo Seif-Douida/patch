@@ -10,9 +10,11 @@ champion (a rollback) would leave the later model's scores the latest, so the st
 the current model's rows that another model has scored since with this run: they become the
 latest again without predicting anything. A cheap check skips this on every other night.
 
-Newest first is keyset paging on (timestamp_created, recommendation_id), descending, through
-`ix_steam_review_created` (migration 0002): each page starts where the last one ended, so a
-backlog of a million reviews costs one pass, not one sort per page.
+The night's work is listed once: the latest versions without a score from this model, newest
+first (timestamp_created, recommendation_id, descending), go into a temporary table with their
+order as a sequence number, and pages are read from it by that number. Looking for unscored
+reviews page by page instead made each night step over every review already scored before
+reaching the backlog (run 19, 16 Oct: 746k reviews, most of the budget), which grew every night.
 
 Imported by the runner only when a model is configured: it needs the `scoring` group.
 """
@@ -22,12 +24,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, Row, text
 
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.models.artifact import Scorer
@@ -37,6 +39,16 @@ log = logging.getLogger("patchpulse.pipeline.scoring")
 MODEL_NAME = "aspect-classifier"
 BATCH = 1_000
 
+# The to-do table lives as long as the stage's connection. It's made without parameters: a
+# parameterised statement runs in its own scope, which would drop the table when it ends.
+# SELECT TOP 0 ... INTO copies the review key's column types.
+_TODO = "#score_todo"
+_TODO_RESET = f"IF OBJECT_ID('tempdb..{_TODO}') IS NOT NULL DROP TABLE {_TODO}"
+_TODO_CREATE = (
+    f"SELECT TOP 0 recommendation_id, timestamp_updated INTO {_TODO} FROM raw.steam_review",  # noqa: S608
+    f"ALTER TABLE {_TODO} ADD seq INT IDENTITY(1, 1) NOT NULL",
+    f"CREATE UNIQUE CLUSTERED INDEX ix_seq ON {_TODO} (seq)",
+)
 _LATEST_UNSCORED = """
     NOT EXISTS (
         SELECT 1 FROM raw.steam_review AS newer
@@ -48,17 +60,22 @@ _LATEST_UNSCORED = """
           AND s.timestamp_updated = r.timestamp_updated
           AND s.model_version = :model_version)
 """
-_PAGE = f"""
-SELECT TOP (:batch) r.recommendation_id, r.timestamp_updated, r.timestamp_created, r.review_text
+# An INSERT ... SELECT ... ORDER BY numbers an IDENTITY column in that order.
+_TODO_FILL = f"""
+INSERT INTO {_TODO} (recommendation_id, timestamp_updated)
+SELECT r.recommendation_id, r.timestamp_updated
 FROM raw.steam_review AS r
-WHERE {_LATEST_UNSCORED} {{after}}
+WHERE {_LATEST_UNSCORED}
 ORDER BY r.timestamp_created DESC, r.recommendation_id DESC
 """  # noqa: S608 - SQL from constants; every value is a bound parameter
-_AFTER = (
-    "AND (r.timestamp_created < :created "
-    "OR (r.timestamp_created = :created AND r.recommendation_id < :rid))"
-)
-_REMAINING = f"SELECT COUNT(*) FROM raw.steam_review AS r WHERE {_LATEST_UNSCORED}"  # noqa: S608
+_PAGE = f"""
+SELECT TOP (:batch) t.seq, r.recommendation_id, r.timestamp_updated, r.review_text
+FROM {_TODO} AS t
+JOIN raw.steam_review AS r
+  ON r.recommendation_id = t.recommendation_id AND r.timestamp_updated = t.timestamp_updated
+WHERE t.seq > :after
+ORDER BY t.seq
+"""  # noqa: S608
 # A page goes in as one JSON document unpacked by OPENJSON: one round trip instead of one per row,
 # which the driver's executemany costs (measured: inserts were ~80% of the stage's time).
 _COLUMNS = (
@@ -117,6 +134,31 @@ def model_version_of(scorer: Scorer) -> str:
     return f"{scorer.artifact.family}-{scorer.artifact.version}"
 
 
+def _score_page(
+    connection: Connection,
+    scorer: Scorer,
+    page: Sequence[Row[Any]],
+    *,
+    model_version: str,
+    run_id: int,
+) -> None:
+    probs = scorer.predict_proba([row.review_text for row in page])
+    labels = scorer.labels(probs)
+    records = [
+        {
+            "recommendation_id": row.recommendation_id,
+            "timestamp_updated": row.timestamp_updated,
+            "model_version": model_version,
+            "model_name": MODEL_NAME,
+            "scored_run_id": run_id,
+            **{f"p_{code}": float(probs[i, a]) for a, code in enumerate(ASPECTS)},
+            **{f"l_{code}": bool(labels[i, a]) for a, code in enumerate(ASPECTS)},
+        }
+        for i, row in enumerate(page)
+    ]
+    connection.execute(text(_INSERT), {"page": json.dumps(records, default=_iso)})
+
+
 def score_reviews(
     engine: Engine,
     scorer: Scorer,
@@ -128,7 +170,7 @@ def score_reviews(
 ) -> ScoreStats:
     model_version = model_version_of(scorer)
     deadline = clock() + budget_s
-    after: tuple[datetime, int] | None = None
+    after = 0
     scored = restamped = 0
     with engine.connect() as connection:
         behind: bool = bool(
@@ -142,38 +184,25 @@ def score_reviews(
             ).rowcount
         restamped += count
         behind = count == RESTAMP_BATCH
-    while clock() < deadline:
-        parameters: dict[str, Any] = {"batch": batch, "model_version": model_version}
-        if after is not None:
-            parameters.update(created=after[0], rid=after[1])
-        with engine.connect() as connection:
-            page = connection.execute(
-                text(_PAGE.format(after=_AFTER if after is not None else "")), parameters
-            ).all()
-        if not page:
-            break
-        probs = scorer.predict_proba([row.review_text for row in page])
-        labels = scorer.labels(probs)
-        records = [
-            {
-                "recommendation_id": row.recommendation_id,
-                "timestamp_updated": row.timestamp_updated,
-                "model_version": model_version,
-                "model_name": MODEL_NAME,
-                "scored_run_id": run_id,
-                **{f"p_{code}": float(probs[i, a]) for a, code in enumerate(ASPECTS)},
-                **{f"l_{code}": bool(labels[i, a]) for a, code in enumerate(ASPECTS)},
-            }
-            for i, row in enumerate(page)
-        ]
-        with engine.begin() as connection:
-            connection.execute(text(_INSERT), {"page": json.dumps(records, default=_iso)})
-        scored += len(page)
-        after = (page[-1].timestamp_created, page[-1].recommendation_id)
     with engine.connect() as connection:
-        remaining: int = connection.execute(
-            text(_REMAINING), {"model_version": model_version}
-        ).scalar_one()
+        connection.execute(text(_TODO_RESET))
+        for statement in _TODO_CREATE:
+            connection.execute(text(statement))
+        connection.execute(text(_TODO_FILL), {"model_version": model_version})
+        todo: int = connection.execute(text(f"SELECT COUNT(*) FROM {_TODO}")).scalar_one()  # noqa: S608
+        connection.commit()
+        while clock() < deadline:
+            page = connection.execute(text(_PAGE), {"batch": batch, "after": after}).all()
+            if not page:
+                break
+            _score_page(connection, scorer, page, model_version=model_version, run_id=run_id)
+            connection.commit()  # a page per transaction: a stop keeps what was scored
+            scored += len(page)
+            after = page[-1].seq
+        # After a failure the table goes with its connection, or the next night's reset drops it.
+        connection.execute(text(_TODO_RESET))
+        connection.commit()
+    remaining = todo - scored
     log.info(
         "scored %d reviews with %s, re-stamped %d; %d left",
         scored,
@@ -182,5 +211,5 @@ def score_reviews(
         remaining,
     )
     return ScoreStats(
-        scored=scored, remaining=int(remaining), model_version=model_version, restamped=restamped
+        scored=scored, remaining=remaining, model_version=model_version, restamped=restamped
     )
