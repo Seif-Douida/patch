@@ -9,6 +9,9 @@ environment.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -80,3 +83,46 @@ def test_jobs_image_copies_the_model_and_sets_pp_model_dir() -> None:
     ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
     # The rest of build/ (checkpoints, encoders, every trained model) stays out of the context.
     assert ignored.index("build/*") < ignored.index("!build/champion")
+
+
+def test_champion_download_runs_with_only_the_steps_groups() -> None:
+    # 16 Oct: `patchpulse-ml` loaded the retrieval commands at startup, which import qdrant_client
+    # (the `retrieval` group), so the download step, which installs fewer groups, failed. The
+    # command must start with only what the step installs: other groups' packages are hidden.
+    download = build_steps()[index_of(build_steps(), name=DOWNLOAD)]
+    installed = set(re.findall(r"--group (\w+)", download["run"]))
+    groups = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "dependency-groups"
+    ]
+
+    def packages(group: str) -> set[str]:
+        names: set[str] = set()
+        for entry in groups[group]:
+            if isinstance(entry, dict):
+                names |= packages(entry["include-group"])
+            else:
+                names.add(re.split(r"[<>=~\[ ;]", entry, maxsplit=1)[0].replace("-", "_"))
+        return names
+
+    available = set().union(*(packages(group) for group in installed))
+    hidden = sorted(set().union(*(packages(g) for g in groups if g != "dev")) - available)
+    assert "qdrant_client" in hidden
+    # An import hook, so a hidden package looks absent (not merely None in sys.modules).
+    script = (
+        "import importlib.abc, sys\n"
+        f"HIDDEN = {set(hidden)!r}\n"
+        "class Absent(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path, target=None):\n"
+        "        if name.split('.')[0] in HIDDEN:\n"
+        "            raise ModuleNotFoundError(f'No module named {name!r}', name=name)\n"
+        "sys.meta_path.insert(0, Absent())\n"
+        "from patchpulse.models.cli import main\n"
+        "sys.exit(main(['champion', 'download', '--help']))\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert "--to" in result.stdout

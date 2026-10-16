@@ -134,7 +134,6 @@ def test_load_command_builds_the_local_collections(
     monkeypatch.setattr(cli, "embedder_dir", lambda name: workspace / "tiny")
     name = f"pp_test_eval_{workspace.name[-8:]}"
     monkeypatch.setattr(load, "eval_collection", lambda model: name)
-    monkeypatch.setattr(cli, "eval_collection", lambda model: name)
     assert main(["retrieval", "embed", "--model", "e5-small"]) == 0
 
     try:
