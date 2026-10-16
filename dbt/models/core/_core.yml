@@ -108,3 +108,28 @@ models:
                 field: aspect_key
       - name: prob
         data_tests: [not_null, between_0_and_1]
+
+  - name: review_index
+    description: >-
+      The reviews Qdrant holds (Phase 3, design D1): long enough, a game's most recent plus those
+      around its treatment patches. Their filter fields, version and a fingerprint of the fields,
+      for the nightly index stage. Rebuilt each night.
+    data_tests:
+      - within_index_cap:
+          arguments:
+            cap: "{{ var('index_cap_per_game') }}"
+            window_days: "{{ var('index_patch_window_days') }}"
+    columns:
+      - name: review_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fact_review')
+                field: review_id
+      - name: rules_version
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["{{ var('index_rules_version') }}"]

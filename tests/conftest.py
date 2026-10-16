@@ -1,8 +1,9 @@
-"""Shared fixtures for integration tests against a real SQL Server.
+"""Shared fixtures for integration tests against a real SQL Server and a real Qdrant.
 
-Locally that's the compose container (`docker compose up -d sql`); in CI it's a service container.
-Each test session works in its own throwaway database. Without a reachable server the tests skip
-on a dev machine but fail in CI, so the integration suite can never silently not run.
+Locally those are the compose containers (`docker compose up -d sql qdrant`); in CI they're
+containers on the runner. Each test session works in its own throwaway database, and each Qdrant
+test in its own collections. Without a reachable server the tests skip on a dev machine but fail in
+CI, so the integration suite can never silently not run.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from dotenv import dotenv_values
@@ -21,6 +23,9 @@ from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
 from patchpulse.db.local import create_local_database
 
+if TYPE_CHECKING:
+    from qdrant_client import QdrantClient
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,10 +35,10 @@ def _sa_password() -> str | None:
     )
 
 
-def _unavailable(reason: str) -> None:
+def _unavailable(reason: str, *, server: str = "SQL Server", service: str = "sql") -> None:
     if os.environ.get("CI"):
-        pytest.fail(f"SQL Server is required in CI: {reason}")
-    pytest.skip(f"local SQL Server not available ({reason}); run `docker compose up -d sql`")
+        pytest.fail(f"{server} is required in CI: {reason}")
+    pytest.skip(f"local {server} not available ({reason}); run `docker compose up -d {service}`")
 
 
 def admin_settings(database: str) -> Settings:
@@ -99,3 +104,43 @@ def migrated_engine(new_database: Callable[[], Settings]) -> Iterator[Engine]:
     upgrade_to_head(engine)
     yield engine
     engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def qdrant() -> Iterator[QdrantClient]:
+    """A client on the local Qdrant (compose locally, a container in CI); no API key."""
+    from qdrant_client import QdrantClient
+
+    client = QdrantClient(
+        url=os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333"), timeout=30
+    )
+    try:
+        client.get_collections()
+    except Exception as error:  # refused, timed out: whatever the transport says
+        _unavailable(type(error).__name__, server="Qdrant", service="qdrant")
+    yield client
+    client.close()
+
+
+@pytest.fixture
+def new_collection(qdrant: QdrantClient) -> Iterator[Callable[[], str]]:
+    """Factory: each call returns an unused collection name; the collections and any aliases
+    pointing at them are deleted after the test."""
+    names: list[str] = []
+
+    def create() -> str:
+        names.append(f"pp_test_{uuid.uuid4().hex[:12]}")
+        return names[-1]
+
+    yield create
+    from qdrant_client import models
+
+    qdrant.update_collection_aliases(
+        change_aliases_operations=[
+            models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=a.alias_name))
+            for a in qdrant.get_aliases().aliases
+            if a.collection_name in names
+        ]
+    )
+    for name in names:
+        qdrant.delete_collection(name)

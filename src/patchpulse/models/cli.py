@@ -202,10 +202,11 @@ def _pull(settings: LabSettings, *, yes: bool) -> int:
     finally:
         engine.dispose()
     log.info(
-        "pulled %d rows; the snapshot has %d reviews (up to run %d) in %s",
+        "pulled %d rows; the snapshot has %d reviews (up to run %d) and an index set of %d in %s",
         result.reviews_new,
         result.reviews_total,
         result.max_run_id,
+        result.index_total,
         settings.data_dir,
     )
     return 0

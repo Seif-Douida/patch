@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # time budget. No model directory means the stage is skipped.
     model_dir: Path | None = None
     score_budget_minutes: int = 5
+    # Phase 3's index stage (design D5): the free Qdrant cluster (its URL is treated as secret too:
+    # with the key, it's the cluster's only door), the encoder baked into the jobs image, and the
+    # stage's time budget. No URL or encoder means the stage is skipped; 0 minutes turns it off.
+    qdrant_url: str | None = None
+    qdrant_api_key: SecretStr | None = None
+    encoder_dir: Path | None = None
+    index_budget_minutes: int = 5
     github_repository: str | None = None
     github_app_id: str | None = None
     github_app_private_key: SecretStr | None = None
@@ -71,6 +78,11 @@ class LabSettings(BaseSettings):
     mlflow_tracking_password: SecretStr | None = Field(
         default=None, validation_alias="MLFLOW_TRACKING_PASSWORD"
     )
+    # Phase 3: the free Qdrant cluster (the upload, cloud measurements) and the local container
+    # that holds the eval's collections.
+    qdrant_url: str | None = None
+    qdrant_api_key: SecretStr | None = None
+    qdrant_local_url: str = "http://localhost:6333"
 
 
 def _load[T: BaseSettings](cls: type[T], env_file: str | None) -> T:

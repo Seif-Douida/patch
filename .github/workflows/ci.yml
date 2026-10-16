@@ -20,6 +20,7 @@ defaults:
 env:
   BICEP_VERSION: v0.47.16
   SQL_IMAGE: mcr.microsoft.com/mssql/server:2025-CU9-ubuntu-24.04
+  QDRANT_IMAGE: qdrant/qdrant:v1.19.2
 
 jobs:
   checks:
@@ -58,10 +59,10 @@ jobs:
           if grep -Eq "Warning|Error" bicep-lint.txt; then exit 1; fi
 
       - name: Tests, including the $0 infra guard
-        run: uv run pytest -m "not integration"
+        run: uv run pytest -m "not integration and not qdrant"
 
-  # Integration tests against SQL Server on the runner. This is a throwaway container; CI never
-  # connects to Azure SQL (spec §5).
+  # Integration tests against SQL Server and Qdrant on the runner. These are throwaway containers;
+  # CI never connects to Azure SQL (spec §5) or the Qdrant cluster.
   integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -97,8 +98,20 @@ jobs:
           docker logs sql | tail -20
           exit 1
 
+      - name: Start Qdrant
+        run: |
+          docker run -d --name qdrant -p 6333:6333 "$QDRANT_IMAGE"
+          for _ in $(seq 1 30); do
+            if curl -fs http://localhost:6333/readyz > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs qdrant | tail -20
+          exit 1
+
       - run: uv sync --locked
-      - run: uv run pytest -m integration
+      - run: uv run pytest -m "integration or qdrant"
 
   # The dashboard (Task 14). It builds against the invented sample in web/fixtures, never live data.
   web:

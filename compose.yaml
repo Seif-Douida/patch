@@ -1,5 +1,5 @@
-# Local SQL Server for development and integration tests (spec §0: named volumes, never bind
-# mounts). The same image runs as a service container in CI. Never point development at Azure SQL:
+# Local SQL Server and Qdrant for development and integration tests (spec §0: named volumes, never
+# bind mounts). The same images run as containers in CI. Never point development at Azure SQL:
 # every wake-up costs at least 1,800 of its 100,000 free vCore-seconds a month.
 services:
   sql:
@@ -19,5 +19,16 @@ services:
       retries: 12
       start_period: 20s
 
+  # Phase 3: the eval's collections and the `qdrant` tests (design D4). No API key locally; the
+  # version follows the free cluster's.
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - patchpulse-qdrant:/qdrant/storage
+
 volumes:
   patchpulse-sql:
+  patchpulse-qdrant:

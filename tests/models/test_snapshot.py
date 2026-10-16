@@ -11,8 +11,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
@@ -21,7 +22,15 @@ from patchpulse.ingest.load import upsert_classifications, upsert_games, upsert_
 from patchpulse.ingest.models import NewsItem, ReviewRecord
 from patchpulse.ingest.patches import Classification, PatchType
 from patchpulse.models.cli import main
-from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
+from patchpulse.models.snapshot import (
+    GAMES_FILE,
+    INDEX_COLUMNS,
+    PATCHES_FILE,
+    REVIEWS_FILE,
+    explain_pull_error,
+    load_snapshot,
+    pull,
+)
 
 CREATED = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 NOW = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
@@ -69,7 +78,50 @@ def news(gid: str, appid: int, title: str) -> NewsItem:
     )
 
 
-def seed(engine: Engine) -> None:
+# core.review_index as dbt builds it (Phase 3, plan Task 2); the pull only copies it.
+_INDEX_DDL = """
+CREATE TABLE core.review_index (
+    review_id BIGINT NOT NULL, appid INT NOT NULL, [day] INT NOT NULL, created_ts BIGINT NOT NULL,
+    [language] NVARCHAR(32), voted_up BIT, playtime_bucket NVARCHAR(16),
+    first_seen_run_id BIGINT, [version] DATETIME2, aspects NVARCHAR(400),
+    aspect_model_version NVARCHAR(64), rules_version NVARCHAR(8), fingerprint CHAR(64)
+)
+"""
+
+
+def index_row(rid: int, *, aspects: str = "") -> dict[str, object]:
+    return {
+        "review_id": rid,
+        "appid": 553850,
+        "day": 20260920,
+        "created_ts": int(CREATED.timestamp()),
+        "language": "english",
+        "voted_up": rid % 2 == 0,
+        "playtime_bucket": "2h_10h",
+        "first_seen_run_id": 1,
+        "version": CREATED.replace(tzinfo=None),
+        "aspects": aspects,
+        "aspect_model_version": "s0-20261013T000000Z" if aspects else None,
+        "rules_version": "r1",
+        "fingerprint": f"{rid:064x}",
+    }
+
+
+def set_index(engine: Engine, rows: list[dict[str, object]]) -> None:
+    """Replace core.review_index's rows, creating the table the first time."""
+    with engine.begin() as connection:
+        if connection.execute(text("SELECT OBJECT_ID('core.review_index')")).scalar() is None:
+            connection.execute(text(_INDEX_DDL))
+        connection.execute(text("DELETE FROM core.review_index"))
+        for row in rows:
+            columns = ", ".join(f"[{name}]" for name in row)
+            values = ", ".join(f":{name}" for name in row)
+            connection.execute(
+                text(f"INSERT INTO core.review_index ({columns}) VALUES ({values})"), row
+            )
+
+
+def seed(engine: Engine, *, index: bool = True) -> None:
     games = [
         Game(appid=553850, name="Helldivers 2", genres=["Action"], role=Role.TRACKED,
              backfill_start=CREATED.date()),
@@ -90,6 +142,8 @@ def seed(engine: Engine) -> None:
             },
             run_id=1,
         )
+    if index:
+        set_index(engine, [index_row(1, aspects="performance|stability_bugs"), index_row(3)])
 
 
 @pytest.mark.integration
@@ -155,6 +209,52 @@ def test_failed_pull_leaves_the_previous_snapshot_intact(
         pull(empty, tmp_path, now=NOW)
 
     assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+@pytest.mark.integration
+def test_pull_writes_the_index_set(migrated_engine: Engine, tmp_path: Path) -> None:
+    seed(migrated_engine)
+
+    result = pull(migrated_engine, tmp_path, now=NOW)
+
+    assert result.index_total == 2
+    index = load_snapshot(tmp_path).index
+    assert list(index.columns) == list(INDEX_COLUMNS)  # every column, and no text
+    assert sorted(index["review_id"]) == [1, 3]
+    first = index.set_index("review_id").loc[1]
+    assert (first["aspects"], first["aspect_model_version"]) == (
+        "performance|stability_bugs",
+        "s0-20261013T000000Z",
+    )
+    assert first["fingerprint"] == f"{1:064x}"
+    # The cap moves membership, so each pull replaces the index set whole.
+    set_index(migrated_engine, [index_row(2), index_row(3)])
+    pull(migrated_engine, tmp_path, now=NOW)
+    assert sorted(load_snapshot(tmp_path).index["review_id"]) == [2, 3]
+
+
+@pytest.mark.integration
+def test_pull_without_the_index_table_names_it(migrated_engine: Engine, tmp_path: Path) -> None:
+    seed(migrated_engine, index=False)
+
+    with pytest.raises(RuntimeError, match=r"core\.review_index") as error:
+        pull(migrated_engine, tmp_path, now=NOW)
+
+    assert explain_pull_error(error.value) == str(error.value)
+    assert "nightly" in str(error.value)
+    assert list(tmp_path.iterdir()) == []  # nothing written
+
+
+def test_phase_2_commands_still_load_a_snapshot_without_an_index(tmp_path: Path) -> None:
+    pd.DataFrame({"review_id": [1], "text": ["fine"]}).to_parquet(tmp_path / REVIEWS_FILE)
+    pd.DataFrame({"appid": [553850]}).to_parquet(tmp_path / GAMES_FILE)
+    pd.DataFrame({"appid": [553850]}).to_parquet(tmp_path / PATCHES_FILE)
+
+    snapshot = load_snapshot(tmp_path)
+
+    assert snapshot.index.empty
+    assert list(snapshot.index.columns) == list(INDEX_COLUMNS)
+    assert list(snapshot.reviews["review_id"]) == [1]
 
 
 def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
