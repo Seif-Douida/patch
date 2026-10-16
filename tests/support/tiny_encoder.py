@@ -134,12 +134,17 @@ EMBEDDER_WORDS = (*WORDS, "passage")
 
 
 def write_tiny_embedder(
-    model_dir: Path, spec: EmbedderSpec, *, mix: bool = False, template: bool = True
+    model_dir: Path,
+    spec: EmbedderSpec,
+    *,
+    mix: bool = False,
+    template: bool = True,
+    dim: int = DIM,
 ) -> NDArray[np.float32]:
     """`model.onnx`, `tokenizer.json` and `embedder.json` for `spec`. The graph looks each token up
     in a (words x DIM) table; with `mix`, every position also gets the masked sum of the text's
     rows, so a CLS-pooled vector depends on the whole text and never on padding. Without
-    `template`, no <s> and </s> are added. Returns the table."""
+    `template`, no <s> and </s> are added. `dim` must match `spec.dims`. Returns the table."""
     model_dir.mkdir(parents=True, exist_ok=True)
     vocabulary = {w: i for i, w in enumerate(EMBEDDER_WORDS)}
     tokenizer = Tokenizer(models.WordLevel(vocabulary, unk_token="<unk>"))
@@ -149,7 +154,7 @@ def write_tiny_embedder(
             single="<s> $A </s>", special_tokens=[("<s>", 2), ("</s>", 3)]
         )
     tokenizer.save(str(model_dir / EMBEDDER_TOKENIZER))
-    table = np.random.default_rng(2).normal(size=(len(EMBEDDER_WORDS), DIM)).astype(np.float32)
+    table = np.random.default_rng(2).normal(size=(len(EMBEDDER_WORDS), dim)).astype(np.float32)
     table[0] = 100.0  # <pad>
     nodes = [helper.make_node("Gather", ["table", "input_ids"], ["rows"])]
     if mix:
@@ -171,7 +176,7 @@ def write_tiny_embedder(
         ],
         outputs=[
             helper.make_tensor_value_info(
-                "last_hidden_state", TensorProto.FLOAT, ["batch", "tokens", DIM]
+                "last_hidden_state", TensorProto.FLOAT, ["batch", "tokens", dim]
             )
         ],
         initializer=[

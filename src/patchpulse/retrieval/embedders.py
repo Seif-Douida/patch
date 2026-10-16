@@ -162,6 +162,7 @@ class OnnxEmbedder(OnnxTextModel):
         manifest = read_manifest(model_dir)
         self.spec = EmbedderSpec(**manifest["spec"])
         self.quantization: str = manifest["quantization"]
+        self.model_sha256: str = manifest["files"][MODEL_FILE]
         self.cleaning_version: str = manifest["cleaning_version"]
         super().__init__(model_dir, MODEL_FILE, threads=threads)
         names = [o.name for o in self._session.get_outputs()]

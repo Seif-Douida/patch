@@ -30,12 +30,20 @@ with eligible as (
         )
 ),
 
-treatment_days as (
-    select distinct
+-- The days the windows are centred on: each treatment-candidate patch, and the game's launch,
+-- when the reviews that shaped its reputation were written.
+window_days as (
+    select
         game_key,
-        cast(published_at as date) as patch_day
+        cast(published_at as date) as anchor_day
     from {{ ref('fact_patch') }}
     where is_treatment_candidate = 1
+    union
+    select
+        game_key,
+        release_date
+    from {{ ref('dim_game') }}
+    where release_date is not null
 ),
 
 ranked as (
@@ -54,12 +62,12 @@ kept as (
         r.recency_rank <= {{ var('index_cap_per_game') }}
         or exists (
             select 1
-            from treatment_days as p
+            from window_days as w
             where
-                p.game_key = r.game_key
+                w.game_key = r.game_key
                 and cast(r.created_at as date)
-                between dateadd(day, -{{ window }}, p.patch_day)
-                and dateadd(day, {{ window }}, p.patch_day)
+                between dateadd(day, -{{ window }}, w.anchor_day)
+                and dateadd(day, {{ window }}, w.anchor_day)
         )
 ),
 
