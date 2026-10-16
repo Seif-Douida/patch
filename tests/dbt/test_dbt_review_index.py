@@ -143,6 +143,7 @@ def make_database(
     reviews: list[ReviewRecord],
     patches: Sequence[tuple[NewsItem, Classification]] = (),
     dbt_vars: dict[str, Any] | None = None,
+    released: datetime | None = None,
 ) -> Database:
     admin_settings = new_database()
     admin = make_engine(admin_settings)
@@ -154,6 +155,7 @@ def make_database(
             genres=["Action"],
             role=Role.TRACKED,
             backfill_start=days_ago(400).date(),
+            release_date=released.date() if released and appid == GAME else None,
         )
         for appid in (GAME, OTHER_GAME)
     ]
@@ -289,7 +291,7 @@ def test_an_edit_changes_the_version_not_the_fingerprint(lifecycle: Database) ->
 # Another database, with the cap at 3 reviews a game.
 
 
-def test_cap_keeps_the_most_recent_and_every_patch_window(
+def test_cap_keeps_the_most_recent_every_patch_window_and_the_launch(
     new_database: Callable[[], Settings], tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     capped = make_database(
@@ -306,6 +308,8 @@ def test_cap_keeps_the_most_recent_and_every_patch_window(
             review(212, days_ago(30)),  # 30 days after it, the window's last day
             review(214, days_ago(150)),  # on a hotfix's day: not a treatment patch
             review(215, days_ago(0.5), "Too short"),  # newest, but not eligible: takes no slot
+            review(216, days_ago(290)),  # 10 days after the game's launch
+            review(217, days_ago(340)),  # 40 days before it
             review(301, days_ago(1), appid=OTHER_GAME),
             review(302, days_ago(200), appid=OTHER_GAME),
         ],
@@ -315,10 +319,11 @@ def test_cap_keeps_the_most_recent_and_every_patch_window(
             patch("p3", OTHER_GAME, days_ago(95), PatchType.MAJOR_UPDATE),
         ],
         dbt_vars={"index_cap_per_game": 3},
+        released=days_ago(300),
     )
 
     result = capped.build()
 
     # Equal daily counts also make a flat volume history, which the mart's volume check survives.
     assert result.ok, result.failures
-    assert set(capped.index()) == {201, 202, 204, 210, 212, 301, 302}
+    assert set(capped.index()) == {201, 202, 204, 210, 212, 216, 301, 302}

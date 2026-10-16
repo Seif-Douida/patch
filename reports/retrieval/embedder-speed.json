@@ -1,0 +1,36 @@
+{
+  "measured_at": "2026-10-16T14:35:05+00:00",
+  "texts": 1000,
+  "queries": 100,
+  "floor": {
+    "reviews_in_index_budget": 650,
+    "budget_s": 300,
+    "query_p95_ms": 300.0
+  },
+  "embedders": [
+    {
+      "name": "e5-small",
+      "passages_per_s": 5.69,
+      "query_p50_ms": 7.8,
+      "query_p95_ms": 59.4,
+      "size_mb": 118.3,
+      "passes_floor": true
+    },
+    {
+      "name": "minilm-l12",
+      "passages_per_s": 15.78,
+      "query_p50_ms": 6.9,
+      "query_p95_ms": 58.4,
+      "size_mb": 118.4,
+      "passes_floor": true
+    },
+    {
+      "name": "e5-base",
+      "passages_per_s": 2.07,
+      "query_p50_ms": 55.3,
+      "query_p95_ms": 86.3,
+      "size_mb": 278.7,
+      "passes_floor": false
+    }
+  ]
+}
