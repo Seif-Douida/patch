@@ -27,6 +27,16 @@ vars:
     - ux_controls
     - platform_policy
     - off_topic
+  # Phase 3's index rules (design D1; patchpulse.retrieval.rules holds the same values): which
+  # reviews Qdrant holds. Long enough (words, or characters where words aren't spaced), then a
+  # game's most recent plus the reviews around its treatment patches. A new version of the rules
+  # means a new collection.
+  index_min_words: 20
+  index_char_languages: [schinese, tchinese, japanese, thai]
+  index_min_chars: 40
+  index_cap_per_game: 40000
+  index_patch_window_days: 30
+  index_rules_version: r1
 
 models:
   patchpulse:

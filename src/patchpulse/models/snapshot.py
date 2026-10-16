@@ -6,27 +6,32 @@ leaves Seif's machine except for labeling (spec C4). Each pull wakes the databas
 are rare and incremental: only reviews seen since the previous pull (`last_seen_run_id`) are
 fetched and merged, keeping each review's newest version.
 
-It reads the raw tables, not dbt's core: the same rows, without depending on a dbt build. Every
-file is written to a temporary name and renamed only after all the reads succeed, so a failed
-pull leaves the previous snapshot as it was.
+It reads the raw tables, not dbt's core: the same rows, without depending on a dbt build. The one
+exception is Phase 3's index set, `core.review_index`: which reviews Qdrant holds is decided by
+dbt, and the laptop's embeddings must follow the same rules as the nightly job. It holds no text
+and is replaced whole on each pull, since the per-game cap moves. Every file is written to a
+temporary name and renamed only after all the reads succeed, so a failed pull leaves the previous
+snapshot as it was.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import DBAPIError
 
 from patchpulse.ingest.patches import CLASSIFIER_VERSION
 
 REVIEWS_FILE = "reviews.parquet"
 GAMES_FILE = "games.parquet"
 PATCHES_FILE = "patches.parquet"
+INDEX_FILE = "index.parquet"
 STATE_FILE = "pull_state.json"
 _CHUNK_ROWS = 50_000
 
@@ -56,6 +61,17 @@ WHERE version_rank = 1 AND last_seen_run_id > :since
 
 _GAMES_SQL = "SELECT appid, name, genres FROM raw.game"
 
+# core.review_index's columns (Phase 3, design D1/D2), in the order they're written.
+INDEX_COLUMNS = (
+    "review_id", "appid", "day", "created_ts", "language", "voted_up", "playtime_bucket",
+    "first_seen_run_id", "version", "aspects", "aspect_model_version", "rules_version",
+    "fingerprint",
+)  # fmt: skip
+_INDEX_SQL = (
+    f"SELECT {', '.join(f'[{name}]' for name in INDEX_COLUMNS)} "  # noqa: S608 (constants)
+    "FROM core.review_index ORDER BY review_id"
+)
+
 _PATCHES_SQL = """
 SELECT n.appid, CAST(n.published_at AS date) AS [date], n.title, c.patch_type
 FROM raw.steam_news AS n
@@ -71,6 +87,7 @@ class PullResult:
     reviews_new: int  # rows fetched this time (new reviews, new versions, re-seen reviews)
     reviews_total: int
     max_run_id: int
+    index_total: int  # reviews in Phase 3's index set
 
 
 @dataclass(frozen=True)
@@ -78,6 +95,12 @@ class Snapshot:
     reviews: pd.DataFrame
     games: pd.DataFrame
     patches: pd.DataFrame
+    # Phase 3's index set; empty in a snapshot pulled before it existed.
+    index: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=list(INDEX_COLUMNS)))
+
+
+class IndexTableMissingError(RuntimeError):
+    """The database has no core.review_index yet (the nightly dbt stage builds it)."""
 
 
 def _previous_run_id(data_dir: Path) -> int:
@@ -87,14 +110,23 @@ def _previous_run_id(data_dir: Path) -> int:
     return int(json.loads(state.read_text(encoding="utf-8"))["max_run_id"])
 
 
-def _read_reviews(engine: Engine, since: int) -> pd.DataFrame:
+def _read_chunked(engine: Engine, sql: str, params: dict[str, int]) -> pd.DataFrame:
     with engine.connect() as connection:
-        chunks = list(
-            pd.read_sql(
-                text(_REVIEWS_SQL), connection, params={"since": since}, chunksize=_CHUNK_ROWS
-            )
-        )
+        chunks = list(pd.read_sql(text(sql), connection, params=params, chunksize=_CHUNK_ROWS))
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+
+
+def _read_index(engine: Engine) -> pd.DataFrame:
+    try:
+        index = _read_chunked(engine, _INDEX_SQL, {})
+    except (DBAPIError, pd.errors.DatabaseError) as error:  # pandas wraps the driver's error
+        if "review_index" not in str(error):
+            raise
+        raise IndexTableMissingError(
+            "core.review_index isn't in the database yet: the nightly dbt stage builds it once "
+            "Phase 3's Milestone A is deployed. Pull again after that night."
+        ) from None
+    return index if not index.empty else pd.DataFrame(columns=list(INDEX_COLUMNS))
 
 
 def _merge(existing: pd.DataFrame | None, new: pd.DataFrame) -> pd.DataFrame:
@@ -125,7 +157,8 @@ def _write_atomically(files: dict[Path, pd.DataFrame | dict[str, object]]) -> No
 def pull(engine: Engine, data_dir: Path, *, now: datetime) -> PullResult:
     """Fetch what changed since the previous pull and merge it into the snapshot."""
     since = _previous_run_id(data_dir)
-    new = _read_reviews(engine, since)
+    new = _read_chunked(engine, _REVIEWS_SQL, {"since": since})
+    index = _read_index(engine)
     with engine.connect() as connection:
         games = pd.read_sql(text(_GAMES_SQL), connection)
         patches = pd.read_sql(
@@ -142,6 +175,7 @@ def pull(engine: Engine, data_dir: Path, *, now: datetime) -> PullResult:
             reviews_path: reviews,
             data_dir / GAMES_FILE: games,
             data_dir / PATCHES_FILE: patches,
+            data_dir / INDEX_FILE: index,
             data_dir / STATE_FILE: {
                 "max_run_id": max_run_id,
                 "pulled_at": now.isoformat(),
@@ -149,7 +183,12 @@ def pull(engine: Engine, data_dir: Path, *, now: datetime) -> PullResult:
             },
         }
     )
-    return PullResult(reviews_new=len(new), reviews_total=len(reviews), max_run_id=max_run_id)
+    return PullResult(
+        reviews_new=len(new),
+        reviews_total=len(reviews),
+        max_run_id=max_run_id,
+        index_total=len(index),
+    )
 
 
 def load_snapshot(data_dir: Path) -> Snapshot:
@@ -161,7 +200,12 @@ def load_snapshot(data_dir: Path) -> Snapshot:
             "`patchpulse-ml pull --yes` first"
         )
     reviews, games, patches = (pd.read_parquet(path) for path in paths)
-    return Snapshot(reviews=reviews, games=games, patches=patches)
+    index_path = data_dir / INDEX_FILE
+    if not index_path.exists():
+        return Snapshot(reviews=reviews, games=games, patches=patches)
+    return Snapshot(
+        reviews=reviews, games=games, patches=patches, index=pd.read_parquet(index_path)
+    )
 
 
 def explain_pull_error(error: BaseException) -> str | None:
@@ -169,6 +213,8 @@ def explain_pull_error(error: BaseException) -> str | None:
 
     The firewall message carries Seif's home IP; it's never repeated (personal data).
     """
+    if isinstance(error, IndexTableMissingError):
+        return str(error)
     message = str(error)
     if "is not allowed to access the server" in message:
         return (

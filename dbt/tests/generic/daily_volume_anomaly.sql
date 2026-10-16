@@ -22,9 +22,11 @@ with history as (
     from {{ model }}
 )
 
+-- SQL Server may evaluate the division before the other conditions, so a flat history (a zero
+-- standard deviation) divides by null, never by zero.
 select *
 from history
 where days_before >= {{ min_history }}
     and sd_before > 0
-    and abs(volume - mean_before) / sd_before > {{ z }}
+    and abs(volume - mean_before) / nullif(sd_before, 0) > {{ z }}
 {% endtest %}

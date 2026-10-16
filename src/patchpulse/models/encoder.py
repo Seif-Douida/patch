@@ -47,9 +47,10 @@ def l2_normalise(rows: NDArray[np.float32]) -> NDArray[np.float32]:
     return np.asarray(rows / np.where(norms > 0, norms, 1.0), dtype=np.float32)
 
 
-class _OnnxTextModel:
-    """Tokenize with the e5 prefix, run an ONNX graph in length-sorted batches, and return one row
-    per text from `_rows`. `threads` caps ONNX Runtime's CPU threads."""
+class OnnxTextModel:
+    """Tokenize with a prefix, run an ONNX graph in length-sorted batches, and return one row per
+    text from `_rows`. `threads` caps ONNX Runtime's CPU threads. Shared by S1a and S1b and by
+    Phase 3's retrieval embedders."""
 
     kind = "model"
 
@@ -104,7 +105,7 @@ class _OnnxTextModel:
         return out
 
 
-class OnnxEncoder(_OnnxTextModel):
+class OnnxEncoder(OnnxTextModel):
     """`embed(texts) -> (n, dim)` unit vectors: mean-pooled over real tokens, then normalised."""
 
     kind = "encoder"
@@ -126,7 +127,7 @@ class OnnxEncoder(_OnnxTextModel):
         return self._run(texts, prefix=prefix, max_tokens=max_tokens, batch=batch)
 
 
-class OnnxClassifier(_OnnxTextModel):
+class OnnxClassifier(OnnxTextModel):
     """`logits(texts) -> (n, outputs)`: a graph that pools and classifies itself (S1b)."""
 
     kind = "classifier"

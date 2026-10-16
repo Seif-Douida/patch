@@ -76,6 +76,7 @@ pythonpath = ["tests/support"]
 markers = [
     "integration: needs the SQL Server container (skipped locally without it, required in CI)",
     "gpu: needs PyTorch with CUDA (Phase 2 training; local only, skipped wherever it's absent)",
+    "qdrant: needs the Qdrant container (skipped locally without it, required in CI)",
 ]
 
 [dependency-groups]
@@ -85,6 +86,7 @@ dev = [
     { include-group = "pipeline" },
     { include-group = "ml" },
     { include-group = "scoring" },
+    { include-group = "retrieval" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
     # Tests build tiny ONNX graphs as fake encoders; the jobs image doesn't need it.
@@ -140,4 +142,9 @@ pipeline = [
     "pyjwt[crypto]>=2.15.1",
     "pyyaml>=6",
     "sqlalchemy>=2.1.1",
+]
+# Phase 3: the Qdrant client for the local eval, the upload and (from Milestone D) the jobs
+# image's nightly index stage (design D5).
+retrieval = [
+    "qdrant-client>=1.19.1",
 ]
