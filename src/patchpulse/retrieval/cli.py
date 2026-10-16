@@ -41,14 +41,9 @@ from patchpulse.retrieval.benchmark import (
 )
 from patchpulse.retrieval.embed import EmbeddingCache, embed_index_set
 from patchpulse.retrieval.embedders import CANDIDATES, OnnxEmbedder, build_embedder
-from patchpulse.retrieval.load import build_local_collections, eval_collection
-from patchpulse.retrieval.qdrant import make_client
-from patchpulse.retrieval.queries import (
-    QueriesNotFrozenError,
-    QueryFileError,
-    freeze_queries,
-    load_queries,
-)
+
+# Commands that talk to Qdrant import its client when they run: `patchpulse-ml` must start with
+# only the groups a step installs (deploy.yml's champion download has no `retrieval` group).
 
 log = logging.getLogger("patchpulse.retrieval")
 
@@ -160,6 +155,9 @@ def _embed(settings: LabSettings, name: str) -> int:
 
 
 def _load(settings: LabSettings, names: list[str]) -> int:
+    from patchpulse.retrieval.load import build_local_collections, eval_collection
+    from patchpulse.retrieval.qdrant import make_client
+
     snapshot = load_snapshot(settings.data_dir)
     client = make_client(settings.qdrant_local_url, None)
     try:
@@ -182,6 +180,13 @@ def _load(settings: LabSettings, names: list[str]) -> int:
 
 
 def _queries(*, freeze: bool) -> int:
+    from patchpulse.retrieval.queries import (
+        QueriesNotFrozenError,
+        QueryFileError,
+        freeze_queries,
+        load_queries,
+    )
+
     try:
         queries = load_queries(QUERIES_PATH)
         digest = freeze_queries(QUERIES_PATH) if freeze else None
