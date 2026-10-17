@@ -48,11 +48,11 @@ def by_hand_mean(
     return unit(table[embedder_ids(text, prefix=prefix, max_tokens=max_tokens)].mean(axis=0))
 
 
-def test_candidates_are_the_three_of_the_plan() -> None:
+def test_candidates_are_e5_small_and_minilm() -> None:
+    # e5-base, under the speed floor, was dropped on 17 Oct before its backlog was embedded.
     assert {name: (s.pooling, s.max_tokens, s.dims) for name, s in CANDIDATES.items()} == {
         "e5-small": ("mean", 512, 384),
         "minilm-l12": ("mean", 128, 384),
-        "e5-base": ("mean", 512, 768),
     }
     assert all(len(s.revision) == 40 for s in CANDIDATES.values())  # pinned commits
 

@@ -59,19 +59,19 @@ def test_benchmark_command_writes_the_report(
         assert list(texts) == [SECRET_TEXT.strip()] * 2  # the newest eligible, cleaned
         return [
             EmbedderSpeed("e5-small", 40.0, 20.0, 35.0, 120.0),
-            EmbedderSpeed("e5-base", 1.5, 90.0, 400.0, 280.0),
+            EmbedderSpeed("minilm-l12", 1.5, 90.0, 400.0, 280.0),
         ]
 
     monkeypatch.setattr(cli, "embedder_dir", embedder_dir)
     monkeypatch.setattr(cli, "benchmark_embedders", benchmark)
 
-    assert main(["retrieval", "benchmark", "--models", "e5-small,e5-base"]) == 0
+    assert main(["retrieval", "benchmark", "--models", "e5-small,minilm-l12"]) == 0
 
     report = json.loads(SPEED.read_text(encoding="utf-8"))
-    assert built == ["e5-small", "e5-base"]
+    assert built == ["e5-small", "minilm-l12"]
     assert [(e["name"], e["passes_floor"]) for e in report["embedders"]] == [
         ("e5-small", True),
-        ("e5-base", False),
+        ("minilm-l12", False),
     ]
     assert report["texts"] == 2
     assert report["floor"] == {

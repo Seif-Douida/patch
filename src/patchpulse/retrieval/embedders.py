@@ -1,4 +1,4 @@
-"""The retrieval embedders (design D3, ADR-004): three multilingual candidates, each run as an int8
+"""The retrieval embedders (design D3, ADR-004): two multilingual candidates, each run as an int8
 ONNX graph on ONNX Runtime. One file embeds a collection's reviews (the backlog on Seif's machine,
 each night's additions in `pp-nightly`) and its queries, so every vector in an index comes from
 the same encoder.
@@ -35,7 +35,7 @@ MANIFEST_FILE = "embedder.json"
 # ONNX Runtime's dynamic quantization with unsigned 8-bit weights and one scale per output channel.
 # Signed weights saturate on x86 CPUs without VNNI (Seif's i7-9750H), so a vector could depend on
 # the CPU that computed it; they also left MiniLM under the 0.98 parity floor (0.976). Unsigned per
-# channel: e5-small 0.995, MiniLM 0.990, e5-base 0.985 (plan Task 4).
+# channel: e5-small 0.995, MiniLM 0.990 (plan Task 4).
 INT8 = "int8-dynamic-u8-per-channel"
 FP32 = "fp32"
 _HIDDEN = "last_hidden_state"
@@ -92,25 +92,12 @@ CANDIDATES: dict[str, EmbedderSpec] = {
             dims=384,
             licence="Apache-2.0",
         ),
-        # The larger sibling of e5-small, at about four times the CPU cost: do the small models
-        # leave quality on the table? It takes the place of snowflake-arctic-embed-m-v2.0, whose
-        # int8 builds all failed the 0.98 parity floor (0.94 at best, the repo's own int8 0.95),
-        # which had taken the place of gte-multilingual-base (no ONNX export).
-        EmbedderSpec(
-            name="e5-base",
-            model_id="intfloat/multilingual-e5-base",
-            revision="d128750597153bb5987e10b1c3493a34e5a4502a",
-            onnx_file="onnx/model.onnx",
-            tokenizer_file="onnx/tokenizer.json",
-            pooling="mean",
-            query_prefix="query: ",
-            passage_prefix="passage: ",
-            max_tokens=512,
-            dims=768,
-            licence="MIT",
-        ),
     )
 }
+# Dropped (ADR-004): gte-multilingual-base (no ONNX export); snowflake-arctic-embed-m-v2.0 (every
+# int8 build under the 0.98 parity floor, 0.94 at best); multilingual-e5-base (parity 0.985, but
+# under the speed floor at 2.1 passages/s, so ineligible to serve; dropped on 17 Oct rather than
+# spend ~9 h embedding its backlog for the eval alone).
 
 
 def _sha256(path: Path) -> str:
