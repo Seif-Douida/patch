@@ -12,6 +12,11 @@
     retrieval queries check   Check data/retrieval/queries.csv and count its queries.
     retrieval queries freeze  Check it and record its SHA-256 (queries.sha256); runs and the report
                               refuse queries that aren't frozen or changed since.
+    retrieval run        Run every system (BM25, each candidate's dense and hybrid search; base
+                         and filtered) over the frozen queries on the local collections, into
+                         data/retrieval/runs/ (ids and scores, committed), and size the pool.
+    retrieval export-batches  Write the pool's pairs as judging batches to
+                              data/local/retrieval_batches/ (review text: never committed).
 
 Exit codes as `patchpulse-ml`: 0 success, 1 the command failed, 2 bad configuration or a refused
 action.
@@ -27,6 +32,8 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pandas as pd
 
 from patchpulse.config import LabSettings
 from patchpulse.models.snapshot import load_snapshot
@@ -52,6 +59,8 @@ SPEED_PATH = REPORTS_DIR / "embedder-speed.json"
 ENCODER_BUILDS = Path("build/encoders")
 BENCH_TEXTS = 1_000
 QUERIES_PATH = Path("data/retrieval/queries.csv")
+RUNS_DIR = Path("data/retrieval/runs")
+BATCHES_DIR = "retrieval_batches"  # under the data dir (data/local)
 
 
 def embedder_dir(name: str) -> Path:
@@ -83,11 +92,25 @@ def register(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     queries.add_parser("check", help="check data/retrieval/queries.csv and count its queries")
     queries.add_parser("freeze", help="check the queries and record their SHA-256")
+    retrieval.add_parser("run", help="run every system over the frozen queries (local Qdrant)")
+    retrieval.add_parser("export-batches", help="write the pool as judging batches (data/local)")
+    judged = retrieval.add_parser(
+        "import-judgments", help="check a judge's grades for one batch, then merge them in"
+    )
+    judged.add_argument("--batch", required=True, type=Path, help="the batch-NNN.jsonl judged")
+    judged.add_argument("--answers", required=True, type=Path, help="the judge's CSV")
+    judged.add_argument("--guidelines", required=True, help="the guidelines version, e.g. v1")
 
 
 def run(args: argparse.Namespace, settings: LabSettings) -> int:
     if args.retrieval_command == "queries":
         return _queries(freeze=args.queries_command == "freeze")
+    if args.retrieval_command == "run":
+        return _run(settings)
+    if args.retrieval_command == "export-batches":
+        return _export_batches(settings)
+    if args.retrieval_command == "import-judgments":
+        return _import_judgments(args.batch, args.answers, args.guidelines)
     if args.retrieval_command == "embed":
         return _embed(settings, args.model)
     names = [name.strip() for name in args.models.split(",") if name.strip()]
@@ -177,6 +200,93 @@ def _load(settings: LabSettings, names: list[str]) -> int:
     finally:
         client.close()
     return 1 if failed else 0
+
+
+def _run(settings: LabSettings) -> int:
+    from patchpulse.retrieval import runs
+    from patchpulse.retrieval.qdrant import make_client
+    from patchpulse.retrieval.queries import QueriesNotFrozenError
+
+    embedders = {name: OnnxEmbedder(embedder_dir(name)) for name in CANDIDATES}
+    client = make_client(settings.qdrant_local_url, None)
+    try:
+        found = runs.run_systems(client, QUERIES_PATH, embedders)
+    except QueriesNotFrozenError as error:
+        print(f"patchpulse-ml: {error}", file=sys.stderr)
+        return 1
+    finally:
+        client.close()
+    runs.write_runs(found, RUNS_DIR)
+    pairs = runs.pool(found)
+    sizes = pairs.groupby("query_id").size()
+    print(
+        f"{len(found)} runs in {RUNS_DIR.as_posix()}; pool: {len(pairs)} pairs for "
+        f"{len(sizes)} queries, {sizes.min()} to {sizes.max()} a query "
+        f"(median {sizes.median():.0f})"
+    )
+    return 0
+
+
+def _export_batches(settings: LabSettings) -> int:
+    from patchpulse.retrieval import runs
+    from patchpulse.retrieval.judging import (
+        JUDGING_SEED,
+        LONG_TEXT,
+        MANIFEST_FILE,
+        export_judging_batches,
+    )
+    from patchpulse.retrieval.queries import QueriesNotFrozenError, load_queries, require_frozen
+
+    try:
+        require_frozen(QUERIES_PATH)
+    except QueriesNotFrozenError as error:
+        print(f"patchpulse-ml: {error}", file=sys.stderr)
+        return 1
+    found = runs.read_runs(RUNS_DIR)
+    missing = [
+        runs.run_file(system, variant)
+        for system in runs.SYSTEMS
+        for variant in runs.VARIANTS
+        if (system, variant) not in found
+    ]
+    if missing:
+        print(
+            f"patchpulse-ml: missing runs ({', '.join(missing)}): run "
+            "`patchpulse-ml retrieval run` first",
+            file=sys.stderr,
+        )
+        return 1
+    batches = export_judging_batches(
+        runs.pool(found),
+        load_queries(QUERIES_PATH),
+        load_snapshot(settings.data_dir),
+        settings.data_dir / BATCHES_DIR,
+        seed=JUDGING_SEED,
+    )
+    out = (settings.data_dir / BATCHES_DIR).as_posix()
+    print(
+        f"{len(batches)} batch{'es' if len(batches) != 1 else ''}, "
+        f"{sum(b.pairs for b in batches)} pairs in {out}; "
+        f"{sum(len(b.long_pairs) for b in batches)} longer than {LONG_TEXT:,} characters "
+        f"(listed per batch in {MANIFEST_FILE})"
+    )
+    return 0
+
+
+def _import_judgments(batch: Path, answers: Path, guidelines: str) -> int:
+    from patchpulse.retrieval.judging import import_judgments
+
+    try:
+        graded = import_judgments(batch, answers, guidelines_version=guidelines)
+    except (ValueError, FileNotFoundError) as error:
+        print(f"patchpulse-ml: {answers.name}: {error}", file=sys.stderr)
+        return 1
+    grades = pd.read_csv(answers, dtype=str)["grade"].str.strip().value_counts()
+    print(
+        f"{batch.name}: {graded} pairs graded "
+        f"({', '.join(f'{g}: {grades.get(g, 0)}' for g in ('0', '1', '2'))}) under {guidelines}"
+    )
+    return 0
 
 
 def _queries(*, freeze: bool) -> int:

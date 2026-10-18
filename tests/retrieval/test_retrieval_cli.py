@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient
 from tiny_encoder import write_tiny_embedder
 
 from patchpulse.models.cli import main
-from patchpulse.retrieval import cli, load, queries
+from patchpulse.retrieval import cli, load, queries, runs
 from patchpulse.retrieval.benchmark import EmbedderSpeed
 from patchpulse.retrieval.embedders import CANDIDATES
 
@@ -142,6 +142,117 @@ def test_load_command_builds_the_local_collections(
         assert main(["retrieval", "load", "--target", "local", "--models", "e5-small"]) == 0
     finally:
         qdrant.delete_collection(name)
+
+
+def frozen_queries(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    folder = workspace / "data" / "retrieval"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "queries.csv"
+    path.write_text(
+        "query_id,appid,language,kind,text,start_day,end_day,voted_up,aspect\n"
+        "q001,553850,english,aspect,crashes after the patch,,,,\n"
+        "q002,553850,english,aspect,server down,,,true,\n",
+        encoding="utf-8",
+        newline="",
+    )
+    monkeypatch.setattr(queries, "_tracked_games", lambda: {553850})
+    queries.freeze_queries(path)
+    return path
+
+
+def test_run_command_writes_every_run_and_sizes_the_pool(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    frozen_queries(workspace, monkeypatch)
+    for name in CANDIDATES:
+        write_tiny_embedder(workspace / name, replace(CANDIDATES[name], dims=4, max_tokens=16))
+    monkeypatch.setattr(cli, "embedder_dir", lambda name: workspace / name)
+
+    def run_systems(client: object, path: Path, embedders: dict[str, object]) -> runs.Runs:
+        assert path == Path("data/retrieval/queries.csv")
+        assert list(embedders) == list(CANDIDATES)
+        found = pd.DataFrame(
+            [("q001", 1, 1, 0.5), ("q001", 2, 2, 0.4), ("q002", 1, 2, 0.3)],
+            columns=["query_id", "rank", "review_id", "score"],
+        )
+        return {(system, variant): found for system in runs.SYSTEMS for variant in runs.VARIANTS}
+
+    monkeypatch.setattr(runs, "run_systems", run_systems)
+
+    assert main(["retrieval", "run"]) == 0
+
+    written = sorted(p.name for p in (workspace / "data" / "retrieval" / "runs").iterdir())
+    assert len(written) == 2 * len(runs.SYSTEMS)
+    assert "bm25-base.csv" in written
+    out = capsys.readouterr().out
+    assert "pool: 3 pairs for 2 queries, 1 to 2 a query" in out
+
+
+def test_run_command_refuses_queries_that_are_not_frozen(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name in CANDIDATES:
+        write_tiny_embedder(workspace / name, replace(CANDIDATES[name], dims=4, max_tokens=16))
+    monkeypatch.setattr(cli, "embedder_dir", lambda name: workspace / name)
+
+    assert main(["retrieval", "run"]) == 1
+    assert "frozen" in capsys.readouterr().err
+    assert not (workspace / "data" / "retrieval" / "runs").exists()
+
+
+def test_export_batches_command_writes_local_batches_only(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    frozen_queries(workspace, monkeypatch)
+    local = workspace / "data" / "local"
+    pd.DataFrame({"appid": [553850], "name": ["HELLDIVERS 2"]}).to_parquet(local / "games.parquet")
+    found = pd.DataFrame(
+        [("q001", 1, 1, 0.5), ("q002", 1, 2, 0.3)],
+        columns=["query_id", "rank", "review_id", "score"],
+    )
+    runs.write_runs(
+        {(system, variant): found for system in runs.SYSTEMS for variant in runs.VARIANTS},
+        workspace / "data" / "retrieval" / "runs",
+    )
+
+    assert main(["retrieval", "export-batches"]) == 0
+
+    (batch,) = (local / "retrieval_batches").glob("batch-*.jsonl")
+    assert SECRET_TEXT.strip() in batch.read_text(encoding="utf-8")
+    assert (local / "retrieval_batches" / "manifest.json").is_file()
+    out = capsys.readouterr().out
+    assert "1 batch, 2 pairs" in out
+    assert "nobody may publish" not in out
+
+
+def test_import_judgments_command_checks_then_merges(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    batch = workspace / "data" / "local" / "retrieval_batches" / "batch-001.jsonl"
+    batch.parent.mkdir(parents=True)
+    batch.write_text(
+        '{"pair": 1, "query_id": "q001", "review_id": 1, "text": "it crashes"}\n'
+        '{"pair": 2, "query_id": "q001", "review_id": 2, "text": "nice music"}\n',
+        encoding="utf-8",
+    )
+    answers = workspace / "data" / "local" / "answers-001.csv"
+    answers.write_text(
+        "query_id,review_id,grade,reason\nq001,1,2,About crashes.\nq001,2,5,Music only.\n",
+        encoding="utf-8",
+    )
+    command = ["retrieval", "import-judgments", "--batch", str(batch), "--answers", str(answers)]
+
+    assert main([*command, "--guidelines", "v1"]) == 1  # a grade of 5
+    assert "grade '5'" in capsys.readouterr().err
+    assert not (workspace / "data" / "retrieval" / "judgments.csv").exists()
+    answers.write_text(
+        "query_id,review_id,grade,reason\nq001,1,2,About crashes.\nq001,2,0,Music only.\n",
+        encoding="utf-8",
+    )
+    assert main([*command, "--guidelines", "v1"]) == 0
+    assert "2 pairs graded (0: 1, 1: 0, 2: 1)" in capsys.readouterr().out
+    judged = pd.read_csv(workspace / "data" / "retrieval" / "judgments.csv")
+    assert judged["grade"].tolist() == [2, 0]
 
 
 def test_queries_check_then_freeze(
