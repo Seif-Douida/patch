@@ -1,0 +1,26 @@
+{
+  "chosen": "e5-small",
+  "reason": "e5-small: the best hybrid NDCG@10 (0.878) of the candidates that pass the speed floor",
+  "candidates": [
+    {
+      "name": "e5-small",
+      "passes_floor": true,
+      "passages_per_s": 5.69,
+      "hybrid_ndcg10": 0.8779733578190904,
+      "difference_to_best": null,
+      "chosen": true
+    },
+    {
+      "name": "minilm-l12",
+      "passes_floor": true,
+      "passages_per_s": 15.78,
+      "hybrid_ndcg10": 0.8582365783967352,
+      "difference_to_best": [
+        0.019736779422355247,
+        0.0011083577899086983,
+        0.038842525505286676
+      ],
+      "chosen": false
+    }
+  ]
+}

@@ -450,3 +450,108 @@ def test_agreement_after_a_rejudge_writes_its_own_report(
     assert "guidelines v2 (100 pairs) and v3 (200 pairs)" in second
     assert "optimistic" in second
     assert "judge-agreement-v3.md" in capsys.readouterr().out
+
+
+def report_workspace(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, *, seif_agrees: bool
+) -> Path:
+    """Two frozen queries, every run, complete judgments, a two-pair audit and the speed record."""
+    frozen_queries(workspace, monkeypatch)
+    folder = workspace / "data" / "retrieval"
+    found = pd.DataFrame(
+        [("q001", 1, 1, 0.5), ("q002", 1, 2, 0.3)],
+        columns=["query_id", "rank", "review_id", "score"],
+    )
+    runs.write_runs(
+        {(system, variant): found for system in runs.SYSTEMS for variant in runs.VARIANTS},
+        folder / "runs",
+    )
+    pd.DataFrame(
+        [("q001", 1, 2, "claude-sonnet-5-5", "v3"), ("q002", 2, 1, "claude-opus-5-5", "v2")],
+        columns=["query_id", "review_id", "grade", "judge", "guidelines"],
+    ).to_csv(folder / "judgments.csv", index=False)
+    pd.DataFrame([("q001", 1), ("q002", 2)], columns=["query_id", "review_id"]).to_csv(
+        folder / "audit.csv", index=False
+    )
+    write_seif_grades(
+        workspace,
+        [("q001", 1, 2 if seif_agrees else 1, False), ("q002", 2, 1 if seif_agrees else 2, False)],
+    )
+    reports = workspace / "reports" / "retrieval"
+    reports.mkdir(parents=True)
+    (reports / "embedder-speed.json").write_text(
+        json.dumps(
+            {
+                "embedders": [
+                    {"name": name, "passages_per_s": rate, "query_p50_ms": 7.0,
+                     "query_p95_ms": 50.0, "size_mb": 118.0, "passes_floor": True}
+                    for name, rate in zip(CANDIDATES, (5.7, 15.8), strict=True)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cli, "local_ann_recall", lambda settings, qs: dict.fromkeys(CANDIDATES, 0.98)
+    )
+    store = workspace / "mlflow.db"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{store.as_posix()}")
+    return reports
+
+
+def test_report_refuses_without_a_passed_audit(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reports = report_workspace(workspace, monkeypatch, seif_agrees=False)
+
+    assert main(["retrieval", "report"]) == 1
+    assert "--accept-failed-agreement" in capsys.readouterr().err
+    assert not (reports / "phase-3-eval.md").exists()
+
+    # Accepted on purpose: the report is written, and says the judgments failed the rule.
+    assert main(["retrieval", "report", "--accept-failed-agreement"]) == 0
+    text = (reports / "phase-3-eval.md").read_text(encoding="utf-8")
+    assert "**failed**" in text
+    assert "accepted anyway" in text
+    choice = json.loads((reports / "embedder-choice.json").read_text(encoding="utf-8"))
+    assert choice["chosen"] in CANDIDATES
+    assert "chosen" in capsys.readouterr().out
+
+
+def test_report_holds_no_text_and_is_tracked(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import mlflow
+
+    reports = report_workspace(workspace, monkeypatch, seif_agrees=True)
+
+    assert main(["retrieval", "report"]) == 0
+
+    text = (reports / "phase-3-eval.md").read_text(encoding="utf-8")
+    assert "**passed**" in text
+    assert "nobody may publish" not in text  # no review text
+    assert "crashes after the patch" not in text  # no query text
+    client = mlflow.MlflowClient(f"sqlite:///{(workspace / 'mlflow.db').as_posix()}")
+    experiment = client.get_experiment_by_name("retrieval")
+    assert experiment is not None
+    (run,) = client.search_runs([experiment.experiment_id])
+    assert len(run.data.params["queries_sha256"]) == 64
+    assert len(run.data.params["judgments_sha256"]) == 64
+    assert len(run.data.params["pool_sha256"]) == 64
+    assert "hybrid_e5-small.base.NDCG_at_10" in run.data.metrics
+    assert {a.path for a in client.list_artifacts(run.info.run_id)} >= {
+        "phase-3-eval.md",
+        "embedder-choice.json",
+    }
+
+
+def test_report_refuses_without_complete_judgments(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_workspace(workspace, monkeypatch, seif_agrees=True)
+    judgments = workspace / "data" / "retrieval" / "judgments.csv"
+    rows = pd.read_csv(judgments, dtype={"query_id": str})
+    rows.iloc[:1].to_csv(judgments, index=False)
+
+    assert main(["retrieval", "report"]) == 1
+    assert "1 pool pair has no judgment" in capsys.readouterr().err
