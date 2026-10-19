@@ -9,6 +9,7 @@ import pytest
 from sklearn.metrics import cohen_kappa_score
 
 from patchpulse.retrieval.agreement import (
+    AUDITED_GUIDELINES,
     PASS,
     relevance_agreement,
     render_relevance_agreement,
@@ -92,3 +93,38 @@ def test_report_holds_counts_and_kappas_only() -> None:
     assert "1.00" in text
     assert "q00" not in text  # no query ids
     assert "1000" not in text  # no review ids
+
+
+def test_report_names_the_pairs_left_out_of_the_gate() -> None:
+    # The gate counts the pairs Seif read; the kappa over every audit pair is reported beside it.
+    audit = pairs(300)
+    claude = {pair: (i % 3) for i, pair in enumerate(audit)}
+    seif = {pair: (1 if i < 30 else claude[pair]) for i, pair in enumerate(audit)}
+    judges = {pair: "claude-sonnet-5-5" for pair in audit}
+    overall = relevance_agreement(claude, seif, audit, judges=judges)
+    gate = relevance_agreement(claude, seif, audit[30:], judges=judges)
+
+    text = render_relevance_agreement(gate, overall=overall)
+
+    assert "270 pairs Seif read" in text
+    assert "30 pairs" in text  # left out
+    assert f"over all 300 pairs: {overall.kappa:.2f}" in text
+    assert "**passed**" in text
+
+
+def test_a_check_after_revising_the_guidelines_says_it_is_optimistic() -> None:
+    # D7: if the first check fails, the guidelines are revised on the audit's disagreements and the
+    # pool re-judged; the second check is disclosed as optimistic.
+    audit = pairs(300)
+    claude = {pair: (i % 3) for i, pair in enumerate(audit)}
+    judges = {pair: "claude-sonnet-5-5" for pair in audit}
+    result = relevance_agreement(claude, dict(claude), audit, judges=judges)
+
+    first = render_relevance_agreement(result, guidelines={AUDITED_GUIDELINES: 300})
+    second = render_relevance_agreement(result, guidelines={"v3": 160, AUDITED_GUIDELINES: 140})
+
+    assert AUDITED_GUIDELINES == "v2"
+    assert "guidelines v2 (300 pairs)" in first
+    assert "optimistic" not in first
+    assert "guidelines v2 (140 pairs) and v3 (160 pairs)" in second
+    assert "optimistic" in second

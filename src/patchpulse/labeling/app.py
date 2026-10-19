@@ -87,7 +87,8 @@ def _relevance_audit() -> None:
         return
     view = views[pair]
     st.subheader(view.query)
-    st.caption(f"{view.game}. Review in {view.language}, written {view.date}.")
+    edited = f", last edited {view.edited}" if view.edited else ""
+    st.caption(f"{view.game}. Review in {view.language}, written {view.date}{edited}.")
     hint = scroll_hint(view.text)
     if hint:
         st.warning(hint)

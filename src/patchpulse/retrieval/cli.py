@@ -36,7 +36,7 @@ from pathlib import Path
 import pandas as pd
 
 from patchpulse.config import LabSettings
-from patchpulse.models.snapshot import load_snapshot
+from patchpulse.models.snapshot import REVIEWS_FILE, load_snapshot
 from patchpulse.retrieval.benchmark import (
     BENCH_QUERIES,
     INDEX_BUDGET_S,
@@ -61,6 +61,7 @@ BENCH_TEXTS = 1_000
 QUERIES_PATH = Path("data/retrieval/queries.csv")
 RUNS_DIR = Path("data/retrieval/runs")
 BATCHES_DIR = "retrieval_batches"  # under the data dir (data/local)
+REJUDGE_DIR = "retrieval_rejudge"  # judged again after a guidelines revision (D7, data/local)
 PILOT_DIR = "retrieval_pilot"  # the relevance pilot, judged and shown to Seif (data/local)
 
 
@@ -94,7 +95,14 @@ def register(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     queries.add_parser("check", help="check data/retrieval/queries.csv and count its queries")
     queries.add_parser("freeze", help="check the queries and record their SHA-256")
     retrieval.add_parser("run", help="run every system over the frozen queries (local Qdrant)")
-    retrieval.add_parser("export-batches", help="write the pool as judging batches (data/local)")
+    batches = retrieval.add_parser(
+        "export-batches", help="write the pool as judging batches (data/local)"
+    )
+    batches.add_argument(
+        "--rejudge-grades",
+        help="only the pairs judged with these grades, e.g. 0,1, to data/local/retrieval_rejudge "
+        "(after a guidelines revision, design D7)",
+    )
     judged = retrieval.add_parser(
         "import-judgments", help="check a judge's grades for one batch, then merge them in"
     )
@@ -114,13 +122,13 @@ def run(args: argparse.Namespace, settings: LabSettings) -> int:
     if args.retrieval_command == "run":
         return _run(settings)
     if args.retrieval_command == "export-batches":
-        return _export_batches(settings)
+        return _export_batches(settings, args.rejudge_grades)
     if args.retrieval_command == "import-judgments":
         return _import_judgments(args.batch, args.answers, args.guidelines, args.judge)
     if args.retrieval_command == "audit-sample":
         return _audit_sample(settings)
     if args.retrieval_command == "agreement":
-        return _agreement()
+        return _agreement(settings)
     if args.retrieval_command == "embed":
         return _embed(settings, args.model)
     names = [name.strip() for name in args.models.split(",") if name.strip()]
@@ -237,10 +245,11 @@ def _run(settings: LabSettings) -> int:
     return 0
 
 
-def _export_batches(settings: LabSettings) -> int:
+def _export_batches(settings: LabSettings, rejudge: str | None = None) -> int:
     from patchpulse.retrieval import runs
     from patchpulse.retrieval.judging import (
         JUDGING_SEED,
+        JUDGMENTS_PATH,
         LONG_TEXT,
         MANIFEST_FILE,
         export_judging_batches,
@@ -266,17 +275,33 @@ def _export_batches(settings: LabSettings) -> int:
             file=sys.stderr,
         )
         return 1
+    pairs, folder = runs.pool(found), BATCHES_DIR
+    if rejudge is not None:
+        grades = {int(grade) for grade in rejudge.split(",") if grade.strip()}
+        judged = pd.read_csv(JUDGMENTS_PATH, dtype={"query_id": str})
+        merged = pairs.merge(judged[["query_id", "review_id", "grade"]], how="left")
+        unjudged = int(merged["grade"].isna().sum())
+        if unjudged:
+            print(
+                f"patchpulse-ml: {unjudged} pool pair{' has' if unjudged == 1 else 's have'} no "
+                "judgment: import every batch before re-judging",
+                file=sys.stderr,
+            )
+            return 1
+        pairs = merged[merged["grade"].isin(grades)][["query_id", "review_id"]]
+        folder = REJUDGE_DIR
     batches = export_judging_batches(
-        runs.pool(found),
+        pairs,
         load_queries(QUERIES_PATH),
         load_snapshot(settings.data_dir),
-        settings.data_dir / BATCHES_DIR,
+        settings.data_dir / folder,
         seed=JUDGING_SEED,
     )
-    out = (settings.data_dir / BATCHES_DIR).as_posix()
+    out = (settings.data_dir / folder).as_posix()
+    total = sum(b.pairs for b in batches)
     print(
         f"{len(batches)} batch{'es' if len(batches) != 1 else ''}, "
-        f"{sum(b.pairs for b in batches)} pairs in {out}; "
+        f"{total} pair{'s' if total != 1 else ''} in {out}; "
         f"{sum(len(b.long_pairs) for b in batches)} longer than {LONG_TEXT:,} characters "
         f"(listed per batch in {MANIFEST_FILE})"
     )
@@ -323,13 +348,18 @@ def _audit_sample(settings: LabSettings) -> int:
     return 0
 
 
-def _agreement() -> int:
-    from patchpulse.retrieval.agreement import relevance_agreement, render_relevance_agreement
+def _agreement(settings: LabSettings) -> int:
+    from patchpulse.retrieval.agreement import (
+        relevance_agreement,
+        render_relevance_agreement,
+        version_key,
+    )
     from patchpulse.retrieval.audit import (
         AUDIT_PATH,
         GRADES_PATH,
         RelevanceAuditSession,
         read_audit,
+        unread_pairs,
     )
     from patchpulse.retrieval.judging import JUDGMENTS_PATH
 
@@ -338,19 +368,32 @@ def _agreement() -> int:
     keys = list(zip(judged["query_id"], judged["review_id"].astype(int), strict=True))
     claude = dict(zip(keys, judged["grade"].astype(int), strict=True))
     judges = dict(zip(keys, judged["judge"].astype(str), strict=True))
-    seif = RelevanceAuditSession(audit, GRADES_PATH).grades()
+    session = RelevanceAuditSession(audit, GRADES_PATH)
+    seif = session.grades()
+    reviews = pd.read_parquet(settings.data_dir / REVIEWS_FILE, columns=["review_id", "language"])
+    languages = dict(zip(reviews["review_id"].astype(int), reviews["language"], strict=True))
     try:
-        result = relevance_agreement(claude, seif, audit, judges=judges)
+        overall = relevance_agreement(claude, seif, audit, judges=judges)
+        unread = unread_pairs(seif, session.unsure(), languages)
+        read = [pair for pair in audit if pair not in unread]
+        result = relevance_agreement(claude, seif, read, judges=judges)
     except ValueError as error:
         print(f"patchpulse-ml: {error}", file=sys.stderr)
         return 1
-    path = REPORTS_DIR / "judge-agreement.md"
+    versions = dict(zip(keys, judged["guidelines"].astype(str), strict=True))
+    counts = Counter(versions[pair] for pair in read)
+    latest = max(counts, key=version_key)
+    path = REPORTS_DIR / f"judge-agreement-{latest}.md"  # one per version: the first check stays
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_relevance_agreement(result), encoding="utf-8")
+    path.write_text(
+        render_relevance_agreement(result, overall=overall, guidelines=counts), encoding="utf-8"
+    )
     kappa = "n/a" if result.kappa is None else f"{result.kappa:.3f}"
+    every = "n/a" if overall.kappa is None else f"{overall.kappa:.3f}"
     print(
-        f"weighted kappa {kappa} on {result.n} pairs: {'passed' if result.passed else 'failed'} "
-        f"(rule: 0.70); report in {path.as_posix()}"
+        f"weighted kappa {kappa} on the {result.n} pairs Seif read ({len(unread)} unread left "
+        f"out): {'passed' if result.passed else 'failed'} (rule: 0.70); over all {overall.n}: "
+        f"{every}; report in {path.as_posix()}"
     )
     return 0 if result.passed else 1
 

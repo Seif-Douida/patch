@@ -14,9 +14,12 @@ from patchpulse.retrieval.audit import (
     GRADE_COLUMNS,
     RelevanceAuditSession,
     audit_sample,
+    pair_view,
     read_audit,
+    unread_pairs,
     write_audit,
 )
+from patchpulse.retrieval.queries import Query
 
 
 def pool(n: int = 1000) -> pd.DataFrame:
@@ -87,3 +90,46 @@ def test_session_saves_resumes_and_never_holds_claudes_grade(tmp_path: Path) -> 
         resumed.save(("q001", 13), 3, unsure=False)
     with pytest.raises(ValueError, match="not in this audit"):
         resumed.save(("q009", 99), 1, unsure=False)
+
+
+def test_unread_pairs_are_other_languages_graded_1_unsure(tmp_path: Path) -> None:
+    # Seif's default (19 Oct) for a review he couldn't read: 1 with unsure ticked. That isn't a
+    # relevance judgment, so the agreement gate leaves those pairs out.
+    queue = [("q001", 11), ("q001", 12), ("q002", 13), ("q002", 14), ("q003", 15), ("q003", 16)]
+    session = RelevanceAuditSession(queue, tmp_path / "grades_seif.csv")
+    session.save(("q001", 11), 1, unsure=True)  # Chinese, the default: unread
+    session.save(("q001", 12), 1, unsure=True)  # French, read and unsure: kept
+    session.save(("q002", 13), 2, unsure=False)  # German, translated: kept
+    session.save(("q002", 14), 0, unsure=True)  # Russian, a real grade with doubt: kept
+    session.save(("q003", 15), 1, unsure=True)
+    session.save(("q003", 15), 2, unsure=False)  # a correction: the latest row counts
+    session.save(("q003", 16), 1, unsure=False)  # Spanish, not unsure: kept
+    languages = {11: "schinese", 12: "french", 13: "german", 14: "russian", 15: "polish"}
+    languages[16] = "spanish"
+
+    assert session.unsure() == {("q001", 11), ("q001", 12), ("q002", 14)}
+    assert unread_pairs(session.grades(), session.unsure(), languages) == {("q001", 11)}
+    with pytest.raises(ValueError, match="no language for review 11"):
+        unread_pairs(session.grades(), session.unsure(), {})
+
+
+def test_pair_view_shows_a_later_edit() -> None:
+    # A review written in January and edited after an October release: its text is as of the edit.
+    query = Query("q079", 292030, "english", "event", "the Remastered release")
+
+    def review(updated: str) -> pd.Series:
+        return pd.Series(
+            {
+                "language": "english",
+                "date": "2026-01-12",
+                "timestamp_updated": pd.Timestamp(updated),
+                "text": "[b]Now remastered[/b]",
+            }
+        )
+
+    edited = pair_view(query, "The Witcher 3", review("2026-10-01 15:32"))
+    same_day = pair_view(query, "The Witcher 3", review("2026-01-12 20:05"))
+
+    assert (edited.date, edited.edited) == ("2026-01-12", "2026-10-01")
+    assert edited.text == "Now remastered"  # cleaned, as the judges saw it
+    assert same_day.edited is None

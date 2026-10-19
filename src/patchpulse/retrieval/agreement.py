@@ -12,6 +12,7 @@ The rendered report holds counts and kappas only: no query or review ids, no tex
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -21,6 +22,10 @@ from patchpulse.models.metrics import cohen_kappa
 
 PASS = 0.70
 GRADES = (0, 1, 2)
+# The guidelines the pool was judged under when Seif's audit was drawn and graded. Pairs judged
+# under a later version were re-judged after the first check, with guidelines revised on this
+# audit's disagreements (D7), so a check that counts them is optimistic.
+AUDITED_GUIDELINES = "v2"
 
 Pair = tuple[str, int]
 
@@ -97,18 +102,63 @@ def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}"
 
 
-def render_relevance_agreement(result: RelevanceAgreement) -> str:
+def version_key(version: str) -> tuple[int, str]:
+    """Guidelines versions in order: v2 before v10."""
+    number = re.fullmatch(r"v(\d+)", version)
+    return (int(number.group(1)) if number else -1, version)
+
+
+def render_relevance_agreement(
+    result: RelevanceAgreement,
+    *,
+    overall: RelevanceAgreement | None = None,
+    guidelines: Mapping[str, int] | None = None,
+) -> str:
+    """`result` is the gate; `overall`, when given, is every audit pair, unread ones included;
+    `guidelines` counts the gate's pairs by the guidelines version they were judged under."""
     verdict = "**passed**" if result.passed else "**failed**"
+    total = result.n if overall is None else overall.n
     lines = [
         "# Relevance judgments: Claude vs Seif (blind audit)",
         "",
-        f"{result.n} pool pairs drawn at random and graded independently: 0 not relevant, "
+        f"{total} pool pairs drawn at random and graded independently: 0 not relevant, "
         "1 partly relevant, 2 relevant. Rule fixed before the comparison (ADR-019 extended): the "
         f"judgments pass if the quadratic-weighted kappa is at least {PASS:.2f}.",
         "",
+    ]
+    if guidelines:
+        versions = [f"{v} ({guidelines[v]} pairs)" for v in sorted(guidelines, key=version_key)]
+        listed = (
+            ", ".join(versions[:-1]) + " and " + versions[-1] if len(versions) > 1 else versions[0]
+        )
+        lines += [f"The judges' grades were given under guidelines {listed}.", ""]
+        if set(guidelines) - {AUDITED_GUIDELINES}:
+            lines += [
+                "This check is optimistic (design D7): the first check failed, the guidelines were "
+                "revised on this audit's disagreements, and pairs were re-judged under them. It "
+                "measures the revision on the pairs it was tuned on.",
+                "",
+            ]
+    if overall is not None:
+        lines += [
+            f"The gate counts the {result.n} pairs Seif read. The other {overall.n - result.n} "
+            "pairs are reviews in languages other than English and French that he couldn't read "
+            "and graded 1, unsure, by default: not a relevance judgment, so they were left out "
+            "(decided before any comparison). The judges' grades on other languages are audited "
+            "only on the pairs he translated.",
+            "",
+        ]
+    lines += [
         f"Result: {verdict}. Quadratic-weighted kappa: {_fmt(result.kappa)}.",
         "",
-        f"Reported outside the rule: kappa at relevant (grade 1 or more) "
+    ]
+    if overall is not None:
+        lines += [
+            f"Reported, not gated: kappa over all {overall.n} pairs: {_fmt(overall.kappa)}.",
+            "",
+        ]
+    lines += [
+        f"Reported outside the rule, on the gate's pairs: kappa at relevant (grade 1 or more) "
         f"{_fmt(result.binary_kappa)}; per judge model:",
         "",
         "| Judge | Pairs | Weighted kappa |",

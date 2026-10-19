@@ -127,6 +127,8 @@ def export_judging_batches(
                         "review_id": int(review_id),
                         "language": str(review["language"]),
                         "date": str(pd.Timestamp(review["date"]).date()),
+                        # The text is as of its last edit (guidelines v3).
+                        "edited": str(pd.Timestamp(review["timestamp_updated"]).date()),
                         "text": text,
                     }
                     out.write(json.dumps(line, ensure_ascii=False) + "\n")

@@ -40,6 +40,11 @@ def snapshot() -> Snapshot:
             "review_id": ids,
             "appid": [GAME] * len(ids),
             "date": ["2026-10-02"] * len(ids),
+            # Review 1 was edited a week after it was written: its text is as of that edit.
+            "timestamp_updated": [
+                pd.Timestamp("2026-10-09 08:30") if rid == 1 else pd.Timestamp("2026-10-02 10:00")
+                for rid in ids
+            ],
             "language": ["french" if rid % 2 else "english" for rid in ids],
             "voted_up": [True] * len(ids),
             "text": texts,
@@ -63,13 +68,15 @@ def test_batches_hide_rank_and_system(tmp_path: Path) -> None:
     every = [line for batch in batches for line in lines(batch.path)]
     assert len(every) == len(pairs())
     assert {tuple(sorted(line)) for line in every} == {
-        ("date", "game", "language", "pair", "query", "query_id", "review_id", "text")
+        ("date", "edited", "game", "language", "pair", "query", "query_id", "review_id", "text")
     }
     first = next(line for line in every if line["review_id"] == 1)
     assert first["query"] == "query number 1"
     assert first["game"] == "Toy Game"
     assert first["language"] == "french"
     assert first["date"] == "2026-10-02"
+    assert first["edited"] == "2026-10-09"  # the judge sees when the text was last changed
+    assert next(line for line in every if line["review_id"] == 2)["edited"] == "2026-10-02"
     long = next(line for line in every if line["review_id"] == LONG_ID)
     assert str(long["text"]).startswith("long word")  # cleaned, as the systems saw it
     # A review past 1,900 characters is listed, so the judge gets a command to print it whole.
