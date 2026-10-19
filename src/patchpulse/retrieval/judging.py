@@ -178,6 +178,7 @@ def import_judgments(
     answer_file: Path,
     *,
     guidelines_version: str,
+    judge: str = JUDGE,
     judgments_path: Path = JUDGMENTS_PATH,
     reasons_path: Path = REASONS_PATH,
 ) -> int:
@@ -185,8 +186,11 @@ def import_judgments(
 
     Every pair of the batch must be graded exactly once, 0, 1 or 2, and no reason may copy more
     than 15 consecutive words of its review. Nothing is written unless the whole file passes.
-    Grades go to `judgments_path` (committed, no text); reasons to `reasons_path` (local).
+    Grades go to `judgments_path` (committed, no text), each with the `judge` that gave it (the
+    model, when more than one judged the pool); reasons to `reasons_path` (local).
     """
+    if not judge.strip():
+        raise ValueError("name the judge (the model that graded the batch)")
     with batch_file.open(encoding="utf-8") as file:
         texts = {
             (str(pair["query_id"]), int(pair["review_id"])): str(pair["text"])
@@ -232,7 +236,7 @@ def import_judgments(
                 "query_id": query_ids,
                 "review_id": review_ids,
                 "grade": [int(g) for g in rows["grade"]],
-                "judge": JUDGE,
+                "judge": judge.strip(),
                 "guidelines": guidelines_version,
             },
             columns=list(JUDGMENT_COLUMNS),

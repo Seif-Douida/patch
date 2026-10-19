@@ -240,7 +240,10 @@ def test_import_judgments_command_checks_then_merges(
         "query_id,review_id,grade,reason\nq001,1,2,About crashes.\nq001,2,5,Music only.\n",
         encoding="utf-8",
     )
-    command = ["retrieval", "import-judgments", "--batch", str(batch), "--answers", str(answers)]
+    command = [
+        "retrieval", "import-judgments", "--batch", str(batch), "--answers", str(answers),
+        "--judge", "claude-opus-5-5",
+    ]  # fmt: skip
 
     assert main([*command, "--guidelines", "v1"]) == 1  # a grade of 5
     assert "grade '5'" in capsys.readouterr().err
@@ -253,6 +256,7 @@ def test_import_judgments_command_checks_then_merges(
     assert "2 pairs graded (0: 1, 1: 0, 2: 1)" in capsys.readouterr().out
     judged = pd.read_csv(workspace / "data" / "retrieval" / "judgments.csv")
     assert judged["grade"].tolist() == [2, 0]
+    assert set(judged["judge"]) == {"claude-opus-5-5"}
 
 
 def test_queries_check_then_freeze(
@@ -278,3 +282,68 @@ def test_queries_check_then_freeze(
     (folder / "queries.csv").write_text("query_id\n", encoding="utf-8")
     assert main(["retrieval", "queries", "check"]) == 1  # broken: says why, exits 1
     assert "columns" in capsys.readouterr().err
+
+
+def test_audit_sample_command_draws_300_pairs_once(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    found = pd.DataFrame(
+        [(f"q{i % 50:03d}", 1, 9000 + i, 0.5) for i in range(400)],
+        columns=["query_id", "rank", "review_id", "score"],
+    )
+    runs.write_runs(
+        {(system, variant): found for system in runs.SYSTEMS for variant in runs.VARIANTS},
+        workspace / "data" / "retrieval" / "runs",
+    )
+
+    pilot = workspace / "data" / "local" / "retrieval_pilot"
+    pilot.mkdir(parents=True)
+    seen = [(f"q{i % 50:03d}", 9000 + i) for i in range(100)]  # shown to Seif with grades
+    pd.DataFrame(
+        [(q, r, 1, "claude", "v1") for q, r in seen],
+        columns=["query_id", "review_id", "grade", "judge", "guidelines"],
+    ).to_csv(pilot / "judgments.csv", index=False)
+
+    assert main(["retrieval", "audit-sample"]) == 0
+    assert main(["retrieval", "audit-sample"]) == 0  # the same draw: nothing changes
+
+    audit = pd.read_csv(workspace / "data" / "retrieval" / "audit.csv", dtype={"query_id": str})
+    assert list(audit.columns) == ["query_id", "review_id"]
+    assert len(audit) == 300
+    assert not set(seen) & set(zip(audit["query_id"], audit["review_id"], strict=True))
+    assert "300 pairs" in capsys.readouterr().out
+
+
+def test_agreement_command_needs_every_grade_then_applies_the_rule(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = workspace / "data" / "retrieval"
+    folder.mkdir(parents=True)
+    audit = [(f"q{i % 50:03d}", 9000 + i) for i in range(300)]
+    pd.DataFrame(audit, columns=["query_id", "review_id"]).to_csv(folder / "audit.csv", index=False)
+    pd.DataFrame(
+        [(q, r, i % 3, "claude-sonnet-5-5", "v2") for i, (q, r) in enumerate(audit)],
+        columns=["query_id", "review_id", "grade", "judge", "guidelines"],
+    ).to_csv(folder / "judgments.csv", index=False)
+
+    def grades(rows: list[tuple[str, int, int]]) -> None:
+        pd.DataFrame(
+            [(q, r, g, False, "2026-10-20T09:00:00+00:00") for q, r, g in rows],
+            columns=["query_id", "review_id", "grade", "unsure", "graded_at"],
+        ).to_csv(folder / "grades_seif.csv", index=False)
+
+    grades([(q, r, i % 3) for i, (q, r) in enumerate(audit[:299])])
+    assert main(["retrieval", "agreement"]) == 1  # one pair left
+    assert "1 of the 300" in capsys.readouterr().err
+
+    grades([(q, r, i % 3) for i, (q, r) in enumerate(audit)])
+    assert main(["retrieval", "agreement"]) == 0
+    report = (workspace / "reports" / "retrieval" / "judge-agreement.md").read_text(
+        encoding="utf-8"
+    )
+    assert "**passed**" in report
+    assert "passed" in capsys.readouterr().out
+
+    grades([(q, r, 2 - i % 3) for i, (q, r) in enumerate(audit)])  # Seif's grades reversed
+    assert main(["retrieval", "agreement"]) == 1
+    assert "failed" in capsys.readouterr().out

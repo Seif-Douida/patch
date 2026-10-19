@@ -140,3 +140,26 @@ def test_a_second_import_replaces_the_same_pairs(tmp_path: Path) -> None:
     assert len(rows) == 3
     assert set(rows["guidelines"]) == {"v2"}
     assert rows.set_index(["query_id", "review_id"]).loc[("q001", 12), "grade"] == 1
+
+
+def test_the_judge_is_recorded_per_pair(tmp_path: Path) -> None:
+    # Two models judged the pool (Opus, then Sonnet after a usage limit): each pair names its own.
+    import_judgments(
+        batch(tmp_path),
+        answers(tmp_path, GOOD),
+        guidelines_version="v2",
+        judge="claude-sonnet-5-5",
+        judgments_path=judged(tmp_path),
+        reasons_path=tmp_path / "data" / "local" / "retrieval_reasons.csv",
+    )
+
+    assert set(pd.read_csv(judged(tmp_path))["judge"]) == {"claude-sonnet-5-5"}
+    with pytest.raises(ValueError, match="judge"):
+        import_judgments(
+            batch(tmp_path),
+            answers(tmp_path, GOOD),
+            guidelines_version="v2",
+            judge="",
+            judgments_path=judged(tmp_path),
+            reasons_path=tmp_path / "data" / "local" / "retrieval_reasons.csv",
+        )
