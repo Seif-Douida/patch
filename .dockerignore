@@ -18,6 +18,8 @@ web
 dbt/target
 dbt/logs
 .playwright-mcp
-# Trained models, checkpoints and encoders; only the champion deploy.yml downloads goes in.
+# Trained models, checkpoints and encoder builds; only the champion and the review encoder
+# deploy.yml downloads go in.
 build/*
 !build/champion
+!build/encoder

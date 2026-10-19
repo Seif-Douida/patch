@@ -24,6 +24,12 @@
                          embedder-choice.json), logged to the MLflow experiment `retrieval`.
                          Needs the local Qdrant; refuses a failed agreement unless
                          --accept-failed-agreement.
+    retrieval encoder register  Register the chosen embedder's int8 build as a version of
+                                `review-encoder` (MLflow on DagsHub) and pin it in
+                                config/retrieval.yaml.
+    retrieval encoder download --to DIR  Download the pinned encoder and check every checksum
+                                         (deploy.yml, for the jobs image); nothing is written on
+                                         a mismatch.
 
 Exit codes as `patchpulse-ml`: 0 success, 1 the command failed, 2 bad configuration or a refused
 action.
@@ -136,6 +142,12 @@ def register(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     report = retrieval.add_parser(
         "report", help="metrics, the embedder choice and the eval report (local Qdrant, MLflow)"
     )
+    encoder = retrieval.add_parser(
+        "encoder", help="the review encoder in the registry"
+    ).add_subparsers(dest="encoder_command", required=True)
+    encoder.add_parser("register", help="register the chosen embedder and pin it")
+    fetch = encoder.add_parser("download", help="download the pinned encoder and check it")
+    fetch.add_argument("--to", required=True, type=Path, help="where to write it")
     report.add_argument(
         "--accept-failed-agreement",
         action="store_true",
@@ -158,6 +170,10 @@ def run(args: argparse.Namespace, settings: LabSettings) -> int:
         return _agreement(settings)
     if args.retrieval_command == "report":
         return _report(settings, accept=args.accept_failed_agreement)
+    if args.retrieval_command == "encoder":
+        if args.encoder_command == "register":
+            return _encoder_register()
+        return _encoder_download(args.to)
     if args.retrieval_command == "embed":
         return _embed(settings, args.model)
     names = [name.strip() for name in args.models.split(",") if name.strip()]
@@ -657,5 +673,50 @@ def _report(settings: LabSettings, *, accept: bool) -> int:
     print(
         f"chosen: {choice.name} ({choice.reason}); report in {EVAL_REPORT.as_posix()}; MLflow "
         f"run {active.info.run_id}"
+    )
+    return 0
+
+
+def _encoder_register() -> int:
+    from patchpulse.retrieval.pin import PIN_PATH, pin_for, register_encoder, write_pin
+
+    if not CHOICE_PATH.is_file():
+        print(
+            f"patchpulse-ml: no {CHOICE_PATH.as_posix()}: run `patchpulse-ml retrieval report` to "
+            "choose the embedder first",
+            file=sys.stderr,
+        )
+        return 1
+    chosen = json.loads(CHOICE_PATH.read_text(encoding="utf-8"))["chosen"]
+    model_dir = embedder_dir(chosen)
+    version = register_encoder(model_dir)
+    write_pin(pin_for(model_dir, version))
+    print(
+        f"registered {chosen} as review-encoder version {version}; pinned in {PIN_PATH.as_posix()}"
+    )
+    return 0
+
+
+def _encoder_download(to: Path) -> int:
+    from patchpulse.models.tracking import require_tracking
+    from patchpulse.retrieval.pin import PIN_PATH, EncoderError, download_encoder, read_pin
+
+    require_tracking()
+    if not PIN_PATH.is_file():
+        print(
+            f"patchpulse-ml: no {PIN_PATH.as_posix()}: run `patchpulse-ml retrieval encoder "
+            "register`",
+            file=sys.stderr,
+        )
+        return 2
+    pin = read_pin()
+    try:
+        embedder = download_encoder(pin, to)
+    except EncoderError as error:
+        print(f"patchpulse-ml: {error}", file=sys.stderr)
+        return 1
+    print(
+        f"review-encoder version {pin.registry_version} ({pin.embedder}, model "
+        f"{embedder.model_sha256[:12]}) checked and written to {to.as_posix()}"
     )
     return 0

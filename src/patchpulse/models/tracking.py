@@ -7,6 +7,8 @@ logged as artifacts:
 - model directories only through `log_model_dir`, from `build/models/`, for the registry
   (`champion.register_models`; ADR-021 as amended on 13 Oct: S0 hashes its n-grams, so no model
   file holds review words). Training runs record each model file's SHA-256 instead.
+- the review encoder's int8 build, from `build/encoders/`, through the same function
+  (`retrieval.pin.register_encoder`, Phase 3): a public model, quantized here.
 """
 
 from __future__ import annotations
@@ -102,12 +104,17 @@ def log_report(path: Path) -> None:
     mlflow.log_artifact(str(_may_leave(path)))
 
 
-MODELS_ROOT = Path("build/models")
+# Trained models (Phase 2) and the review encoder's int8 build (Phase 3, a public model).
+MODELS_ROOTS = (Path("build/models"), Path("build/encoders"))
 
 
 def log_model_dir(path: Path) -> None:
-    """A model directory under build/models, logged whole under `model/` (for the registry)."""
+    """A model directory under build/models or build/encoders, logged whole under `model/` (for
+    the registry)."""
     resolved = path.resolve()
-    if not resolved.is_relative_to((Path.cwd() / MODELS_ROOT).resolve()) or not resolved.is_dir():
-        raise TrackingError(f"refused to log {path}: only model directories under build/models/")
+    roots = [(Path.cwd() / root).resolve() for root in MODELS_ROOTS]
+    if not any(resolved.is_relative_to(root) for root in roots) or not resolved.is_dir():
+        raise TrackingError(
+            f"refused to log {path}: only model directories under build/models/ or build/encoders/"
+        )
     mlflow.log_artifacts(str(resolved), artifact_path="model")

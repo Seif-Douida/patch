@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 # The Container Apps Jobs image (pp-nightly, pp-migrate): `patchpulse-pipeline` with dbt, the
-# games config and the aspect champion. Same two stages as the API image; only the venv and the
-# project files are copied. deploy.yml downloads the pinned champion to build/champion first
-# (`patchpulse-ml champion download`), so the image pins code and model together.
+# games config, the aspect champion and the review encoder. Same two stages as the API image; only
+# the venv and the project files are copied. deploy.yml downloads the pinned champion to
+# build/champion and the pinned encoder to build/encoder first (`patchpulse-ml champion download`,
+# `patchpulse-ml retrieval encoder download`), so the image pins code and models together.
 FROM python:3.12-slim-trixie AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
@@ -13,17 +14,17 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --no-dev --group pipeline --group scoring
+    uv sync --locked --no-install-project --no-dev --group pipeline --group scoring --group retrieval
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --group pipeline --group scoring --no-editable
+    uv sync --locked --no-dev --group pipeline --group scoring --group retrieval --no-editable
 
 FROM python:3.12-slim-trixie
 ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION} \
     PATH="/app/.venv/bin:$PATH" \
-    PP_MODEL_DIR=/app/model \
+    PP_MODEL_DIR=/app/model     PP_ENCODER_DIR=/app/encoder \
     PYTHONUNBUFFERED=1
 # mssql-python's documented Linux requirements (it bundles the ODBC driver itself).
 RUN apt-get update \
@@ -39,6 +40,9 @@ COPY config ./config
 COPY build/champion /app/model
 RUN python -c "from pathlib import Path; from patchpulse.models.artifact import load_scorer; \
 load_scorer(Path('/app/model')).predict_proba(['the game stutters'])"
+# The same for the encoder: its files must match embedder.json, and one query must embed.
+COPY build/encoder /app/encoder
+RUN python -c "from pathlib import Path; from patchpulse.retrieval.embedders import OnnxEmbedder; OnnxEmbedder(Path('/app/encoder')).embed_queries(['the game stutters'])"
 USER app
 ENTRYPOINT ["patchpulse-pipeline"]
 CMD ["--help"]

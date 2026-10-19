@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -555,3 +556,36 @@ def test_report_refuses_without_complete_judgments(
 
     assert main(["retrieval", "report"]) == 1
     assert "1 pool pair has no judgment" in capsys.readouterr().err
+
+
+def test_encoder_register_pins_the_chosen_model_and_download_checks_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{(workspace / 'mlflow.db').as_posix()}")
+    built = Path("build/encoders/e5-small-int8")
+    write_tiny_embedder(built, replace(CANDIDATES["e5-small"], dims=4, max_tokens=16))
+    monkeypatch.setattr(cli, "embedder_dir", lambda name: Path(f"build/encoders/{name}-int8"))
+    choice = workspace / "reports" / "retrieval" / "embedder-choice.json"
+
+    assert main(["retrieval", "encoder", "download", "--to", "build/encoder"]) == 2  # no pin yet
+    assert "encoder register" in capsys.readouterr().err
+    assert main(["retrieval", "encoder", "register"]) == 1  # no choice made yet
+    assert "retrieval report" in capsys.readouterr().err
+
+    choice.parent.mkdir(parents=True)
+    choice.write_text(json.dumps({"chosen": "e5-small"}), encoding="utf-8")
+    assert main(["retrieval", "encoder", "register"]) == 0
+    pin = Path("config/retrieval.yaml")
+    assert "embedder: e5-small" in pin.read_text(encoding="utf-8")
+    assert "version 1" in capsys.readouterr().out
+
+    assert main(["retrieval", "encoder", "download", "--to", "build/encoder"]) == 0
+    assert (workspace / "build" / "encoder" / "embedder.json").is_file()
+
+    text = pin.read_text(encoding="utf-8")
+    sha = re.search(r"embedder_json_sha256: (\w+)", text)
+    assert sha is not None
+    pin.write_text(text.replace(sha.group(1), "f" * 64), encoding="utf-8")
+    assert main(["retrieval", "encoder", "download", "--to", "build/other"]) == 1
+    assert "doesn't match the pin" in capsys.readouterr().err
+    assert not (workspace / "build" / "other").exists()  # nothing written

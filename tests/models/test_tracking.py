@@ -106,6 +106,18 @@ def test_a_model_folder_under_build_models_is_logged_whole(local_store: Path) ->
     assert {a.path for a in logged} == {"model/model.json", "model/s0.joblib"}
 
 
+def test_an_encoder_folder_under_build_encoders_is_logged_whole(local_store: Path) -> None:
+    """The review encoder (Phase 3, plan Task 13): a public model, quantized here."""
+    write(Path("build/encoders/e5-small-int8/embedder.json"), "{}")
+    write(Path("build/encoders/e5-small-int8/model.onnx"), "graph")
+
+    with tracking_run("t", params={}, tags={}) as run:
+        log_model_dir(Path("build/encoders/e5-small-int8"))
+
+    logged = mlflow.MlflowClient().list_artifacts(run.info.run_id, "model")
+    assert {a.path for a in logged} == {"model/embedder.json", "model/model.onnx"}
+
+
 @pytest.mark.parametrize("folder", ["data/local/model", "reports/model", "build/other/model"])
 def test_other_folders_are_not_models_to_log(local_store: Path, folder: str) -> None:
     write(Path(folder) / "model.json", "{}")
