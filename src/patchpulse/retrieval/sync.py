@@ -57,6 +57,10 @@ FIELD_BATCH = 2_048  # field updates: ~140 operations, ~2.2 s a request on the l
 # The fields that can change while a review's version stays the same.
 CHANGEABLE = ("aspects", "aspect_model_version", "rules_version")
 SCROLL_PAGE = 2_000
+# Passages per ONNX run while upserting. ONNX Runtime keeps its arena at the largest run: in the
+# jobs image, 32 passages of up to 512 tokens took pp-nightly past its 2 GiB (20 Oct, exit 137);
+# 8 peaked at 995 MiB on the 256 longest index texts, as fast as 32.
+EMBED_CHUNK = 8
 
 _PLAN = """
 SELECT
@@ -190,7 +194,7 @@ def _points(
     if missing:
         raise SyncError(f"no text in core.review_text for review(s) {missing[:5]}")
     texts = [clean_text(found[rid]) for rid in ids]
-    vectors = embedder.embed_passages(texts)
+    vectors = embedder.embed_passages(texts, batch=EMBED_CHUNK)
     return [to_point(row, texts[i], vectors[i]) for i, row in enumerate(rows)]
 
 

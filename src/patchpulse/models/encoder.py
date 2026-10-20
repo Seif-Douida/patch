@@ -78,6 +78,10 @@ class OnnxTextModel:
     def _rows(self, output: NDArray[np.float32], mask: NDArray[np.int64]) -> NDArray[np.float32]:
         return output
 
+    def session_options(self) -> Any:
+        """The ONNX Runtime session's options as it runs (threads, arena)."""
+        return self._session.get_session_options()
+
     def _batch(self, texts: list[str]) -> NDArray[np.float32]:
         encodings = self._tokenizer.encode_batch(texts)
         ids = np.array([e.ids for e in encodings], dtype=np.int64)
