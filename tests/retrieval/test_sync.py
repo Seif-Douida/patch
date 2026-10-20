@@ -13,7 +13,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
 from qdrant_client import QdrantClient
 from review_index import (
     create_index_tables,
@@ -30,7 +32,7 @@ from tiny_encoder import write_tiny_embedder
 from patchpulse.db import tables
 from patchpulse.retrieval.embedders import CANDIDATES, OnnxEmbedder
 from patchpulse.retrieval.qdrant import DENSE, ensure_collection
-from patchpulse.retrieval.sync import SyncStats, plan_sync, read_back
+from patchpulse.retrieval.sync import EMBED_CHUNK, SyncStats, plan_sync, read_back
 
 pytestmark = pytest.mark.integration
 
@@ -162,6 +164,44 @@ def test_apply_sync_end_to_end(
     }
     with engine.connect() as connection:
         assert plan_sync(connection, collection=collection).size == 0
+
+
+class ChunkRecorder:
+    """The real embedder, recording the chunk size each call asks for."""
+
+    def __init__(self, embedder: OnnxEmbedder) -> None:
+        self.embedder = embedder
+        self.spec = embedder.spec
+        self.model_sha256 = embedder.model_sha256
+        self.cleaning_version = embedder.cleaning_version
+        self.chunks: list[int] = []
+
+    def embed_passages(self, texts: list[str], *, batch: int = 32) -> NDArray[np.float32]:
+        self.chunks.append(batch)
+        return self.embedder.embed_passages(texts, batch=batch)
+
+
+@pytest.mark.qdrant
+def test_upserts_embed_in_chunks_that_fit_the_nightly_memory(
+    engine: Engine,
+    qdrant: QdrantClient,
+    new_collection: Callable[[], str],
+    embedder: OnnxEmbedder,
+) -> None:
+    # 20 Oct, the first indexed run: chunks of 32 passages of up to 512 tokens took ONNX Runtime
+    # past pp-nightly's 2 GiB (killed, exit 137); chunks of 8 peaked at 995 MiB in the jobs image.
+    collection = new_collection()
+    ensure_collection(qdrant, collection, DIM)
+    rows = [index_row(rid, created=days_ago(rid)) for rid in range(1, 4)]
+    write_target(engine, rows)
+    write_texts(engine, {int(row["review_id"]): "good game" for row in rows})
+    recorder = ChunkRecorder(embedder)
+
+    stats = sync(engine, qdrant, collection, recorder, run_id=1)
+
+    assert stats.upserted == 3
+    assert recorder.chunks == [EMBED_CHUNK]
+    assert EMBED_CHUNK <= 8
 
 
 @pytest.mark.qdrant

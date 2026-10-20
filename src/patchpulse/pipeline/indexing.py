@@ -49,6 +49,9 @@ log = logging.getLogger("patchpulse.pipeline.indexing")
 HEALTH_QUERY = "performance"
 HEALTH_LANGUAGE = "english"
 HEALTH_K = 5
+# pp-nightly has 1 vCPU (infra/modules/jobs.bicep). ONNX Runtime's default starts a thread per
+# core it sees, which under a 1-CPU quota embedded 3.2x slower in the jobs image (20 Oct).
+INDEX_THREADS = 1
 
 
 class QdrantUnreachableError(ConnectionError):
@@ -83,6 +86,11 @@ class IndexOutcome:
         }
 
 
+def index_embedder(encoder_dir: Path) -> OnnxEmbedder:
+    """The pinned encoder as the stage runs it: on pp-nightly's one vCPU."""
+    return OnnxEmbedder(encoder_dir, threads=INDEX_THREADS)
+
+
 def run_index(
     engine: Engine,
     settings: Settings,
@@ -99,7 +107,7 @@ def run_index(
     pin = read_pin(pin_path)
     if sha256_file(settings.encoder_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
         raise SyncError(f"the encoder in PP_ENCODER_DIR isn't the one {pin_path} pins")
-    embedder = OnnxEmbedder(settings.encoder_dir)
+    embedder = index_embedder(settings.encoder_dir)
     client = make_client(settings.qdrant_url, settings.qdrant_api_key)
     try:
         return _index(
