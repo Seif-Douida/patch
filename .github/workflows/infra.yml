@@ -86,22 +86,26 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Require the Phase 1 secrets
+      - name: Require the production secrets
         env:
           SQL_WRITER_PASSWORD: ${{ secrets.SQL_WRITER_PASSWORD }}
           AUTHOR_HASH_SALT: ${{ secrets.AUTHOR_HASH_SALT }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
           PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
+          PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}
+          PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}
         run: |
           # An empty value would reach Azure as an empty pp_writer password, hash salt, alert
-          # address or GitHub App credential.
+          # address, GitHub App credential or Qdrant credential.
           missing=""
           [ -n "$SQL_WRITER_PASSWORD" ] || missing="$missing SQL_WRITER_PASSWORD"
           [ -n "$AUTHOR_HASH_SALT" ] || missing="$missing AUTHOR_HASH_SALT"
           [ -n "$ALERT_EMAIL" ] || missing="$missing ALERT_EMAIL"
           [ -n "$PP_GITHUB_APP_PRIVATE_KEY" ] || missing="$missing PP_GITHUB_APP_PRIVATE_KEY"
           [ -n "$PP_GITHUB_APP_ID" ] || missing="$missing PP_GITHUB_APP_ID(variable)"
+          [ -n "$PP_QDRANT_URL" ] || missing="$missing PP_QDRANT_URL"
+          [ -n "$PP_QDRANT_API_KEY" ] || missing="$missing PP_QDRANT_API_KEY"
           if [ -n "$missing" ]; then
             echo "::error::Add these secrets to the GitHub environment 'production':$missing"
             exit 1
@@ -148,6 +152,8 @@ jobs:
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
           PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
+          PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}
+          PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}
         run: |
           az deployment group what-if -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam
@@ -164,6 +170,8 @@ jobs:
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
           PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
+          PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}
+          PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}
         run: |
           az deployment group create -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam \

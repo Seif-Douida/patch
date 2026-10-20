@@ -235,9 +235,16 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     for job in of_type(resources, "microsoft.app/jobs"):
         for container in job["properties"]["template"]["containers"]:
             for variable in container.get("env", []):
-                if re.search(r"PASSWORD|SALT|PRIVATE_KEY", variable["name"]):
+                if re.search(r"PASSWORD|SALT|PRIVATE_KEY|QDRANT", variable["name"]):
                     assert "secretRef" in variable, f"{job['name']}: {variable['name']}"
                     assert "value" not in variable, f"{job['name']}: {variable['name']}"
+    # Phase 3 (design D5): the free cluster's URL is a secret too; with the key, it's the
+    # cluster's only door.
+    (nightly,) = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] == "pp-nightly"]
+    (container,) = nightly["properties"]["template"]["containers"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    assert env["PP_QDRANT_URL"]["secretRef"] == "qdrant-url"
+    assert env["PP_QDRANT_API_KEY"]["secretRef"] == "qdrant-api-key"
 
 
 def test_nightly_job_publishes_with_the_github_app(resources: list[dict[str, Any]]) -> None:
@@ -261,6 +268,34 @@ def test_nightly_job_has_the_score_budget(resources: list[dict[str, Any]]) -> No
     assert env["PP_SCORE_BUDGET_MINUTES"] == "5"
     minutes = int(env["PP_BACKFILL_BUDGET_MINUTES"]) + int(env["PP_SCORE_BUDGET_MINUTES"]) + 5
     assert minutes * 60 <= literal_number(nightly["properties"]["configuration"]["replicaTimeout"])
+
+
+def nightly_env(resources: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    (nightly,) = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] == "pp-nightly"]
+    (container,) = nightly["properties"]["template"]["containers"]
+    return nightly, {variable["name"]: variable.get("value") for variable in container["env"]}
+
+
+def test_nightly_job_has_the_index_budget(resources: list[dict[str, Any]]) -> None:
+    # Design D5: the index stage syncs Qdrant within 5 minutes; what's left waits a night.
+    _, env = nightly_env(resources)
+    assert env["PP_INDEX_BUDGET_MINUTES"] == "5"
+
+
+def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) -> None:
+    # Design D9: backfill, scoring and indexing leave at least 8 of the job's minutes for the
+    # incremental stages, dbt, the reconciliation and the export.
+    nightly, env = nightly_env(resources)
+    budgets = sum(
+        int(env[name])
+        for name in (
+            "PP_BACKFILL_BUDGET_MINUTES",
+            "PP_SCORE_BUDGET_MINUTES",
+            "PP_INDEX_BUDGET_MINUTES",
+        )
+    )
+    timeout_minutes = literal_number(nightly["properties"]["configuration"]["replicaTimeout"]) / 60
+    assert budgets <= timeout_minutes - 8
 
 
 def test_metric_alerts_stay_inside_the_free_time_series(resources: list[dict[str, Any]]) -> None:

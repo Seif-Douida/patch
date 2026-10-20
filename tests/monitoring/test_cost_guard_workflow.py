@@ -154,20 +154,24 @@ def test_infra_keeps_the_running_jobs_image() -> None:
     assert "patchpulse-jobs:latest" in text
 
 
-def test_infra_refuses_to_deploy_without_the_phase_1_secrets() -> None:
-    # An empty secret would reach Azure as an empty pp_writer password, hash salt or alert address.
+def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
+    # An empty secret would reach Azure as an empty pp_writer password, hash salt, alert address,
+    # GitHub App key or Qdrant credential.
     text = read("infra.yml")
-    check = step("infra.yml", "Require the Phase 1 secrets")
+    check = step("infra.yml", "Require the production secrets")
     for secret in (
         "SQL_WRITER_PASSWORD",
         "AUTHOR_HASH_SALT",
         "ALERT_EMAIL",
         "PP_GITHUB_APP_PRIVATE_KEY",
+        "PP_QDRANT_URL",
+        "PP_QDRANT_API_KEY",
     ):
         assert f"secrets.{secret}" in check
+        assert f'missing="$missing {secret}"' in check
     assert "vars.PP_GITHUB_APP_ID" in check
     assert "exit 1" in check
-    assert text.index("- name: Require the Phase 1 secrets") < text.index(
+    assert text.index("- name: Require the production secrets") < text.index(
         "az deployment group what-if"
     )
 
@@ -180,6 +184,14 @@ def test_infra_passes_the_github_app_to_what_if_and_deploy() -> None:
     text = read("infra.yml")
     assert text.count("PP_GITHUB_APP_PRIVATE_KEY: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}") == 3
     assert text.count("PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}") == 3
+
+
+def test_infra_passes_the_qdrant_secrets_to_what_if_and_deploy() -> None:
+    # Phase 3 (design D5): pp-nightly's index stage; both are GitHub secrets, the URL included.
+    text = read("infra.yml")
+    assert text.count("PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}") == 3
+    assert text.count("PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}") == 3
+    assert "vars.PP_QDRANT" not in text
 
 
 def test_guard_counts_both_jobs_executions() -> None:
