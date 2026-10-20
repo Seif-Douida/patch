@@ -82,6 +82,24 @@ Dense search through the HNSW index against exact search, base filters, every qu
 | e5-small | 0.991 |
 | minilm-l12 | 1.000 |
 
+## On the free cluster
+
+Measured on 2026-10-20 on Qdrant Cloud's free cluster (Qdrant 1.19.2): `reviews_v1` behind the alias `reviews`, 378,273 points, encoder e5-small (`review-encoder` version 1).
+
+| Measure | Value |
+|---|---|
+| ANN recall@10 (e5-small, base filters, 100 queries) | 0.959 |
+| Qdrant's resident memory | 519 MiB of 1,167 MiB (44%) |
+| Stored vectors and payloads | 978 MiB of 3,952 MiB disk |
+
+One search's round trip from the laptop, base filters, every query 3 times (the query's embedding is excluded: the speed report measures it on pp-api's CPU). The last column takes each query's fastest try, leaving out the laptop's occasional stalls of about half a second on requests that carry the query's vector:
+
+| System | p50 ms | p95 ms | p95 ms, fastest of 3 | Requests |
+|---|---|---|---|---|
+| BM25 | 55.2 | 66.5 | 55.6 | 300 |
+| Dense | 60.3 | 395.6 | 60.6 | 300 |
+| Hybrid | 65.3 | 478.1 | 66.0 | 300 |
+
 ## Limitations
 
 - Pooled recall: a relevant review that none of the 5 systems ranked in its top 20 is invisible, so recall is relative to the pool.

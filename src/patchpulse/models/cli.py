@@ -177,12 +177,15 @@ PULL_COST = (
 
 
 def configure_logging() -> None:
-    """INFO for PatchPulse; azure-identity's credential lines and HTTP dumps only on warnings."""
+    """INFO for PatchPulse; azure-identity's credential lines and HTTP dumps, and the request lines
+    of httpx (qdrant-client's transport) and httpx2 (the cluster's telemetry), which hold the
+    Qdrant cluster's URL, a secret, only on warnings."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     logging.getLogger("patchpulse").setLevel(logging.INFO)
-    logging.getLogger("azure").setLevel(logging.WARNING)
+    for noisy in ("azure", "httpx", "httpcore", "httpx2", "httpcore2"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _pull(settings: LabSettings, *, yes: bool) -> int:

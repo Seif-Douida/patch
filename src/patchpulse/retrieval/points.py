@@ -74,14 +74,15 @@ def fields(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def to_point(row: Mapping[str, Any], text: str, vector: NDArray[np.float32]) -> models.PointStruct:
-    """`text` is the cleaned text, the one the vector was embedded from."""
+    """`text` is the cleaned text, the one the vector was embedded from. The BM25 options go as a
+    plain mapping: qdrant-client's gRPC conversion (the laptop's upload) takes only that, and REST
+    sends the same JSON either way."""
+    options = bm25_options(str(row["language"])).model_dump(mode="json", exclude_none=True)
     return models.PointStruct(
         id=int(row["review_id"]),
         vector={
             DENSE: [float(x) for x in vector],
-            SPARSE: models.Document(
-                text=text, model=BM25_MODEL, options=bm25_options(str(row["language"]))
-            ),
+            SPARSE: models.Document(text=text, model=BM25_MODEL, options=options),
         },
         payload=payload(row, text),
     )

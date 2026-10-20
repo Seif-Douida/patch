@@ -95,29 +95,39 @@ class CollectionSpec:
     on_disk_payload: bool
 
 
-def make_client(url: str, api_key: SecretStr | str | None) -> QdrantClient:
-    """A REST client with a 30 s timeout. The key stays inside the client: never in its repr or in
-    the errors it raises."""
+def make_client(url: str, api_key: SecretStr | str | None, *, grpc: bool = False) -> QdrantClient:
+    """A REST client with a 30 s timeout, or with `grpc` one that sends what it can over gRPC
+    (port 6334): the laptop's upload, where a vector is 1.5 KB of float32 instead of 8.4 KB of
+    JSON. The key stays inside the client: never in its repr or in the errors it raises."""
     key = api_key.get_secret_value() if isinstance(api_key, SecretStr) else api_key
     # No version check on creation: it's an extra request, and Task 17 matches versions instead.
     return QdrantClient(
-        url=url, api_key=key, timeout=TIMEOUT_S, prefer_grpc=False, check_compatibility=False
+        url=url, api_key=key, timeout=TIMEOUT_S, prefer_grpc=grpc, check_compatibility=False
     )
 
 
 def collection_config(dense_dim: int) -> CollectionSpec:
-    """Full dense vectors on disk with an int8 copy in RAM, BM25 with IDF, payload on disk."""
+    """Full dense vectors on disk with an int8 copy in RAM, BM25 with IDF, payload on disk.
+
+    The BM25 index and the HNSW graph are on disk too, read through the page cache: design D9's
+    fallback for the free cluster's 1 GB, taken during the upload (plan Task 17) when Qdrant's
+    memory at a third of the points projected past 70% at rest and near the limit while indexing.
+    """
     return CollectionSpec(
         vectors={
             DENSE: models.VectorParams(
                 size=dense_dim, distance=models.Distance.COSINE, on_disk=True
             )
         },
-        sparse_vectors={SPARSE: models.SparseVectorParams(modifier=models.Modifier.IDF)},
+        sparse_vectors={
+            SPARSE: models.SparseVectorParams(
+                modifier=models.Modifier.IDF, index=models.SparseIndexParams(on_disk=True)
+            )
+        },
         quantization=models.ScalarQuantization(
             scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True)
         ),
-        hnsw=models.HnswConfigDiff(m=16, ef_construct=100),
+        hnsw=models.HnswConfigDiff(m=16, ef_construct=100, on_disk=True),
         on_disk_payload=True,
     )
 
@@ -163,6 +173,7 @@ def _differences(info: models.CollectionInfo, spec: CollectionSpec) -> list[str]
         compare(f"{DENSE}: on_disk", dense.on_disk, want.on_disk)
     sparse = (params.sparse_vectors or {}).get(SPARSE)
     compare(f"{SPARSE}: modifier", sparse and sparse.modifier, spec.sparse_vectors[SPARSE].modifier)
+    compare(f"{SPARSE}: index on_disk", sparse and sparse.index and sparse.index.on_disk, True)
     quantization = info.config.quantization_config
     scalar = quantization.scalar if isinstance(quantization, models.ScalarQuantization) else None
     compare(
@@ -170,7 +181,11 @@ def _differences(info: models.CollectionInfo, spec: CollectionSpec) -> list[str]
     )
     compare("on_disk_payload", params.on_disk_payload, spec.on_disk_payload)
     hnsw = info.config.hnsw_config
-    compare("hnsw", (hnsw.m, hnsw.ef_construct), (spec.hnsw.m, spec.hnsw.ef_construct))
+    compare(
+        "hnsw",
+        (hnsw.m, hnsw.ef_construct, bool(hnsw.on_disk)),
+        (spec.hnsw.m, spec.hnsw.ef_construct, spec.hnsw.on_disk),
+    )
     schema = {field: index.data_type for field, index in info.payload_schema.items()}
     for field, expected in PAYLOAD_INDEXES.items():
         compare(f"payload index {field}:", schema.get(field), expected)

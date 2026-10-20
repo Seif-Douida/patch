@@ -65,7 +65,9 @@ def configure_logging() -> None:
     )
     # Explicit levels: basicConfig does nothing if something configured the root logger first.
     logging.getLogger("patchpulse").setLevel(logging.INFO)
-    for noisy in ("httpx2", "httpcore2"):
+    # httpx (qdrant-client's transport) logs each request's URL, and the Qdrant cluster's URL is a
+    # secret.
+    for noisy in ("httpx2", "httpcore2", "httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

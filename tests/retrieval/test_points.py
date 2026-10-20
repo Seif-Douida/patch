@@ -48,7 +48,9 @@ def test_point_payload_has_every_design_field_and_no_more() -> None:
     assert isinstance(point.vector, dict)
     assert point.vector[DENSE] == [0.5] * 4
     assert point.vector[SPARSE] == models.Document(
-        text="Le jeu plante", model=BM25_MODEL, options=bm25_options("french")
+        text="Le jeu plante",
+        model=BM25_MODEL,
+        options=bm25_options("french").model_dump(mode="json", exclude_none=True),
     )
 
 

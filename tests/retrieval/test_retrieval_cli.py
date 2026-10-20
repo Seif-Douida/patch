@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from patchpulse.models.cli import main
 from patchpulse.retrieval import cli, load, queries, runs
 from patchpulse.retrieval.benchmark import EmbedderSpeed
 from patchpulse.retrieval.embedders import CANDIDATES
+from patchpulse.retrieval.pin import pin_for, write_pin
 
 SPEED = Path("reports/retrieval/embedder-speed.json")
 SECRET_TEXT = "a review nobody may publish " * 5
@@ -111,10 +112,7 @@ def test_embed_command_embeds_the_index_set(
     assert "nobody may publish" not in caplog.text
 
 
-@pytest.mark.qdrant
-def test_load_command_builds_the_local_collections(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch, qdrant: QdrantClient
-) -> None:
+def write_index(workspace: Path) -> None:
     pd.DataFrame(
         {
             "review_id": [1, 2],
@@ -132,6 +130,13 @@ def test_load_command_builds_the_local_collections(
             "rules_version": ["r1", "r1"],
         }
     ).to_parquet(workspace / "data" / "local" / "index.parquet")
+
+
+@pytest.mark.qdrant
+def test_load_command_builds_the_local_collections(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, qdrant: QdrantClient
+) -> None:
+    write_index(workspace)
     write_tiny_embedder(workspace / "tiny", replace(CANDIDATES["e5-small"], dims=4, max_tokens=16))
     monkeypatch.setattr(cli, "embedder_dir", lambda name: workspace / "tiny")
     name = f"pp_test_eval_{workspace.name[-8:]}"
@@ -144,6 +149,49 @@ def test_load_command_builds_the_local_collections(
         assert main(["retrieval", "load", "--target", "local", "--models", "e5-small"]) == 0
     finally:
         qdrant.delete_collection(name)
+
+
+@pytest.mark.qdrant
+def test_load_command_uploads_the_pinned_encoder_to_the_cloud(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qdrant: QdrantClient,
+    new_collection: Callable[[], str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The local container stands in for the free cluster (design D4: the laptop uploads, then
+    # points the alias at the collection).
+    write_index(workspace)
+    tiny = workspace / "build" / "encoders" / "e5-small-int8"
+    write_tiny_embedder(tiny, replace(CANDIDATES["e5-small"], dims=4, max_tokens=16))
+    monkeypatch.setattr(cli, "embedder_dir", lambda name: tiny)
+    assert main(["retrieval", "embed", "--model", "e5-small"]) == 0
+    collection, alias = new_collection(), f"pp_test_alias_{workspace.name[-8:]}"
+    pin = pin_for(tiny, 1).model_copy(update={"collection": collection, "alias": alias})
+    write_pin(pin)
+
+    assert main(["retrieval", "load", "--target", "cloud"]) == 2  # no cluster configured
+    assert "PP_QDRANT_URL" in capsys.readouterr().err
+    monkeypatch.setenv(
+        "PP_QDRANT_URL", os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333")
+    )
+    monkeypatch.setenv(
+        "PP_QDRANT_API_KEY", os.environ.get("PP_TEST_QDRANT_API_KEY") or "unused-locally"
+    )
+    assert main(["retrieval", "load", "--target", "cloud", "--models", "minilm-l12"]) == 2
+    assert "pinned" in capsys.readouterr().err
+
+    assert main(["retrieval", "load", "--target", "cloud"]) == 0
+
+    assert qdrant.count(collection, exact=True).count == 2
+    assert {(a.alias_name, a.collection_name) for a in qdrant.get_aliases().aliases} >= {
+        (alias, collection)
+    }
+    assert main(["retrieval", "load", "--target", "cloud"]) == 0  # resumes: nothing to send
+    # Another build than the pinned one is refused before anything is sent.
+    write_pin(pin.model_copy(update={"embedder_json_sha256": "f" * 64}))
+    assert main(["retrieval", "load", "--target", "cloud"]) == 1
+    assert "isn't the pinned encoder" in capsys.readouterr().err
 
 
 def frozen_queries(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -589,3 +637,90 @@ def test_encoder_register_pins_the_chosen_model_and_download_checks_it(
     assert main(["retrieval", "encoder", "download", "--to", "build/other"]) == 1
     assert "doesn't match the pin" in capsys.readouterr().err
     assert not (workspace / "build" / "other").exists()  # nothing written
+
+
+def test_cloud_request_urls_never_reach_the_logs() -> None:
+    # 20 Oct: the upload's log held every request's URL (httpx, under qdrant-client); the
+    # cluster's URL is a secret.
+    import logging
+
+    from patchpulse.models.cli import configure_logging
+
+    # httpx is qdrant-client's transport; httpx2 reads the cluster's telemetry (report --cloud).
+    noisy = ("httpx", "httpcore", "httpx2", "httpcore2")
+    for name in noisy:  # set here, not inherited: pytest leaves the root logger at WARNING
+        logging.getLogger(name).setLevel(logging.NOTSET)
+
+    configure_logging()
+
+    assert all(logging.getLogger(name).level >= logging.WARNING for name in noisy)
+    assert logging.getLogger("patchpulse").getEffectiveLevel() == logging.INFO
+
+
+REPORT_HEAD = """# Retrieval eval
+
+## ANN recall@10 (local Qdrant)
+
+| Model | ANN recall@10 |
+|---|---|
+| e5-small | 0.991 |
+
+"""
+REPORT_TAIL = """## Limitations
+
+- Pooled recall.
+"""
+
+
+@pytest.mark.qdrant
+def test_cloud_rows_extend_the_report_and_change_nothing_else(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qdrant: QdrantClient,
+    new_collection: Callable[[], str],
+) -> None:
+    # The local container stands in for the free cluster. No judgments exist here: the cloud rows
+    # never read them.
+    frozen_queries(workspace, monkeypatch)
+    assert main(["retrieval", "queries", "freeze"]) == 0
+    write_index(workspace)
+    tiny = workspace / "build" / "encoders" / "e5-small-int8"
+    write_tiny_embedder(tiny, replace(CANDIDATES["e5-small"], dims=4, max_tokens=16))
+    monkeypatch.setattr(cli, "embedder_dir", lambda name: tiny)
+    assert main(["retrieval", "embed", "--model", "e5-small"]) == 0
+    collection, alias = new_collection(), f"pp_test_alias_{workspace.name[-8:]}"
+    write_pin(pin_for(tiny, 1).model_copy(update={"collection": collection, "alias": alias}))
+    monkeypatch.setenv(
+        "PP_QDRANT_URL", os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333")
+    )
+    monkeypatch.setenv(
+        "PP_QDRANT_API_KEY", os.environ.get("PP_TEST_QDRANT_API_KEY") or "unused-locally"
+    )
+    assert main(["retrieval", "load", "--target", "cloud"]) == 0
+    report = workspace / "reports" / "retrieval" / "phase-3-eval.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(REPORT_HEAD + REPORT_TAIL, encoding="utf-8", newline="\n")
+    assert not (workspace / "data" / "retrieval" / "judgments.csv").exists()
+
+    assert main(["retrieval", "report", "--cloud"]) == 0
+
+    text = report.read_text(encoding="utf-8")
+    assert text.startswith(REPORT_HEAD + "## On the free cluster\n")
+    assert text.endswith("\n" + REPORT_TAIL)
+    section = text[len(REPORT_HEAD) : -len(REPORT_TAIL)]
+    for expected in (
+        "ANN recall@10",
+        "resident memory",
+        "| BM25 |",
+        "| Dense |",
+        "| Hybrid |",
+        "fastest of 3",
+    ):
+        assert expected in section, expected
+    assert "2 points" in section
+    # Measured again, the section is replaced, not added.
+    assert main(["retrieval", "report", "--cloud"]) == 0
+    again = report.read_text(encoding="utf-8")
+    assert again.count("## On the free cluster") == 1
+    assert again.startswith(REPORT_HEAD)
+    assert again.endswith("\n" + REPORT_TAIL)

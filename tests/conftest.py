@@ -108,11 +108,15 @@ def migrated_engine(new_database: Callable[[], Settings]) -> Iterator[Engine]:
 
 @pytest.fixture(scope="session")
 def qdrant() -> Iterator[QdrantClient]:
-    """A client on the local Qdrant (compose locally, a container in CI); no API key."""
+    """A client on the local Qdrant (compose locally, a container in CI), without an API key.
+    PP_TEST_QDRANT_URL and PP_TEST_QDRANT_API_KEY point it elsewhere: Phase 3 ran the Qdrant
+    tests once against the free cluster before the upload."""
     from qdrant_client import QdrantClient
 
     client = QdrantClient(
-        url=os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333"), timeout=30
+        url=os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333"),
+        api_key=os.environ.get("PP_TEST_QDRANT_API_KEY") or None,
+        timeout=30,
     )
     try:
         client.get_collections()

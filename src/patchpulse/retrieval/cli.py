@@ -9,6 +9,9 @@
                          a stop resumes at the next 10,000.
     retrieval load       Load each candidate's collection (`eval_<name>`) on the local Qdrant
                          (`--target local`) from the embedding cache; resumable and idempotent.
+                         `--target cloud`: upload the pinned encoder's vectors to the free
+                         cluster (PP_QDRANT_URL, PP_QDRANT_API_KEY) as the pin's collection,
+                         check the count, then point the pin's alias at it.
     retrieval queries check   Check data/retrieval/queries.csv and count its queries.
     retrieval queries freeze  Check it and record its SHA-256 (queries.sha256); runs and the report
                               refuse queries that aren't frozen or changed since.
@@ -23,7 +26,9 @@
                          and the judge agreement (reports/retrieval/phase-3-eval.md and
                          embedder-choice.json), logged to the MLflow experiment `retrieval`.
                          Needs the local Qdrant; refuses a failed agreement unless
-                         --accept-failed-agreement.
+                         --accept-failed-agreement. `--cloud`: measure the free cluster (ANN
+                         recall, latency per system, memory and data) and add those rows to the
+                         report, which is otherwise left as it is.
     retrieval encoder register  Register the chosen embedder's int8 build as a version of
                                 `review-encoder` (MLflow on DagsHub) and pin it in
                                 config/retrieval.yaml.
@@ -110,9 +115,10 @@ def register(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     embed.add_argument("--model", required=True, choices=list(CANDIDATES))
     load = retrieval.add_parser("load", help="load the candidates' collections on Qdrant")
-    load.add_argument("--target", required=True, choices=["local"])
+    load.add_argument("--target", required=True, choices=["local", "cloud"])
     load.add_argument(
-        "--models", default=",".join(CANDIDATES), help="comma-separated candidate names"
+        "--models",
+        help="comma-separated candidate names (local: all by default; cloud: the pinned one only)",
     )
     queries = retrieval.add_parser("queries", help="the eval's queries").add_subparsers(
         dest="queries_command", required=True
@@ -149,6 +155,11 @@ def register(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     fetch = encoder.add_parser("download", help="download the pinned encoder and check it")
     fetch.add_argument("--to", required=True, type=Path, help="where to write it")
     report.add_argument(
+        "--cloud",
+        action="store_true",
+        help="measure the free cluster and add its rows to the report (judgments not re-read)",
+    )
+    report.add_argument(
         "--accept-failed-agreement",
         action="store_true",
         help="report even though the judgments failed the agreement rule (the report says so)",
@@ -169,6 +180,8 @@ def run(args: argparse.Namespace, settings: LabSettings) -> int:
     if args.retrieval_command == "agreement":
         return _agreement(settings)
     if args.retrieval_command == "report":
+        if args.cloud:
+            return _report_cloud(settings)
         return _report(settings, accept=args.accept_failed_agreement)
     if args.retrieval_command == "encoder":
         if args.encoder_command == "register":
@@ -176,7 +189,10 @@ def run(args: argparse.Namespace, settings: LabSettings) -> int:
         return _encoder_download(args.to)
     if args.retrieval_command == "embed":
         return _embed(settings, args.model)
-    names = [name.strip() for name in args.models.split(",") if name.strip()]
+    if args.retrieval_command == "load" and args.target == "cloud":
+        return _load_cloud(settings, args.models)
+    models = getattr(args, "models", None) or ",".join(CANDIDATES)
+    names = [name.strip() for name in models.split(",") if name.strip()]
     unknown = [name for name in names if name not in CANDIDATES]
     if unknown:
         print(
@@ -263,6 +279,122 @@ def _load(settings: LabSettings, names: list[str]) -> int:
     finally:
         client.close()
     return 1 if failed else 0
+
+
+def _load_cloud(settings: LabSettings, models: str | None) -> int:
+    """The pinned encoder's collection on the free cluster (design D4), then its alias."""
+    from patchpulse.models.artifact import sha256_file
+    from patchpulse.retrieval.embedders import MANIFEST_FILE
+    from patchpulse.retrieval.load import publish_alias, upload_collection
+    from patchpulse.retrieval.pin import PIN_PATH, read_pin
+    from patchpulse.retrieval.qdrant import make_client
+
+    key = settings.qdrant_api_key.get_secret_value() if settings.qdrant_api_key else ""
+    if not settings.qdrant_url or not key:
+        print("patchpulse-ml: set PP_QDRANT_URL and PP_QDRANT_API_KEY in .env", file=sys.stderr)
+        return 2
+    if not PIN_PATH.is_file():
+        print(
+            "patchpulse-ml: no pin: run `patchpulse-ml retrieval encoder register`", file=sys.stderr
+        )
+        return 2
+    pin = read_pin()
+    if models is not None and [m.strip() for m in models.split(",")] != [pin.embedder]:
+        print(
+            f"patchpulse-ml: the cloud gets only the pinned encoder ({pin.embedder})",
+            file=sys.stderr,
+        )
+        return 2
+    model_dir = embedder_dir(pin.embedder)
+    if sha256_file(model_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
+        print(
+            f"patchpulse-ml: {model_dir.as_posix()} isn't the pinned encoder "
+            f"({PIN_PATH.as_posix()}): its vectors would differ from the nightly job's",
+            file=sys.stderr,
+        )
+        return 1
+    snapshot = load_snapshot(settings.data_dir)
+    # gRPC: the upload is bound by the home connection, and JSON vectors are 5.6 times larger.
+    client = make_client(settings.qdrant_url, settings.qdrant_api_key, grpc=True)
+    try:
+        upload_collection(
+            client, snapshot, model_dir, data_dir=settings.data_dir, collection=pin.collection
+        )
+        points = client.count(pin.collection, exact=True).count
+        if points != len(snapshot.index):
+            log.error(
+                "%s holds %d points for an index set of %d; the alias wasn't moved",
+                pin.collection,
+                points,
+                len(snapshot.index),
+            )
+            return 1
+        publish_alias(client, pin.alias, pin.collection)
+    finally:
+        client.close()
+    print(f"{pin.collection}: {points} points; alias {pin.alias} points at it")
+    return 0
+
+
+def _report_cloud(settings: LabSettings) -> int:
+    """The free cluster's rows, added to the committed report (judgments untouched)."""
+    from patchpulse.models.artifact import sha256_file
+    from patchpulse.retrieval.cloud import (
+        extend_report,
+        measure_cloud,
+        read_telemetry,
+        render_cloud_section,
+    )
+    from patchpulse.retrieval.embedders import MANIFEST_FILE
+    from patchpulse.retrieval.pin import PIN_PATH, read_pin
+    from patchpulse.retrieval.qdrant import make_client
+    from patchpulse.retrieval.queries import QueriesNotFrozenError, load_queries, require_frozen
+
+    def refuse(message: str, code: int = 1) -> int:
+        print(f"patchpulse-ml: {message}", file=sys.stderr)
+        return code
+
+    key = settings.qdrant_api_key.get_secret_value() if settings.qdrant_api_key else ""
+    if not settings.qdrant_url or not key:
+        return refuse("set PP_QDRANT_URL and PP_QDRANT_API_KEY in .env", 2)
+    if not PIN_PATH.is_file():
+        return refuse("no pin: run `patchpulse-ml retrieval encoder register`", 2)
+    if not EVAL_REPORT.is_file():
+        return refuse(f"no {EVAL_REPORT.as_posix()}: run `patchpulse-ml retrieval report` first")
+    try:
+        require_frozen(QUERIES_PATH)
+    except QueriesNotFrozenError as error:
+        return refuse(str(error))
+    pin = read_pin()
+    model_dir = embedder_dir(pin.embedder)
+    if sha256_file(model_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
+        return refuse(f"{model_dir.as_posix()} isn't the pinned encoder ({PIN_PATH.as_posix()})")
+    queries = load_queries(QUERIES_PATH)
+    client = make_client(settings.qdrant_url, settings.qdrant_api_key)
+    try:
+        rows = measure_cloud(
+            client,
+            collection=pin.collection,
+            alias=pin.alias,
+            embedder=OnnxEmbedder(model_dir),
+            embedder_name=pin.embedder,
+            registry_version=pin.registry_version,
+            queries=queries,
+            telemetry=read_telemetry(settings.qdrant_url, settings.qdrant_api_key, pin.collection),
+        )
+    finally:
+        client.close()
+    text = EVAL_REPORT.read_text(encoding="utf-8")
+    EVAL_REPORT.write_text(
+        extend_report(text, render_cloud_section(rows)), encoding="utf-8", newline="\n"
+    )
+    latency = ", ".join(f"{x.system} p95 {x.p95_ms:.0f} ms" for x in rows.latency)
+    print(
+        f"{EVAL_REPORT.as_posix()}: cloud rows for {rows.points} points: ANN recall@10 "
+        f"{rows.ann_recall:.3f}; {latency}; resident memory "
+        f"{rows.telemetry.resident_bytes / rows.telemetry.ram_bytes:.0%} of RAM"
+    )
+    return 0
 
 
 def _run(settings: LabSettings) -> int:
