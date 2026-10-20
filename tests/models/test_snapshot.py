@@ -24,13 +24,13 @@ from patchpulse.ingest.patches import Classification, PatchType
 from patchpulse.models.cli import main
 from patchpulse.models.snapshot import (
     GAMES_FILE,
-    INDEX_COLUMNS,
     PATCHES_FILE,
     REVIEWS_FILE,
     explain_pull_error,
     load_snapshot,
     pull,
 )
+from patchpulse.retrieval.rules import INDEX_COLUMNS
 
 CREATED = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 NOW = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)

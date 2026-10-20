@@ -100,7 +100,7 @@ jobs:
 
       - name: Start Qdrant
         run: |
-          docker run -d --name qdrant -p 6333:6333 "$QDRANT_IMAGE"
+          docker run -d --name qdrant -p 6333:6333 -p 6334:6334 "$QDRANT_IMAGE"
           for _ in $(seq 1 30); do
             if curl -fs http://localhost:6333/readyz > /dev/null; then
               exit 0

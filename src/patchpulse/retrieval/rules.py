@@ -14,6 +14,13 @@ CAP_PER_GAME = 40_000
 PATCH_WINDOW_DAYS = 30
 INDEX_RULES_VERSION = "r1"
 
+# core.review_index's columns (design D1/D2), in the order they're written.
+INDEX_COLUMNS = (
+    "review_id", "appid", "day", "created_ts", "language", "voted_up", "playtime_bucket",
+    "first_seen_run_id", "version", "aspects", "aspect_model_version", "rules_version",
+    "fingerprint",
+)  # fmt: skip
+
 
 def eligible(language: str, text: str) -> bool:
     """Long enough to index, as `core.review_index` decides it. Words are counted by Python's

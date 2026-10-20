@@ -135,9 +135,15 @@ def test_http_request_logs_are_quiet() -> None:
 
     from patchpulse.pipeline.cli import configure_logging
 
+    noisy = ("httpx2", "httpcore2", "httpx", "httpcore")
+    for name in noisy:  # set here, not inherited: pytest leaves the root logger at WARNING
+        logging.getLogger(name).setLevel(logging.NOTSET)
+
     configure_logging()
 
-    assert logging.getLogger("httpx2").getEffectiveLevel() >= logging.WARNING
+    # httpx is qdrant-client's transport: it logs each request's URL, and the cluster's URL is a
+    # secret (20 Oct: the laptop's upload logged it).
+    assert all(logging.getLogger(name).level >= logging.WARNING for name in noisy)
     assert logging.getLogger("patchpulse").getEffectiveLevel() == logging.INFO
 
 

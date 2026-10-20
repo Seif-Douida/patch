@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr
 
 from patchpulse.publish.github import (
+    ALERT_LABEL,
     API_VERSION,
     FAILURE_TITLE,
     SITE_BRANCH,
@@ -269,3 +270,26 @@ def test_publisher_reports_failures_as_an_issue_and_closes_it_on_success(
     assert "dbt build failed: boom" in issue["body"]
     assert issue["state"] == "closed"
     assert "run 6" in github.comments[1][-1]
+
+
+def test_alert_opens_or_comments_and_resolve_closes(
+    github: FakeGitHub, key_pair: tuple[str, rsa.RSAPublicKey]
+) -> None:
+    # The index stage's alerts (Phase 3, design D5): one open issue per title, like a failed run.
+    pem, _ = key_pair
+    publisher = GitHubPublisher(
+        app_id=APP_ID, private_key=SecretStr(pem), repo=REPO, http=github.client(), now=lambda: NOW
+    )
+
+    publisher.alert(title="Qdrant out of sync", body="Run 7: 12 of 1000 points differ.")
+    publisher.alert(title="Qdrant out of sync", body="Run 8: 15 of 1000 points differ.")
+    publisher.alert(title="Qdrant unreachable", body="Run 8: ConnectionError.")
+    publisher.resolve(title="Qdrant out of sync", comment="Run 9: in sync.")
+    publisher.resolve(title="index stage skipped", comment="Run 9: in sync.")  # none open
+
+    out_of_sync, unreachable = github.issues
+    assert (out_of_sync["title"], out_of_sync["labels"]) == ("Qdrant out of sync", [ALERT_LABEL])
+    assert out_of_sync["body"] == "Run 7: 12 of 1000 points differ."
+    assert github.comments[1] == ["Run 8: 15 of 1000 points differ.", "Run 9: in sync."]
+    assert out_of_sync["state"] == "closed"
+    assert (unreachable["title"], unreachable["state"]) == ("Qdrant unreachable", "open")

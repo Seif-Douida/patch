@@ -2,7 +2,8 @@ name: deploy
 
 # Build the API and jobs images, migrate the database, then roll pp-api and the jobs (spec §13).
 # Replaces Phase 0's api-image.yml. The jobs image carries the aspect champion that
-# models/champion.yaml pins (design D8), so a rollback restores code and model together.
+# models/champion.yaml pins (design D8) and the review encoder that config/retrieval.yaml pins
+# (Phase 3), so a rollback restores code and models together.
 # The order matters:
 #   1. pp-migrate runs this commit's migrations and must succeed (migrations stay backward
 #      compatible, so the running API keeps working against the new schema).
@@ -79,6 +80,16 @@ jobs:
         run: >-
           uv run --locked --no-dev --group ml --group pipeline --group scoring
           patchpulse-ml champion download --to build/champion
+
+      # The review index's encoder, the version config/retrieval.yaml pins, checked the same way:
+      # the nightly job embeds new reviews with it, one encoder per index. Token-less as above.
+      - name: Download the review encoder
+        if: matrix.image == 'patchpulse-jobs'
+        env:
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+        run: >-
+          uv run --locked --no-dev --group ml --group pipeline --group scoring
+          patchpulse-ml retrieval encoder download --to build/encoder
 
       - uses: docker/setup-buildx-action@v4
 

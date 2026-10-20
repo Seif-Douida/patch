@@ -3,7 +3,8 @@
 The nightly job writes the site JSON to the orphan `site-data` branch as a single commit, then
 sends a `repository_dispatch` that starts publish-site.yml: a commit on a branch without workflow
 files can't trigger a workflow by itself. A failed run opens (or comments on) one issue labelled
-`alert`; the next successful run closes it.
+`alert`; the next successful run closes it. The index stage's alerts (Phase 3) work the same way,
+one issue per title, closed by a night that syncs and reconciles cleanly.
 
 The app is installed on this repo only, with Contents and Issues write, and a ruleset keeps it off
 `main`. Each installation token is narrowed further to this repo and those two permissions. The
@@ -304,3 +305,24 @@ class GitHubPublisher:
             token, self.repo, title=FAILURE_TITLE, body=body, label=ALERT_LABEL, http=self._http
         )
         log.info("reported the failure on issue #%d", number)
+
+    def alert(self, *, title: str, body: str) -> None:
+        """Open the issue with this title, or comment on it if it's open (Phase 3: the index
+        stage's alerts, whose bodies hold counts and run ids only)."""
+        number = open_or_update_issue(
+            self._token(), self.repo, title=title, body=body, label=ALERT_LABEL, http=self._http
+        )
+        log.info("raised %r on issue #%d", title, number)
+
+    def resolve(self, *, title: str, comment: str) -> None:
+        """Comment on and close the open issue with this title, if there is one."""
+        closed = close_issue(
+            self._token(),
+            self.repo,
+            title=title,
+            label=ALERT_LABEL,
+            comment=comment,
+            http=self._http,
+        )
+        if closed is not None:
+            log.info("closed issue #%d (%s)", closed, title)

@@ -61,7 +61,7 @@ class Registered:
     artifact: ModelArtifact
 
 
-def _ensure_registered_model(client: mlflow.MlflowClient, name: str) -> None:
+def ensure_registered_model(client: mlflow.MlflowClient, name: str) -> None:
     try:
         client.create_registered_model(name)
     except MlflowException as error:
@@ -92,7 +92,7 @@ def register_models(
             run_name=f"{family}-{artifact.version}",
         ) as run:
             log_model_dir(model_dir)
-        _ensure_registered_model(client, name)
+        ensure_registered_model(client, name)
         # MLflow 3's `register_model("runs:/...")` wants an MLflow-format logged model; ours is a
         # plain directory, so the version points at the run's artifacts directly.
         version = client.create_model_version(

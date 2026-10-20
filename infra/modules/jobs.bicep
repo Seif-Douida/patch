@@ -26,6 +26,13 @@ param githubAppId string
 @secure()
 param githubAppPrivateKey string
 
+@description('The free Qdrant cluster the index stage keeps in step (Phase 3, design D5). The URL is a secret too: with the key, it is the only door to the cluster.')
+@secure()
+param qdrantUrl string
+
+@secure()
+param qdrantApiKey string
+
 resource nightly 'Microsoft.App/jobs@2025-07-01' = {
   name: 'pp-nightly'
   location: location
@@ -54,6 +61,14 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
         {
           name: 'github-app-key'
           value: githubAppPrivateKey
+        }
+        {
+          name: 'qdrant-url'
+          value: qdrantUrl
+        }
+        {
+          name: 'qdrant-api-key'
+          value: qdrantApiKey
         }
       ]
     }
@@ -100,8 +115,9 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               secretRef: 'github-app-key'
             }
             {
-              // Of the 45 min: 25 backfill, up to 5 for one Steam rate-limit pause (ingest/http.py),
-              // 5 scoring, and the rest for the incremental stages, dbt and the export.
+              // Of the 45 min: 25 backfill, 5 scoring and 5 indexing leave 10 for the incremental
+              // stages, dbt, the reconciliation and the export, or 5 after one Steam rate-limit
+              // pause (ingest/http.py).
               name: 'PP_BACKFILL_BUDGET_MINUTES'
               value: '25'
             }
@@ -109,6 +125,20 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               // Aspect scoring with the champion baked into the image (design D8).
               name: 'PP_SCORE_BUDGET_MINUTES'
               value: '5'
+            }
+            {
+              // Phase 3 (design D5): the index stage syncs Qdrant with the encoder baked into the
+              // image (PP_ENCODER_DIR); what's left waits a night. 0 turns it off.
+              name: 'PP_INDEX_BUDGET_MINUTES'
+              value: '5'
+            }
+            {
+              name: 'PP_QDRANT_URL'
+              secretRef: 'qdrant-url'
+            }
+            {
+              name: 'PP_QDRANT_API_KEY'
+              secretRef: 'qdrant-api-key'
             }
           ]
           resources: {

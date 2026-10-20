@@ -1,5 +1,6 @@
 """Loading a collection from the laptop (plan Task 7, design D4): the eval's local collections, and
-later the upload to the free cluster.
+the upload of the pinned encoder's collection to the free cluster (plan Task 17), which then
+points the alias at it.
 
 Points go up in id order, in batches Qdrant confirms (`wait=True`). A progress file records the
 last confirmed id for this index set (a hash of its ids and versions), so a rerun after a stop
@@ -26,7 +27,7 @@ from patchpulse.models.text import clean_text
 from patchpulse.retrieval.embed import EmbeddingCache, version_seconds
 from patchpulse.retrieval.embedders import MODEL_FILE, read_manifest
 from patchpulse.retrieval.points import to_point
-from patchpulse.retrieval.qdrant import ensure_collection
+from patchpulse.retrieval.qdrant import ensure_collection, point_alias
 
 log = logging.getLogger("patchpulse.retrieval")
 
@@ -99,6 +100,59 @@ def load_collection(
     )
 
 
+def _cache(model_dir: Path, data_dir: Path) -> tuple[EmbeddingCache, int]:
+    """The embedding cache of this build, and its dimensions."""
+    manifest = read_manifest(model_dir)
+    spec = manifest["spec"]
+    cache = EmbeddingCache(
+        data_dir,
+        name=spec["name"],
+        model_sha256=manifest["files"][MODEL_FILE],
+        cleaning_version=manifest["cleaning_version"],
+        dims=spec["dims"],
+    )
+    return cache, int(spec["dims"])
+
+
+def upload_collection(
+    client: Any,
+    snapshot: Snapshot,
+    model_dir: Path,
+    *,
+    data_dir: Path,
+    collection: str,
+    batch: int = BATCH,
+) -> LoadStats:
+    """The index set into `collection` (created with the design's settings if missing), from the
+    cache of this build, resuming after the last confirmed batch."""
+    cache, dims = _cache(model_dir, data_dir)
+    ensure_collection(client, collection, dims)
+    texts = dict(zip(snapshot.reviews["review_id"], snapshot.reviews["text"], strict=True))
+    stats = load_collection(
+        client,
+        collection,
+        snapshot.index,
+        texts,
+        cache,
+        batch=batch,
+        progress=data_dir / f"load-cloud-{collection}.json",
+    )
+    log.info(
+        "%s: %d points uploaded, %d already there, in %.0f s",
+        collection,
+        stats.upserted,
+        stats.skipped,
+        stats.seconds,
+    )
+    return stats
+
+
+def publish_alias(client: Any, alias: str, collection: str) -> None:
+    """Point the alias the job and the API search through at the collection."""
+    point_alias(client, alias, collection)
+    log.info("alias %s now points at %s", alias, collection)
+
+
 def eval_collection(name: str) -> str:
     return f"eval_{name}"
 
@@ -115,16 +169,8 @@ def build_local_collections(
     texts = dict(zip(snapshot.reviews["review_id"], snapshot.reviews["text"], strict=True))
     stats = {}
     for name in names:
-        manifest = read_manifest(embedder_dirs[name])
-        spec = manifest["spec"]
-        cache = EmbeddingCache(
-            data_dir,
-            name=spec["name"],
-            model_sha256=manifest["files"][MODEL_FILE],
-            cleaning_version=manifest["cleaning_version"],
-            dims=spec["dims"],
-        )
-        ensure_collection(client, eval_collection(name), int(spec["dims"]))
+        cache, dims = _cache(embedder_dirs[name], data_dir)
+        ensure_collection(client, eval_collection(name), dims)
         stats[name] = load_collection(
             client,
             eval_collection(name),

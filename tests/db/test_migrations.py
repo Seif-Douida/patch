@@ -5,13 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from pydantic import SecretStr
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import DBAPIError
 
 from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
-from patchpulse.db.migrate import downgrade_to_base, upgrade_to_head
+from patchpulse.db.migrate import SCRIPT_LOCATION, downgrade_to_base, upgrade_to_head
 from patchpulse.db.provision import WRITER_USER, provision_writer
 
 pytestmark = pytest.mark.integration
@@ -27,6 +29,8 @@ EXPECTED_TABLES = {
     "ops.pipeline_run",
     "ops.ingest_state",
     "ops.data_quality_result",
+    "ops.qdrant_point",
+    "ops.qdrant_reconciliation",
 }
 EXPECTED_SCHEMAS = {"raw", "ops", "stg", "core", "mart"}
 
@@ -155,3 +159,51 @@ def test_writer_cannot_change_what_it_does_not_own(
         as_writer(admin, "Writer-One-1").begin() as connection,
     ):
         connection.execute(text(statement))
+
+
+def test_pp_writer_can_maintain_the_mirror(new_database: Callable[[], Settings]) -> None:
+    # pp_writer was provisioned before migration 0003 existed: its grants on the ops schema must
+    # cover the tables added since, which the nightly index stage writes (Phase 3, design D5).
+    admin = new_database()
+    engine = make_engine(admin)
+    with engine.begin() as connection:
+        config = Config()
+        config.set_main_option("script_location", SCRIPT_LOCATION)
+        config.attributes["connection"] = connection
+        command.upgrade(config, "0002")
+    with engine.begin() as connection:
+        provision_writer(connection, password="Writer-One-1")
+    upgrade_to_head(engine)
+
+    with as_writer(admin, "Writer-One-1").begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ops.qdrant_point "
+                "(collection, review_id, [version], fingerprint, synced_run_id) "
+                "VALUES ('reviews_v1', 1, '2026-10-20 08:00:00', REPLICATE('a', 64), 1)"
+            )
+        )
+        connection.execute(
+            text("UPDATE ops.qdrant_point SET fingerprint = REPLICATE('b', 64), synced_run_id = 2")
+        )
+        assert (
+            connection.execute(
+                text("SELECT synced_run_id FROM ops.qdrant_point WHERE review_id = 1")
+            ).scalar_one()
+            == 2
+        )
+        connection.execute(text("DELETE FROM ops.qdrant_point WHERE review_id = 1"))
+        connection.execute(
+            text(
+                "INSERT INTO ops.qdrant_reconciliation "
+                "(run_id, collection, appid, [day], sql_count, qdrant_count) "
+                "VALUES (2, 'reviews_v1', 10, 20261020, 5, 4)"
+            )
+        )
+        assert (
+            connection.execute(
+                text("SELECT qdrant_count FROM ops.qdrant_reconciliation")
+            ).scalar_one()
+            == 4
+        )
+        connection.execute(text("DELETE FROM ops.qdrant_reconciliation"))

@@ -1,0 +1,10 @@
+# The review index's encoder (plan Task 13). The deploy downloads this registered
+# version and refuses it unless embedder.json matches the hash; the nightly job and the
+# API embed with it, so changing it means rebuilding the index.
+collection: reviews_v1
+alias: reviews
+embedder: e5-small
+registry_version: 1
+embedder_json_sha256: ac37fb90391f1eda7a3468094a373506c2fd8293c079911f04470bd3a022c7f0
+rules_version: r1
+cleaning_version: c1

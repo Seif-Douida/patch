@@ -1,4 +1,5 @@
-"""Seif's labeling app (design D3): the blind audit, then the blind re-label two weeks later.
+"""Seif's labeling app (design D3): the blind audit, then the blind re-label two weeks later; and
+Phase 3's blind relevance audit (design D7).
 
 Run it with:
 
@@ -7,6 +8,10 @@ Run it with:
 One review at a time: keys 1-0 toggle the aspects, U marks the answer as unsure, Enter saves and
 moves on. Every answer is on disk the moment it's saved (`audit.AuditSession`). The app shows game,
 language, thumbs and text only: never the split, the patch proximity, or anyone else's labels.
+
+The relevance audit shows one query and one review at a time: keys 0, 1 and 2 pick the grade, U
+marks it unsure, Enter saves and moves on (`retrieval.audit.RelevanceAuditSession`). It never shows
+the judges' grade, the rank or the system that found the review.
 """
 
 from __future__ import annotations
@@ -30,10 +35,24 @@ from patchpulse.labeling.audit import (
 )
 from patchpulse.labeling.gold import AUDIT_FILE
 from patchpulse.labeling.taxonomy import ASPECTS
+from patchpulse.retrieval.audit import (
+    AUDIT_PATH,
+    GRADES_PATH,
+    RelevanceAuditSession,
+    pair_lookup,
+    read_audit,
+)
 
 GUIDELINES = Path("docs/labeling-guidelines.md")
+RELEVANCE_GUIDELINES = Path("docs/relevance-guidelines.md")
+QUERIES = Path("data/retrieval/queries.csv")
 RELABEL_SEED = 20261024
-MODES = ("Audit (150 reviews)", "Re-label (30 reviews, 14+ days later)")
+MODES = (
+    "Audit (150 reviews)",
+    "Re-label (30 reviews, 14+ days later)",
+    "Relevance audit (300 pairs)",
+)
+GRADE_LABELS = {0: "0  not relevant", 1: "1  partly relevant", 2: "2  relevant"}
 
 
 def _session(mode: str) -> AuditSession:
@@ -48,9 +67,61 @@ def _session(mode: str) -> AuditSession:
     return AuditSession(queue, settings.gold_dir / SEIF_RELABEL_FILE, notes_path=notes)
 
 
+def _relevance_audit() -> None:
+    try:
+        queue = read_audit(AUDIT_PATH)
+        views = pair_lookup(str(get_lab_settings().data_dir), str(QUERIES), str(AUDIT_PATH))
+    except (ValueError, FileNotFoundError, KeyError) as error:
+        st.sidebar.warning(f"The relevance audit isn't ready: {error}")
+        return
+    session = RelevanceAuditSession(queue, GRADES_PATH)
+    done, total = session.progress()
+    st.sidebar.progress(done / total if total else 1.0, text=f"{done} of {total} graded")
+    if RELEVANCE_GUIDELINES.exists():
+        with st.sidebar.expander("Relevance guidelines", expanded=False):
+            st.markdown(RELEVANCE_GUIDELINES.read_text(encoding="utf-8"))
+
+    pair = session.next_item()
+    if pair is None:
+        st.success("The relevance audit is complete. Thank you. Close the tab whenever you like.")
+        return
+    view = views[pair]
+    st.subheader(view.query)
+    edited = f", last edited {view.edited}" if view.edited else ""
+    st.caption(f"{view.game}. Review in {view.language}, written {view.date}{edited}.")
+    hint = scroll_hint(view.text)
+    if hint:
+        st.warning(hint)
+    st.container(height=230, border=True).markdown(as_plain_text(view.text))
+
+    grade_key, unsure_key = f"grade-{pair[0]}-{pair[1]}", f"unsure-{pair[0]}-{pair[1]}"
+    chosen = st.session_state.get(grade_key)
+    for column, (grade, label) in zip(st.columns(3), GRADE_LABELS.items(), strict=True):
+        if column.button(
+            label,
+            key=f"{grade_key}-{grade}",
+            shortcut=str(grade),
+            width="stretch",
+            type="primary" if chosen == grade else "secondary",
+        ):
+            st.session_state[grade_key] = grade
+            st.rerun()
+    unsure = bool(st.session_state.get(unsure_key, False))
+    if st.button(f"{'☑' if unsure else '☐'} unsure", key=f"{unsure_key}-button", shortcut="u"):
+        st.session_state[unsure_key] = not unsure
+        st.rerun()
+    saved = st.button("Save and next", type="primary", shortcut="enter", disabled=chosen is None)
+    if saved and chosen is not None:
+        session.save(pair, int(chosen), unsure=unsure)
+        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="PatchPulse labeling", layout="centered")
     mode = st.sidebar.radio("Session", MODES)
+    if mode == MODES[2]:
+        _relevance_audit()
+        return
     try:
         session = _session(mode)
     except (ValueError, FileNotFoundError) as error:

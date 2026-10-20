@@ -53,7 +53,8 @@ def scroll_hint(text: str) -> str | None:
     return f"Long review ({len(text):,} characters): scroll inside the box to read all of it."
 
 
-def _append(path: Path, header: list[str], row: list[object]) -> None:
+def append_synced(path: Path, header: list[str], row: list[object]) -> None:
+    """Append one CSV row (with the header if the file is new) and sync it to disk at once."""
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
     with path.open("a", encoding="utf-8", newline="") as handle:
@@ -110,9 +111,9 @@ class AuditSession:
         if unknown:
             raise ValueError(f"unknown aspect code(s) {unknown}")
         at = self._clock().isoformat()
-        _append(self.labels_path, _COLUMNS, [review_id, format_aspects(aspects), unsure, at])
+        append_synced(self.labels_path, _COLUMNS, [review_id, format_aspects(aspects), unsure, at])
         if note.strip():
-            _append(
+            append_synced(
                 self.notes_path, ["review_id", "note", "noted_at"], [review_id, note.strip(), at]
             )
 

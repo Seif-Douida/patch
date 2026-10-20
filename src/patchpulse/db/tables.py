@@ -1,6 +1,6 @@
 """SQLAlchemy Core definitions of the tables Alembic owns, for the loaders.
 
-They mirror migrations 0001 and 0002; `test_table_definitions_match_the_migrated_schema` keeps
+They mirror migrations 0001 to 0003; `test_table_definitions_match_the_migrated_schema` keeps
 them in step. Datetime columns hold naive UTC (DATETIME2 has no time zone).
 """
 
@@ -191,4 +191,29 @@ review_aspect_score = Table(
     *(Column(f"p_{code}", REAL, nullable=False) for code in _ASPECTS),
     *(Column(f"l_{code}", Boolean, nullable=False) for code in _ASPECTS),
     schema="raw",
+)
+
+
+# The nightly index stage's record of Qdrant (migration 0003, Phase 3 design D5).
+qdrant_point = Table(
+    "qdrant_point",
+    metadata,
+    Column("collection", Unicode(64), primary_key=True),
+    Column("review_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("version", DateTime, nullable=False),
+    Column("fingerprint", CHAR(64), nullable=False),
+    Column("synced_run_id", BigInteger),
+    schema="ops",
+)
+
+qdrant_reconciliation = Table(
+    "qdrant_reconciliation",
+    metadata,
+    Column("run_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("collection", Unicode(64), primary_key=True),
+    Column("appid", Integer, primary_key=True, autoincrement=False),
+    Column("day", Integer, primary_key=True, autoincrement=False),
+    Column("sql_count", Integer, nullable=False),
+    Column("qdrant_count", Integer, nullable=False),
+    schema="ops",
 )

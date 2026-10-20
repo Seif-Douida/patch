@@ -44,6 +44,14 @@ param githubAppId string
 @secure()
 param githubAppPrivateKey string
 
+@description('URL of the free Qdrant cluster (Phase 3), from the secret PP_QDRANT_URL. Secret too: with the key, it is the only door to the cluster. It reaches only pp-nightly, as a Container Apps secret.')
+@secure()
+param qdrantUrl string
+
+@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches only pp-nightly, as a Container Apps secret.')
+@secure()
+param qdrantApiKey string
+
 @description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
 @secure()
 param alertEmail string
@@ -107,6 +115,8 @@ module jobs 'modules/jobs.bicep' = {
     authorHashSalt: authorHashSalt
     githubAppId: githubAppId
     githubAppPrivateKey: githubAppPrivateKey
+    qdrantUrl: qdrantUrl
+    qdrantApiKey: qdrantApiKey
   }
 }
 
