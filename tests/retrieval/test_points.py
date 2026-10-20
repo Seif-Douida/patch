@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from qdrant_client import models
 
-from patchpulse.retrieval.points import STORED_FIELDS, to_point
+from patchpulse.retrieval.points import STORED_FIELDS, fields, to_point
 from patchpulse.retrieval.qdrant import BM25_MODEL, DENSE, PAYLOAD_INDEXES, SPARSE, bm25_options
 
 ROW = {
@@ -53,3 +53,10 @@ def test_a_review_without_aspects_has_an_empty_list() -> None:
     point = to_point({**ROW, "aspects": ""}, "x", np.zeros(4, dtype=np.float32))
 
     assert (point.payload or {})["aspects"] == []
+
+
+def test_a_field_update_sets_every_field_but_the_text() -> None:
+    # A field update (design D5) changes no vector, so it carries the whole payload but the text.
+    point = to_point(ROW, "Le jeu plante", np.zeros(4, dtype=np.float32))
+
+    assert fields(ROW) == {k: v for k, v in (point.payload or {}).items() if k != "text"}

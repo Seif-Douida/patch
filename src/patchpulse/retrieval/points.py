@@ -27,6 +27,11 @@ def _value(value: Any) -> Any:
 
 def payload(row: Mapping[str, Any], text: str) -> dict[str, Any]:
     """The payload of `core.review_index`'s row (its columns, as the pull writes them)."""
+    return {**fields(row), "text": text}
+
+
+def fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Every payload field but the text: what a field update sets (design D5)."""
     aspects = _value(row["aspects"]) or ""
     return {
         "appid": int(row["appid"]),
@@ -38,7 +43,6 @@ def payload(row: Mapping[str, Any], text: str) -> dict[str, Any]:
         "aspects": [code for code in str(aspects).split("|") if code],
         "aspect_model_version": _value(row["aspect_model_version"]),
         "first_seen_run_id": int(row["first_seen_run_id"]),
-        "text": text,
         "version": pd.Timestamp(row["version"]).isoformat(),
         "fingerprint": str(row["fingerprint"]),
         "rules_version": str(row["rules_version"]),
