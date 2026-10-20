@@ -14,7 +14,6 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -22,19 +21,11 @@ from numpy.typing import NDArray
 
 from patchpulse.models.snapshot import Snapshot
 from patchpulse.models.text import clean_text
-from patchpulse.retrieval.embedders import EmbedderSpec
+from patchpulse.retrieval.embedders import PassageEmbedder
 
 log = logging.getLogger("patchpulse.retrieval")
 
 CHUNK_SIZE = 10_000
-
-
-class PassageEmbedder(Protocol):
-    spec: EmbedderSpec
-    model_sha256: str
-    cleaning_version: str
-
-    def embed_passages(self, texts: list[str], *, batch: int = 32) -> NDArray[np.float32]: ...
 
 
 @dataclass(frozen=True)

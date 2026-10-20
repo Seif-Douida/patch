@@ -3,8 +3,11 @@ payload the design lists."""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
+import pytest
 from qdrant_client import models
 
 from patchpulse.retrieval.points import STORED_FIELDS, fields, to_point
@@ -60,3 +63,14 @@ def test_a_field_update_sets_every_field_but_the_text() -> None:
     point = to_point(ROW, "Le jeu plante", np.zeros(4, dtype=np.float32))
 
     assert fields(ROW) == {k: v for k, v in (point.payload or {}).items() if k != "text"}
+
+
+@pytest.mark.parametrize("null", [None, float("nan"), np.float64("nan"), pd.NA, pd.NaT])
+def test_nulls_from_pandas_or_sql_become_none(null: object) -> None:
+    # The laptop's rows come from DataFrames, the nightly job's from SQL (no pandas there).
+    from_sql = {**ROW, "playtime_bucket": null, "version": datetime(2026, 10, 12, 8, 30)}
+
+    payload = (to_point(from_sql, "x", np.zeros(4, dtype=np.float32)).payload) or {}
+
+    assert payload["playtime_bucket"] is None
+    assert payload["version"] == "2026-10-12T08:30:00"

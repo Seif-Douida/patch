@@ -21,7 +21,7 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -58,6 +58,16 @@ class EmbedderSpec:
     max_tokens: int
     dims: int  # the output size, after Matryoshka truncation where it applies
     licence: str
+
+
+class PassageEmbedder(Protocol):
+    """What embedding the reviews needs: `OnnxEmbedder`, or a fake in tests."""
+
+    spec: EmbedderSpec
+    model_sha256: str
+    cleaning_version: str
+
+    def embed_passages(self, texts: list[str], *, batch: int = 32) -> NDArray[np.float32]: ...
 
 
 # Checked on Hugging Face on 2026-10-16 (plan Task 4): each repo ships its own ONNX export.

@@ -1,4 +1,4 @@
-"""The nightly run (spec §5, plan Decision 3): ingest → classify → score → dbt → export →
+"""The nightly run (spec §5, plan Decision 3): ingest → classify → score → dbt → index → export →
 publish.
 
 1. Start an ops.pipeline_run; its id is the data_version.
@@ -15,9 +15,15 @@ publish.
    and the night goes on without fresh aspects.
 7. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
    advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
-8. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
-9. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
-   success). A failure to report is logged and never changes the run's own result.
+8. Index (Phase 3, design D5): keep the Qdrant collection in step with core.review_index within
+   PP_INDEX_BUDGET_MINUTES, reconcile the counts per game and day, and check that a search
+   answers (pipeline/indexing.py). No PP_QDRANT_URL or PP_ENCODER_DIR, or a budget of 0, is an
+   INFO line. Any failure is an `index_skipped` warning and an alert ("Qdrant unreachable" when
+   Qdrant didn't answer); counts more than 0.5% apart are a `qdrant_mismatch` warning and an
+   alert. A clean night closes all three alerts. The night goes on either way.
+9. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
+10. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
+    success). A failure to report is logged and never changes the run's own result.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
 """
@@ -32,7 +38,8 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 from sqlalchemy import Connection, Engine
 
@@ -60,9 +67,17 @@ from patchpulse.ingest.reviews import ReviewPage, StopReason, fetch_review_pages
 from patchpulse.pipeline.dbt import DbtResult, run_dbt
 from patchpulse.pipeline.runs import finish_run, start_run
 
+if TYPE_CHECKING:
+    from patchpulse.pipeline.indexing import IndexOutcome
+
 log = logging.getLogger("patchpulse.pipeline")
 
 RAW_RETENTION = timedelta(days=30)
+# The index stage's alerts (design D5): one GitHub issue per title.
+OUT_OF_SYNC = "Qdrant out of sync"
+INDEX_SKIPPED = "index stage skipped"
+QDRANT_UNREACHABLE = "Qdrant unreachable"
+MISMATCH_LIMIT = 0.005
 
 
 class PipelineError(RuntimeError):
@@ -74,6 +89,10 @@ class Publisher(Protocol):
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None: ...
 
+    def alert(self, *, title: str, body: str) -> None: ...
+
+    def resolve(self, *, title: str, comment: str) -> None: ...
+
 
 class NoPublisher:
     """Local runs: the export is built but not pushed anywhere."""
@@ -84,11 +103,31 @@ class NoPublisher:
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         log.info("run %d %s (not reported: local run)", run_id, status)
 
+    def alert(self, *, title: str, body: str) -> None:
+        log.warning("alert (not raised: local run): %s: %s", title, body)
+
+    def resolve(self, *, title: str, comment: str) -> None:
+        log.info("alert resolved (local run): %s", title)
+
 
 class DbtRunner(Protocol):
     def __call__(
         self, args: Sequence[str], *, settings: Settings, target_path: Path
     ) -> DbtResult: ...
+
+
+class IndexStage(Protocol):
+    """The index stage's work: pipeline.indexing.run_index, or a fake in tests."""
+
+    def __call__(
+        self,
+        engine: Engine,
+        settings: Settings,
+        *,
+        run_id: int,
+        health_appid: int,
+        clock: Callable[[], float],
+    ) -> IndexOutcome: ...
 
 
 class Exporter(Protocol):
@@ -178,7 +217,9 @@ def run_nightly(
     dbt: DbtRunner = run_dbt,
     export: Exporter = build_site_export,
     clock: Callable[[], float] = time.monotonic,
+    index: IndexStage | None = None,
 ) -> RunResult:
+    """`index` replaces the index stage's work in tests; by default it's imported when needed."""
     if settings.author_hash_salt is None:
         raise SettingsError("missing or invalid settings: PP_AUTHOR_HASH_SALT")
     with engine.begin() as connection:
@@ -187,7 +228,7 @@ def run_nightly(
     log.info("nightly run %d started", run_id)
     try:
         _run_stages(
-            run, settings, steam, now, publisher, target_root, games_file, dbt, export, clock
+            run, settings, steam, now, publisher, target_root, games_file, dbt, export, clock, index
         )
     except Exception as error:
         with engine.begin() as connection:
@@ -226,6 +267,7 @@ def _run_stages(
     dbt: DbtRunner,
     export: Exporter,
     clock: Callable[[], float],
+    index: IndexStage | None,
 ) -> None:
     games = load_games(games_file, today=now.date())
     with run.engine.begin() as connection:
@@ -303,6 +345,9 @@ def _run_stages(
             coverage = advance(previous, windows, backfill_reached=reached.get(game.appid))
             write_coverage(connection, game.appid, coverage, run_id=run.run_id)
 
+    with run.stage("index"):
+        run.stages["index"] = _index(run, settings, publisher, index, games[0].appid, clock)
+
     with run.stage("export"):
         with run.engine.connect() as connection:
             files = export(
@@ -351,6 +396,121 @@ def _score(run: _Run, settings: Settings, clock: Callable[[], float]) -> dict[st
             )
         return {"skipped": detail[:500]}
     return asdict(stats)
+
+
+def _index(
+    run: _Run,
+    settings: Settings,
+    publisher: Publisher,
+    index: IndexStage | None,
+    health_appid: int,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The index stage's record for ops.pipeline_run.stages; never raises."""
+    if not settings.qdrant_url:
+        reason = "no Qdrant (PP_QDRANT_URL unset)"
+    elif settings.encoder_dir is None:
+        reason = "no encoder (PP_ENCODER_DIR unset)"
+    elif settings.index_budget_minutes <= 0:
+        reason = "turned off (PP_INDEX_BUDGET_MINUTES is 0)"
+    else:
+        reason = ""
+    if reason:
+        log.info("index stage skipped: %s", reason)
+        return {"skipped": reason}
+    try:
+        if index is None:
+            # Imported here: the stage needs the `retrieval` group, which an older image may lack.
+            from patchpulse.pipeline.indexing import run_index
+
+            index = run_index
+        outcome = index(
+            run.engine, settings, run_id=run.run_id, health_appid=health_appid, clock=clock
+        )
+    except Exception as error:  # the index lags a night; the site goes on
+        detail = _scrub(f"{type(error).__name__}: {error}", settings)
+        log.warning("index stage skipped: %s", detail)
+        with run.engine.begin() as connection:
+            record_dq(
+                connection,
+                run_id=run.run_id,
+                check="index_skipped",
+                appid=None,
+                severity="warn",
+                detail=detail,
+            )
+        # pipeline.indexing raises QdrantUnreachableError, a ConnectionError, when Qdrant
+        # didn't answer.
+        _alert(
+            publisher,
+            title=QDRANT_UNREACHABLE if isinstance(error, ConnectionError) else INDEX_SKIPPED,
+            body=(
+                f"Nightly run {run.run_id}: the index stage was skipped "
+                f"({type(error).__name__}). Details: `ops.data_quality_result` (index_skipped, "
+                f"run {run.run_id}) and the pp-nightly logs. A night that syncs and reconciles "
+                "cleanly closes this issue."
+            ),
+        )
+        return {"skipped": detail[:500]}
+    counts = outcome.reconciliation
+    summary = (
+        f"{counts.difference} of {counts.target} reviews off across {counts.days_off} game-days "
+        f"({outcome.mismatch:.2%})"
+    )
+    if outcome.mismatch > MISMATCH_LIMIT:
+        log.warning("Qdrant out of sync: %s", summary)
+        with run.engine.begin() as connection:
+            record_dq(
+                connection,
+                run_id=run.run_id,
+                check="qdrant_mismatch",
+                appid=None,
+                severity="warn",
+                detail=summary,
+            )
+        _alert(
+            publisher,
+            title=OUT_OF_SYNC,
+            body=(
+                f"Nightly run {run.run_id}: Qdrant holds {counts.qdrant} points for the "
+                f"{counts.target} reviews of core.review_index; {summary}, above the 0.5% "
+                f"limit. The sync left {outcome.sync.remaining} changes for the next night, "
+                "which also repairs these days. Details: `ops.qdrant_reconciliation`, run "
+                f"{run.run_id}."
+            ),
+        )
+    else:
+        for title in (OUT_OF_SYNC, INDEX_SKIPPED, QDRANT_UNREACHABLE):
+            _resolve(
+                publisher,
+                title=title,
+                comment=f"Nightly run {run.run_id}: the index is in sync ({summary}).",
+            )
+    return outcome.record()
+
+
+def _scrub(detail: str, settings: Settings) -> str:
+    """The detail without the cluster's URL, host or key: they're secrets."""
+    secrets = [settings.qdrant_url or "", urlsplit(settings.qdrant_url or "").hostname or ""]
+    if settings.qdrant_api_key is not None:
+        secrets.append(settings.qdrant_api_key.get_secret_value())
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        detail = detail.replace(secret, "<qdrant>")
+    return detail
+
+
+def _alert(publisher: Publisher, *, title: str, body: str) -> None:
+    try:
+        publisher.alert(title=title, body=body)
+    except Exception as failure:  # an alert must never change the run's result
+        log.error("could not raise the alert %r: %s", title, failure)
+
+
+def _resolve(publisher: Publisher, *, title: str, comment: str) -> None:
+    try:
+        publisher.resolve(title=title, comment=comment)
+    except Exception as failure:
+        log.error("could not resolve the alert %r: %s", title, failure)
 
 
 def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:

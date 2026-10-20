@@ -12,12 +12,13 @@ import pytest
 from qdrant_client import QdrantClient
 from tiny_encoder import write_tiny_embedder
 
-from patchpulse.models.snapshot import INDEX_COLUMNS, Snapshot
+from patchpulse.models.snapshot import Snapshot
 from patchpulse.retrieval.embed import EmbeddingCache, embed_index_set
 from patchpulse.retrieval.embedders import CANDIDATES, OnnxEmbedder
 from patchpulse.retrieval.load import load_collection
 from patchpulse.retrieval.qdrant import ensure_collection
 from patchpulse.retrieval.queries import COLUMNS, QueriesNotFrozenError, freeze_queries
+from patchpulse.retrieval.rules import INDEX_COLUMNS
 from patchpulse.retrieval.runs import (
     SYSTEMS,
     VARIANTS,

@@ -8,30 +8,29 @@ the laptop's upload).
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
-import pandas as pd
 import pytest
 from qdrant_client import QdrantClient
-from review_index import create_index_tables, index_row, mirror, write_target, write_texts
+from review_index import (
+    create_index_tables,
+    index_row,
+    mirror,
+    sync,
+    write_mirror,
+    write_target,
+    write_texts,
+)
 from sqlalchemy import Engine
 from tiny_encoder import write_tiny_embedder
 
 from patchpulse.db import tables
 from patchpulse.retrieval.embedders import CANDIDATES, OnnxEmbedder
 from patchpulse.retrieval.qdrant import DENSE, ensure_collection
-from patchpulse.retrieval.sync import (
-    BATCH,
-    PointWriter,
-    SyncStats,
-    apply_sync,
-    plan_sync,
-    read_back,
-)
+from patchpulse.retrieval.sync import SyncStats, plan_sync, read_back
 
 pytestmark = pytest.mark.integration
 
@@ -58,55 +57,6 @@ def embedder(tmp_path_factory: pytest.TempPathFactory) -> OnnxEmbedder:
     return OnnxEmbedder(root / "tiny")
 
 
-def write_mirror(
-    engine: Engine, collection: str, rows: Iterable[Mapping[str, Any]], run_id: int = 1
-) -> None:
-    with engine.begin() as connection:
-        connection.execute(
-            tables.qdrant_point.insert(),
-            [
-                {
-                    "collection": collection,
-                    "review_id": row["review_id"],
-                    "version": row["version"],
-                    "fingerprint": row["fingerprint"],
-                    "synced_run_id": run_id,
-                }
-                for row in rows
-            ],
-        )
-
-
-def ids(frame: pd.DataFrame) -> list[int]:
-    return [int(i) for i in frame["review_id"]]
-
-
-def sync(
-    engine: Engine,
-    client: PointWriter,
-    collection: str,
-    embedder: OnnxEmbedder,
-    *,
-    run_id: int,
-    batch: int = BATCH,
-    deadline: float = float("inf"),
-    clock: Callable[[], float] = time.monotonic,
-) -> SyncStats:
-    with engine.connect() as connection:
-        plan = plan_sync(connection, collection=collection)
-    return apply_sync(
-        client,
-        engine,
-        plan,
-        embedder,
-        collection=collection,
-        run_id=run_id,
-        deadline=deadline,
-        clock=clock,
-        batch=batch,
-    )
-
-
 def test_sync_plan_covers_every_kind_of_change(engine: Engine) -> None:
     new = index_row(1, created=days_ago(1))
     newest = index_row(8, created=days_ago(0.5))
@@ -129,17 +79,10 @@ def test_sync_plan_covers_every_kind_of_change(engine: Engine) -> None:
     with engine.connect() as connection:
         plan = plan_sync(connection, collection=COLLECTION)
 
-    assert ids(plan.upserts) == [8, 1, 2, 5]  # newest first, the patch window's old review last
-    assert sorted(ids(plan.field_updates)) == [3, 4]
+    assert plan.upserts == [8, 1, 2, 5]  # newest first, the patch window's old review last
+    assert sorted(plan.field_updates) == [3, 4]
     assert plan.deletes == [7]
     assert plan.size == 7
-    upserts = plan.upserts.set_index("review_id")
-    assert upserts.loc[2, "version"] == days_ago(2)
-    assert upserts.loc[8, "fingerprint"] == newest["fingerprint"]
-    updates = plan.field_updates.set_index("review_id")
-    assert updates.loc[3, "aspects"] == "performance|content"
-    assert updates.loc[3, "fingerprint"] == rescored["fingerprint"]
-    assert updates.loc[4, "aspect_model_version"] == "s1a-2"
 
 
 class Delegating:

@@ -4,14 +4,17 @@ the nightly index stage that need its inputs without running dbt."""
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Engine, text
 
 from patchpulse.db import tables
-from patchpulse.models.snapshot import INDEX_COLUMNS
+from patchpulse.retrieval.embedders import PassageEmbedder
+from patchpulse.retrieval.rules import INDEX_COLUMNS
+from patchpulse.retrieval.sync import BATCH, PointWriter, SyncStats, apply_sync, plan_sync
 
 _DDL = (
     """
@@ -114,3 +117,50 @@ def mirror(engine: Engine, collection: str) -> dict[int, tuple[datetime, str, in
         return {
             int(r["review_id"]): (r["version"], r["fingerprint"], r["synced_run_id"]) for r in rows
         }
+
+
+def write_mirror(
+    engine: Engine, collection: str, rows: Iterable[Mapping[str, Any]], run_id: int = 1
+) -> None:
+    """ops.qdrant_point rows claiming these core.review_index rows were written."""
+    with engine.begin() as connection:
+        connection.execute(
+            tables.qdrant_point.insert(),
+            [
+                {
+                    "collection": collection,
+                    "review_id": row["review_id"],
+                    "version": row["version"],
+                    "fingerprint": row["fingerprint"],
+                    "synced_run_id": run_id,
+                }
+                for row in rows
+            ],
+        )
+
+
+def sync(
+    engine: Engine,
+    client: PointWriter,
+    collection: str,
+    embedder: PassageEmbedder,
+    *,
+    run_id: int,
+    batch: int = BATCH,
+    deadline: float = float("inf"),
+    clock: Callable[[], float] = time.monotonic,
+) -> SyncStats:
+    """One night's plan and apply, without a budget unless given one."""
+    with engine.connect() as connection:
+        plan = plan_sync(connection, collection=collection)
+    return apply_sync(
+        client,
+        engine,
+        plan,
+        embedder,
+        collection=collection,
+        run_id=run_id,
+        deadline=deadline,
+        clock=clock,
+        batch=batch,
+    )

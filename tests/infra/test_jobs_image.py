@@ -9,10 +9,10 @@ reaches its step through its environment.
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +88,53 @@ def test_jobs_image_copies_the_model_and_sets_pp_model_dir() -> None:
     assert ignored.index("build/*") < ignored.index("!build/champion")
 
 
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def hidden_modules(installed: set[str]) -> set[str]:
+    """The top-level modules a `uv sync --no-dev` of these groups wouldn't install: `uv export`
+    lists every distribution they lock, transitive ones included, and each installed module is
+    traced to its distributions (an import name isn't a distribution name: `mlflow` comes from
+    `mlflow-skinny`, `yaml` from `pyyaml`)."""
+    exported = subprocess.run(
+        ["uv", "export", "--frozen", "--no-dev", "--no-hashes", "--no-emit-project"]
+        + [f"--group={group}" for group in sorted(installed)],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=ROOT,
+    ).stdout
+    image = {
+        _canonical(line.split("==", 1)[0])
+        for line in exported.splitlines()
+        if "==" in line and not line.startswith(("#", " "))
+    }
+    return {
+        module
+        for module, distributions in importlib.metadata.packages_distributions().items()
+        if module != "patchpulse" and not any(_canonical(d) in image for d in distributions)
+    }
+
+
+def run_with_only(installed: set[str], code: str) -> subprocess.CompletedProcess[str]:
+    """Run `code` in a Python where only what these groups install can be imported: an import hook
+    makes every other module look absent, not merely None in sys.modules."""
+    hidden = hidden_modules(installed)
+    script = (
+        "import importlib.abc, sys\n"
+        f"HIDDEN = {set(hidden)!r}\n"
+        "class Absent(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path, target=None):\n"
+        "        if name.split('.')[0] in HIDDEN:\n"
+        "            raise ModuleNotFoundError(f'No module named {name!r}', name=name)\n"
+        "sys.meta_path.insert(0, Absent())\n" + code
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    )
+
+
 @pytest.mark.parametrize(
     ("step", "command"),
     [
@@ -101,41 +148,37 @@ def test_downloads_run_with_only_the_steps_groups(step: str, command: list[str])
     # command must start with only what the step installs: other groups' packages are hidden.
     download = build_steps()[index_of(build_steps(), name=step)]
     installed = set(re.findall(r"--group (\w+)", download["run"]))
-    groups = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
-        "dependency-groups"
-    ]
+    assert "qdrant_client" in hidden_modules(installed)
 
-    def packages(group: str) -> set[str]:
-        names: set[str] = set()
-        for entry in groups[group]:
-            if isinstance(entry, dict):
-                names |= packages(entry["include-group"])
-            else:
-                names.add(re.split(r"[<>=~\[ ;]", entry, maxsplit=1)[0].replace("-", "_"))
-        return names
-
-    available = set().union(*(packages(group) for group in installed))
-    hidden = sorted(set().union(*(packages(g) for g in groups if g != "dev")) - available)
-    assert "qdrant_client" in hidden
-    # An import hook, so a hidden package looks absent (not merely None in sys.modules).
-    script = (
-        "import importlib.abc, sys\n"
-        f"HIDDEN = {set(hidden)!r}\n"
-        "class Absent(importlib.abc.MetaPathFinder):\n"
-        "    def find_spec(self, name, path, target=None):\n"
-        "        if name.split('.')[0] in HIDDEN:\n"
-        "            raise ModuleNotFoundError(f'No module named {name!r}', name=name)\n"
-        "sys.meta_path.insert(0, Absent())\n"
-        "from patchpulse.models.cli import main\n"
-        f"sys.exit(main({command!r}))\n"
-    )
-
-    result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    result = run_with_only(
+        installed,
+        f"from patchpulse.models.cli import main\nsys.exit(main({command!r}))\n",
     )
 
     assert result.returncode == 0, result.stderr[-1500:]
     assert "--to" in result.stdout
+
+
+def test_the_index_stage_imports_with_only_the_jobs_image_groups() -> None:
+    # 20 Oct: retrieval/sync.py imported pandas and retrieval/pin.py MLflow, neither in the jobs
+    # image, so the nightly index stage would have failed on import. Its modules must load with
+    # only the groups Dockerfile.jobs syncs.
+    dockerfile = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8")
+    (installed,) = {
+        frozenset(re.findall(r"--group (\w+)", sync))
+        for sync in re.findall(r"uv sync [^\n]*", dockerfile)
+    }
+    assert {"pandas", "mlflow", "pyarrow"} <= hidden_modules(set(installed))
+
+    result = run_with_only(
+        set(installed),
+        "import patchpulse.pipeline.cli, patchpulse.pipeline.indexing\n"
+        "from patchpulse.pipeline.indexing import run_index\n"
+        "print('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"
 
 
 def test_deploy_downloads_the_pinned_encoder() -> None:

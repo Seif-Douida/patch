@@ -9,6 +9,9 @@
   and the API search with exactly this encoder: one encoder per index.
 - **`download_encoder`** fetches the pinned version and keeps it only if `embedder.json` matches the
   pin and every file matches `embedder.json`; anything else is refused and nothing is written.
+
+MLflow is imported by the two functions that reach the registry: the nightly job reads the pin
+without it (the jobs image has no `ml` group).
 """
 
 from __future__ import annotations
@@ -17,14 +20,11 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import mlflow
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
 from patchpulse.models.artifact import sha256_file
-from patchpulse.models.champion import REGISTRY_EXPERIMENT, ensure_registered_model
 from patchpulse.models.text import CLEANING_VERSION
-from patchpulse.models.tracking import log_model_dir, tracking_run, use_tracking
 from patchpulse.retrieval.embedders import (
     MANIFEST_FILE,
     EmbedderIntegrityError,
@@ -72,6 +72,11 @@ def read_pin(path: Path = PIN_PATH) -> RetrievalPin:
 
 def register_encoder(model_dir: Path, *, name: str = REGISTERED_ENCODER) -> int:
     """Upload a checked embedder build and register it; returns the registry version."""
+    import mlflow
+
+    from patchpulse.models.champion import REGISTRY_EXPERIMENT, ensure_registered_model
+    from patchpulse.models.tracking import log_model_dir, tracking_run, use_tracking
+
     manifest = read_manifest(model_dir)  # every file must match embedder.json
     spec = manifest["spec"]
     use_tracking()
@@ -110,6 +115,10 @@ def pin_for(model_dir: Path, registry_version: int) -> RetrievalPin:
 
 def download_encoder(pin: RetrievalPin, to: Path) -> OnnxEmbedder:
     """The pinned version in `to`, checked against the pin and its own checksums."""
+    import mlflow
+
+    from patchpulse.models.tracking import use_tracking
+
     use_tracking()
     label = f"{REGISTERED_ENCODER} version {pin.registry_version}"
     to.parent.mkdir(parents=True, exist_ok=True)

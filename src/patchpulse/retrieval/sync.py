@@ -8,6 +8,8 @@ in one set-based query:
 - one at the same version with another field fingerprint (re-scored aspects, a new champion) has
   its fields set without being embedded again (ADR-011);
 - one in the mirror but no longer in the target (out of its game's cap) is deleted.
+The plan is the ids; each batch reads its rows from core.review_index (and, to embed, its texts
+from core.review_text), so a champion change's plan is a list of ids, not every row's fields.
 
 A field update sets the three fields that can change at the same version: aspects, their model
 version and the rules version. The others (game, day, creation time, language, thumbs, playtime,
@@ -26,25 +28,27 @@ night's plan redoes what the mirror lacks, with the same ids, so a repeat is saf
 `read_back` fills an empty mirror from the collection itself: the first night after the laptop's
 upload, which writes points but no mirror (design D4). Read back after field updates (a lost
 mirror), the stored fingerprints make the plan set fields again, which is harmless.
+
+The nightly job runs this without pandas (the jobs image has none).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from datetime import datetime
+from typing import Any, Protocol
 
-import pandas as pd
 from qdrant_client import QdrantClient, models
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
-from patchpulse.models.snapshot import INDEX_COLUMNS
 from patchpulse.models.text import clean_text
-from patchpulse.retrieval.embed import PassageEmbedder
+from patchpulse.retrieval.embedders import PassageEmbedder
 from patchpulse.retrieval.points import fields, to_point
+from patchpulse.retrieval.rules import INDEX_COLUMNS
 
 log = logging.getLogger("patchpulse.retrieval")
 
@@ -53,18 +57,15 @@ FIELD_BATCH = 2_048  # field updates: ~140 operations, ~2.2 s a request on the l
 # The fields that can change while a review's version stays the same.
 CHANGEABLE = ("aspects", "aspect_model_version", "rules_version")
 SCROLL_PAGE = 2_000
-_INTEGERS = dict.fromkeys(("review_id", "appid", "day", "created_ts", "first_seen_run_id"), "int64")
 
-_TARGET = ", ".join(f"t.[{c}]" for c in INDEX_COLUMNS if c != "review_id")
-_PLAN = f"""
+_PLAN = """
 SELECT
     CASE
         WHEN t.review_id IS NULL THEN 'delete'
         WHEN m.review_id IS NULL OR m.[version] <> t.[version] THEN 'upsert'
         ELSE 'update'
     END AS change,
-    COALESCE(t.review_id, m.review_id) AS review_id,
-    {_TARGET}
+    COALESCE(t.review_id, m.review_id) AS review_id
 FROM core.review_index AS t
 FULL OUTER JOIN (
     SELECT review_id, [version], fingerprint FROM ops.qdrant_point WHERE collection = :collection
@@ -72,9 +73,13 @@ FULL OUTER JOIN (
 WHERE t.review_id IS NULL OR m.review_id IS NULL
    OR m.[version] <> t.[version] OR m.fingerprint <> t.fingerprint
 ORDER BY t.created_ts DESC, COALESCE(t.review_id, m.review_id) DESC
-"""  # noqa: S608 - SQL from constants; the collection is a bound parameter
+"""
 # A batch's ids and mirror rows go in as one JSON document each, unpacked by OPENJSON.
 _IDS = "SELECT CAST([value] AS BIGINT) FROM OPENJSON(:ids)"
+_ROWS = (
+    f"SELECT {', '.join(f'[{c}]' for c in INDEX_COLUMNS)} "  # noqa: S608 - constants
+    f"FROM core.review_index WHERE review_id IN ({_IDS})"
+)
 _TEXTS = f"SELECT review_id, [text] FROM core.review_text WHERE review_id IN ({_IDS})"  # noqa: S608
 _FORGET = f"DELETE FROM ops.qdrant_point WHERE collection = :collection AND review_id IN ({_IDS})"  # noqa: S608
 _RECORD = """
@@ -103,9 +108,9 @@ class PointWriter(Protocol):
 
 @dataclass(frozen=True)
 class SyncPlan:
-    upserts: pd.DataFrame  # core.review_index rows, newest first
-    field_updates: pd.DataFrame  # rows at the mirror's version with other fields
-    deletes: list[int]  # review ids in the mirror but not the target
+    upserts: list[int]  # review ids, newest first
+    field_updates: list[int]  # at the mirror's version, with other fields
+    deletes: list[int]  # in the mirror but not the target
 
     @property
     def size(self) -> int:
@@ -122,23 +127,31 @@ class SyncStats:
 
 def plan_sync(connection: Connection, *, collection: str) -> SyncPlan:
     """Compare core.review_index with the collection's mirror rows."""
-    frame = pd.read_sql(text(_PLAN), connection, params={"collection": collection})
-
-    def rows(change: str) -> pd.DataFrame:
-        chosen = frame[frame["change"] == change].drop(columns="change")
-        return chosen.astype(_INTEGERS).reset_index(drop=True)
-
-    deletes = frame.loc[frame["change"] == "delete", "review_id"]
+    changes: dict[str, list[int]] = {"upsert": [], "update": [], "delete": []}
+    for change, review_id in connection.execute(text(_PLAN), {"collection": collection}):
+        changes[change].append(int(review_id))
     return SyncPlan(
-        upserts=rows("upsert"),
-        field_updates=rows("update"),
-        deletes=sorted(int(rid) for rid in deletes),
+        upserts=changes["upsert"],
+        field_updates=changes["update"],
+        deletes=sorted(changes["delete"]),
     )
 
 
-def _batches(frame: pd.DataFrame, batch: int) -> Iterator[list[dict[str, Any]]]:
-    for start in range(0, len(frame), batch):
-        yield cast(list[dict[str, Any]], frame.iloc[start : start + batch].to_dict("records"))
+def _rows(connection: Connection, ids: Sequence[int]) -> list[dict[str, Any]]:
+    """The target's rows for these ids, in their order."""
+    found = {
+        int(row["review_id"]): dict(row)
+        for row in connection.execute(text(_ROWS), {"ids": json.dumps(list(ids))}).mappings()
+    }
+    missing = [rid for rid in ids if rid not in found]
+    if missing:
+        raise SyncError(f"review(s) {missing[:5]} left core.review_index during the sync")
+    return [found[rid] for rid in ids]
+
+
+def forget(connection: Connection, collection: str, ids: Sequence[int]) -> None:
+    """Drop the mirror's rows for these ids: the next plan treats them as not written."""
+    connection.execute(text(_FORGET), {"collection": collection, "ids": json.dumps(list(ids))})
 
 
 def _record(
@@ -149,27 +162,30 @@ def _record(
     mirrored = [
         {
             "review_id": rid,
-            "version": pd.Timestamp(row["version"]).isoformat(),
+            "version": (
+                row["version"].isoformat()
+                if isinstance(row["version"], datetime)
+                else str(row["version"])
+            ),
             "fingerprint": str(row["fingerprint"]),
         }
         for rid, row in zip(ids, rows, strict=True)
     ]
-    connection.execute(text(_FORGET), {"collection": collection, "ids": json.dumps(ids)})
+    forget(connection, collection, ids)
     connection.execute(
         text(_RECORD), {"collection": collection, "run_id": run_id, "rows": json.dumps(mirrored)}
     )
 
 
 def _points(
-    engine: Engine, rows: Sequence[dict[str, Any]], embedder: PassageEmbedder
+    connection: Connection, rows: Sequence[dict[str, Any]], embedder: PassageEmbedder
 ) -> list[models.PointStruct]:
     """The rows as points: their texts read from core.review_text, cleaned, then embedded."""
     ids = [int(row["review_id"]) for row in rows]
-    with engine.connect() as connection:
-        found = {
-            int(rid): str(body)
-            for rid, body in connection.execute(text(_TEXTS), {"ids": json.dumps(ids)})
-        }
+    found = {
+        int(rid): str(body)
+        for rid, body in connection.execute(text(_TEXTS), {"ids": json.dumps(ids)})
+    }
     missing = [rid for rid in ids if rid not in found]
     if missing:
         raise SyncError(f"no text in core.review_text for review(s) {missing[:5]}")
@@ -213,18 +229,23 @@ def apply_sync(
         ids = plan.deletes[start : start + batch]
         client.delete(collection, models.PointIdsList(points=list(ids)), wait=True)
         with engine.begin() as connection:
-            connection.execute(text(_FORGET), {"collection": collection, "ids": json.dumps(ids)})
+            forget(connection, collection, ids)
         deleted += len(ids)
-    for rows in _batches(plan.upserts, batch):
+    for start in range(0, len(plan.upserts), batch):
         if clock() >= deadline:
             break
-        client.upsert(collection, _points(engine, rows, embedder), wait=True)
+        with engine.connect() as connection:
+            rows = _rows(connection, plan.upserts[start : start + batch])
+            points = _points(connection, rows, embedder)
+        client.upsert(collection, points, wait=True)
         with engine.begin() as connection:
             _record(connection, collection, rows, run_id)
         upserted += len(rows)
-    for rows in _batches(plan.field_updates, field_batch):
+    for start in range(0, len(plan.field_updates), field_batch):
         if clock() >= deadline:
             break
+        with engine.connect() as connection:
+            rows = _rows(connection, plan.field_updates[start : start + field_batch])
         client.batch_update_points(collection, _field_updates(rows), wait=True)
         with engine.begin() as connection:
             _record(connection, collection, rows, run_id)

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,10 @@ from typing import Any
 import numpy as np
 import pytest
 from fake_steam import FakeSteam
+from qdrant_client import QdrantClient
+from review_index import create_index_tables, index_row, write_target, write_texts
 from sqlalchemy import Connection, Engine, text
+from tiny_encoder import write_tiny_embedder
 from toy_reviews import toy_reviews
 
 from patchpulse.config import Settings
@@ -23,7 +28,13 @@ from patchpulse.ingest.coverage import REREAD, start_of_day
 from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
+from patchpulse.pipeline.indexing import IndexOutcome, run_index
 from patchpulse.pipeline.runner import PipelineError, run_nightly
+from patchpulse.retrieval.embedders import CANDIDATES
+from patchpulse.retrieval.pin import pin_for, write_pin
+from patchpulse.retrieval.qdrant import ensure_collection
+from patchpulse.retrieval.reconcile import Reconciliation, RepairStats
+from patchpulse.retrieval.sync import SyncStats
 
 pytestmark = pytest.mark.integration
 
@@ -36,6 +47,8 @@ BACKFILL_START = (NOW - timedelta(days=20)).date()
 class RecordingPublisher:
     calls: list[tuple[dict[str, bytes], int]] = field(default_factory=list)
     reports: list[tuple[int, str, str | None]] = field(default_factory=list)
+    alerts: list[tuple[str, str]] = field(default_factory=list)
+    resolved: list[tuple[str, str]] = field(default_factory=list)
     report_fails: bool = False
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
@@ -45,6 +58,12 @@ class RecordingPublisher:
         if self.report_fails:
             raise RuntimeError("GitHub is down")
         self.reports.append((run_id, status, error))
+
+    def alert(self, *, title: str, body: str) -> None:
+        self.alerts.append((title, body))
+
+    def resolve(self, *, title: str, comment: str) -> None:
+        self.resolved.append((title, comment))
 
 
 def ok_dbt(args: Any, **_: Any) -> DbtResult:
@@ -317,3 +336,207 @@ def test_the_export_names_the_model_from_pp_model_dir(env: Env, tmp_path: Path) 
 
     assert with_model.models == [AspectModel("s0", "20261013T0", 0.61)]
     assert without.models == [None]
+
+
+# The index stage (Phase 3 plan Task 15, design D5).
+
+QDRANT_TEST_URL = os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333")
+UNREACHABLE, SKIPPED, OUT_OF_SYNC = (
+    "Qdrant unreachable",
+    "index stage skipped",
+    "Qdrant out of sync",
+)
+TINY = replace(CANDIDATES["e5-small"], name="tiny-index", dims=8, max_tokens=32)
+
+
+def with_qdrant(settings: Settings, encoder_dir: Path, url: str = "https://qdrant.invalid") -> Any:
+    return settings.model_copy(update={"qdrant_url": url, "encoder_dir": encoder_dir})
+
+
+def outcome(*, difference: int = 0, target: int = 1000) -> IndexOutcome:
+    return IndexOutcome(
+        collection="reviews_v1",
+        read_back=0,
+        repaired=RepairStats(days=0, missing=0, extra=0),
+        sync=SyncStats(upserted=12, updated=3, deleted=1, remaining=0),
+        reconciliation=Reconciliation(
+            target=target,
+            qdrant=target - difference,
+            difference=difference,
+            days_off=1 if difference else 0,
+        ),
+        health_hits=5,
+        seconds={"sync": 1.5},
+    )
+
+
+@dataclass
+class FakeIndex:
+    """The index stage's work, replaced: each call returns (or raises) the next outcome."""
+
+    outcomes: list[IndexOutcome | Exception]
+    calls: list[tuple[int, int]] = field(default_factory=list)
+
+    def __call__(
+        self,
+        engine: Engine,
+        settings: Settings,
+        *,
+        run_id: int,
+        health_appid: int,
+        clock: Callable[[], float],
+    ) -> IndexOutcome:
+        self.calls.append((run_id, health_appid))
+        next_outcome = self.outcomes.pop(0)
+        if isinstance(next_outcome, Exception):
+            raise next_outcome
+        return next_outcome
+
+
+def test_index_stage_runs_between_dbt_and_export(env: Env, tmp_path: Path) -> None:
+    index = FakeIndex([outcome()])
+
+    result = env.run(
+        settings=with_qdrant(env.settings, tmp_path), dbt=ok_dbt, export=stub_export, index=index
+    )
+
+    assert result.status == "succeeded"
+    order = list(result.stages["durations_s"])
+    assert order.index("dbt") < order.index("index") < order.index("export")
+    assert index.calls == [(result.run_id, GAME_A)]  # the health query searches the first game
+    record = result.stages["index"]
+    assert (record["upserted"], record["updated"], record["deleted"]) == (12, 3, 1)
+    assert record["mismatch"] == 0
+
+
+@pytest.mark.parametrize(
+    ("update", "reason"),
+    [
+        ({"encoder_dir": Path("encoder")}, "no Qdrant (PP_QDRANT_URL unset)"),
+        ({"qdrant_url": "https://qdrant.invalid"}, "no encoder (PP_ENCODER_DIR unset)"),
+        (
+            {
+                "qdrant_url": "https://qdrant.invalid",
+                "encoder_dir": Path("e"),
+                "index_budget_minutes": 0,
+            },
+            "turned off (PP_INDEX_BUDGET_MINUTES is 0)",
+        ),
+    ],
+)
+def test_index_is_skipped_without_qdrant_settings(
+    env: Env, update: dict[str, Any], reason: str
+) -> None:
+    index = FakeIndex([])
+
+    result = env.run(
+        settings=env.settings.model_copy(update=update), dbt=ok_dbt, export=stub_export, index=index
+    )
+
+    assert result.status == "succeeded"
+    assert result.stages["index"] == {"skipped": reason}
+    assert index.calls == []
+    assert (env.publisher.alerts, env.publisher.resolved) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ("error", "title"),
+    [
+        (ConnectionError("Qdrant didn't answer at https://qdrant.invalid"), UNREACHABLE),
+        (ValueError("collection reviews_v1 doesn't exist"), SKIPPED),
+    ],
+)
+def test_qdrant_down_is_a_warning_and_the_night_publishes(
+    env: Env, tmp_path: Path, error: Exception, title: str
+) -> None:
+    result = env.run(
+        settings=with_qdrant(env.settings, tmp_path),
+        dbt=ok_dbt,
+        export=stub_export,
+        index=FakeIndex([error]),
+    )
+
+    assert result.status == "succeeded"
+    assert len(env.publisher.calls) == 1  # the site still goes out
+    kind = type(error).__name__
+    assert result.stages["index"]["skipped"].startswith(kind)
+    (finding,) = env.rows(
+        "SELECT severity, detail FROM ops.data_quality_result WHERE check_name = 'index_skipped'"
+    )
+    assert finding.severity == "warn"
+    assert finding.detail.startswith(kind)
+    assert "qdrant.invalid" not in finding.detail  # the cluster's URL is a secret
+    ((alerted, body),) = env.publisher.alerts
+    assert alerted == title
+    assert f"run {result.run_id}" in body
+    assert kind in body
+    assert "qdrant.invalid" not in body
+    assert env.publisher.resolved == []
+
+
+def test_mismatch_over_half_a_percent_alerts_and_a_clean_night_resolves(
+    env: Env, tmp_path: Path
+) -> None:
+    settings = with_qdrant(env.settings, tmp_path)
+    index = FakeIndex([outcome(difference=6), outcome(difference=5)])  # 0.6%, then 0.5%
+
+    first = env.run(settings=settings, dbt=ok_dbt, export=stub_export, index=index)
+
+    assert first.stages["index"]["mismatch"] == pytest.approx(0.006)
+    ((title, body),) = env.publisher.alerts
+    assert title == OUT_OF_SYNC
+    assert f"run {first.run_id}" in body
+    (finding,) = env.rows(
+        "SELECT severity FROM ops.data_quality_result WHERE check_name = 'qdrant_mismatch'"
+    )
+    assert finding.severity == "warn"
+    assert env.publisher.resolved == []
+
+    second = env.run(settings=settings, dbt=ok_dbt, export=stub_export, index=index)
+
+    assert len(env.publisher.alerts) == 1
+    assert {title for title, _ in env.publisher.resolved} == {OUT_OF_SYNC, SKIPPED, UNREACHABLE}
+    assert all(f"run {second.run_id}" in comment for _, comment in env.publisher.resolved)
+
+
+@pytest.mark.qdrant
+def test_index_stage_end_to_end_on_both_containers(
+    env: Env, qdrant: QdrantClient, new_collection: Callable[[], str], tmp_path: Path
+) -> None:
+    create_index_tables(env.engine)  # dbt's tables; the stubbed dbt doesn't build them
+    created = NOW.replace(tzinfo=None) - timedelta(days=1)
+    rows = [
+        index_row(rid, created=created - timedelta(days=rid % 2), appid=GAME_A)
+        for rid in range(1, 6)
+    ]
+    rows += [index_row(rid, created=created, appid=GAME_B) for rid in (20, 21)]
+    write_target(env.engine, rows)
+    write_texts(env.engine, {int(row["review_id"]): "good game" for row in rows})
+    encoder = tmp_path / "encoder"
+    write_tiny_embedder(encoder, TINY, dim=TINY.dims)
+    collection = new_collection()
+    ensure_collection(qdrant, collection, TINY.dims)
+    pin = tmp_path / "retrieval.yaml"
+    write_pin(pin_for(encoder, 1).model_copy(update={"collection": collection}), pin)
+    settings = with_qdrant(env.settings, encoder, url=QDRANT_TEST_URL)
+    index = functools.partial(run_index, pin_path=pin)
+
+    first = env.run(settings=settings, dbt=ok_dbt, export=stub_export, index=index)
+
+    assert first.status == "succeeded"
+    record = first.stages["index"]
+    assert (record["collection"], record["upserted"], record["remaining"]) == (collection, 7, 0)
+    assert (record["mismatch"], record["health_hits"]) == (0, 5)
+    assert qdrant.count(collection, exact=True).count == 7
+    stored = env.rows(
+        f"SELECT appid, [day], sql_count, qdrant_count FROM ops.qdrant_reconciliation "
+        f"WHERE run_id = {first.run_id}"
+    )
+    assert sorted((r.appid, r.sql_count) for r in stored) == [(GAME_A, 2), (GAME_A, 3), (GAME_B, 2)]
+    assert all(r.sql_count == r.qdrant_count for r in stored)
+    assert {title for title, _ in env.publisher.resolved} == {OUT_OF_SYNC, SKIPPED, UNREACHABLE}
+
+    second = env.run(settings=settings, dbt=ok_dbt, export=stub_export, index=index)
+
+    assert (second.stages["index"]["upserted"], second.stages["index"]["mismatch"]) == (0, 0)
+    assert env.publisher.alerts == []

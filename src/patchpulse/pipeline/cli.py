@@ -50,6 +50,12 @@ class LocalDirPublisher:
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         log.info("run %d %s (not reported: local run)", run_id, status)
 
+    def alert(self, *, title: str, body: str) -> None:
+        log.warning("alert (not raised: local run): %s: %s", title, body)
+
+    def resolve(self, *, title: str, comment: str) -> None:
+        log.info("alert resolved (local run): %s", title)
+
 
 def configure_logging() -> None:
     """INFO per stage; the HTTP client's per-request lines are kept out of the logs, which share

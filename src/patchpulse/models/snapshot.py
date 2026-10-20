@@ -27,6 +27,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import DBAPIError
 
 from patchpulse.ingest.patches import CLASSIFIER_VERSION
+from patchpulse.retrieval.rules import INDEX_COLUMNS
 
 REVIEWS_FILE = "reviews.parquet"
 GAMES_FILE = "games.parquet"
@@ -61,12 +62,7 @@ WHERE version_rank = 1 AND last_seen_run_id > :since
 
 _GAMES_SQL = "SELECT appid, name, genres FROM raw.game"
 
-# core.review_index's columns (Phase 3, design D1/D2), in the order they're written.
-INDEX_COLUMNS = (
-    "review_id", "appid", "day", "created_ts", "language", "voted_up", "playtime_bucket",
-    "first_seen_run_id", "version", "aspects", "aspect_model_version", "rules_version",
-    "fingerprint",
-)  # fmt: skip
+# core.review_index's columns (Phase 3), defined with the index rules.
 _INDEX_SQL = (
     f"SELECT {', '.join(f'[{name}]' for name in INDEX_COLUMNS)} "  # noqa: S608 (constants)
     "FROM core.review_index ORDER BY review_id"
