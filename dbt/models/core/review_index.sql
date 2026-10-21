@@ -5,6 +5,9 @@
 --
 -- A table rebuilt each night rather than incremental: the per-game cap moves membership whenever
 -- new reviews arrive, so an incremental model would need its own deletions.
+--
+-- Tracked games only (role tracked or both): a donor game feeds the marts and the causal module,
+-- and would take up to its cap of the free cluster's memory for searches nobody runs.
 {%- set char_languages = "'" ~ var('index_char_languages') | join("', '") ~ "'" %}
 {%- set window = var('index_patch_window_days') %}
 
@@ -20,6 +23,8 @@ with eligible as (
         f.playtime_bucket,
         f.first_seen_run_id
     from {{ ref('fact_review') }} as f
+    inner join {{ ref('dim_game') }} as g
+        on g.game_key = f.game_key and g.role in ('tracked', 'both')
     left join {{ ref('review_text') }} as t
         on t.review_id = f.review_id and f.language_key in ({{ char_languages }})
     where

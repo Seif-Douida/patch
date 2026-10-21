@@ -10,7 +10,7 @@ order: the first build, a re-score, then an edit, each followed by a build.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -144,6 +144,7 @@ def make_database(
     patches: Sequence[tuple[NewsItem, Classification]] = (),
     dbt_vars: dict[str, Any] | None = None,
     released: datetime | None = None,
+    roles: Mapping[int, Role] | None = None,
 ) -> Database:
     admin_settings = new_database()
     admin = make_engine(admin_settings)
@@ -153,7 +154,7 @@ def make_database(
             appid=appid,
             name=f"Game {appid}",
             genres=["Action"],
-            role=Role.TRACKED,
+            role=(roles or {}).get(appid, Role.TRACKED),
             backfill_start=days_ago(400).date(),
             release_date=released.date() if released and appid == GAME else None,
         )
@@ -327,3 +328,21 @@ def test_cap_keeps_the_most_recent_every_patch_window_and_the_launch(
     # Equal daily counts also make a flat volume history, which the mart's volume check survives.
     assert result.ok, result.failures
     assert set(capped.index()) == {201, 202, 204, 210, 212, 216, 301, 302}
+
+
+def test_only_tracked_games_are_indexed(
+    new_database: Callable[[], Settings], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    # Donor games (Phase 4's synthetic control) feed the marts, not the free cluster: each would
+    # take up to 40,000 points of its memory (the Phase 3 review).
+    games = make_database(
+        new_database,
+        tmp_path_factory.mktemp("dbt-index-roles"),
+        reviews=[review(401, days_ago(1)), review(402, days_ago(1), appid=OTHER_GAME)],
+        roles={OTHER_GAME: Role.DONOR},
+    )
+
+    result = games.build()
+
+    assert result.ok, result.failures
+    assert set(games.index()) == {401}

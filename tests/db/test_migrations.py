@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import SecretStr
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, insert, text
 from sqlalchemy.exc import DBAPIError
 
 from patchpulse.config import Settings
+from patchpulse.db import tables as schema
 from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import SCRIPT_LOCATION, downgrade_to_base, upgrade_to_head
 from patchpulse.db.provision import WRITER_USER, provision_writer
@@ -207,3 +209,60 @@ def test_pp_writer_can_maintain_the_mirror(new_database: Callable[[], Settings])
             == 4
         )
         connection.execute(text("DELETE FROM ops.qdrant_reconciliation"))
+
+
+def test_coverage_is_recomputed_from_the_reviews_stored(
+    new_database: Callable[[], Settings],
+) -> None:
+    # 0004 (20 Oct 2026): Steam had ended three games' backfill windows early, so ops.ingest_state
+    # claimed history back to backfill_start that raw.steam_review doesn't hold. Coverage restarts
+    # at each game's oldest stored review; the fixed backfill fetches what's older.
+    engine = make_engine(new_database())
+    with engine.begin() as connection:
+        config = Config()
+        config.set_main_option("script_location", SCRIPT_LOCATION)
+        config.attributes["connection"] = connection
+        command.upgrade(config, "0003")
+    floor, now = datetime(2024, 10, 1), datetime(2026, 10, 20)
+    oldest = {10: datetime(2026, 9, 14, 7), 20: datetime(2024, 10, 1, 5)}  # 30 has none stored
+    with engine.begin() as connection:
+        for appid in (10, 20, 30):
+            connection.execute(
+                insert(schema.ingest_state).values(
+                    appid=appid, covered_from=floor, covered_to=now, updated_run_id=1
+                )
+            )
+        for rid, (appid, created) in enumerate(
+            [(10, oldest[10]), (10, now), (20, oldest[20]), (20, now)], start=1
+        ):
+            row = stored_review(rid, appid, created)
+            connection.execute(insert(schema.steam_review).values(row))
+
+    upgrade_to_head(engine)
+
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT appid, covered_from FROM ops.ingest_state")).all()
+    covered = {int(row.appid): row.covered_from for row in rows}
+    assert covered == {10: oldest[10], 20: floor, 30: floor}
+
+
+def stored_review(rid: int, appid: int, created: datetime) -> dict[str, object]:
+    return {
+        "recommendation_id": rid,
+        "timestamp_updated": created,
+        "appid": appid,
+        "author_hash": "a" * 64,
+        "language": "english",
+        "review_text": "fine",
+        "timestamp_created": created,
+        "voted_up": True,
+        "votes_up": 0,
+        "votes_funny": 0,
+        "weighted_vote_score": 0.0,
+        "comment_count": 0,
+        "steam_purchase": True,
+        "received_for_free": False,
+        "written_during_early_access": False,
+        "first_seen_run_id": 1,
+        "last_seen_run_id": 1,
+    }

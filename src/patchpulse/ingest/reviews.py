@@ -41,6 +41,7 @@ class ReviewPage:
     next_stop: StopReason | None  # why paging ends after this page; None if it continues
     drift: frozenset[str]
     invalid: int
+    total: int | None = None  # the window's review count, which Steam reports on the first page
 
     @property
     def payload(self) -> Any:
@@ -109,8 +110,18 @@ def fetch_review_pages(
         else:
             stop = None
 
+        summary = payload.get("query_summary") or {}
+        total = summary.get("total_reviews") if cursor == FIRST_CURSOR else None
         raw = RawPage("reviews", appid, request, status, strip_review_page(payload), len(reviews))
-        yield ReviewPage(raw, records, next_cursor, stop, frozenset(drift), invalid)
+        yield ReviewPage(
+            raw,
+            records,
+            next_cursor,
+            stop,
+            frozenset(drift),
+            invalid,
+            int(total) if total is not None else None,
+        )
         if stop is not None:
             return
         seen.add(next_cursor)

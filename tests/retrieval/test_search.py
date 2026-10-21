@@ -5,6 +5,7 @@ collections are, then searched in each mode with and without filters."""
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from qdrant_client import QdrantClient
 from tiny_encoder import write_tiny_embedder
 
 from patchpulse.models.snapshot import Snapshot
+from patchpulse.models.text import CLEANING_VERSION
 from patchpulse.retrieval.embed import EmbeddingCache, embed_index_set
 from patchpulse.retrieval.embedders import CANDIDATES, OnnxEmbedder
 from patchpulse.retrieval.load import load_collection
@@ -227,3 +229,13 @@ def test_load_resumes_and_is_idempotent(
     )
     assert (other.upserted, other.skipped) == (39, 0)
     assert qdrant.count(name, exact=True).count == 40  # the same ids: no duplicates
+    # Nor another encoder with the same pull: its vectors must all go up (the Phase 3 review).
+    load_collection(qdrant, name, snapshot.index, texts, cache, batch=8, progress=progress)
+    another = EmbeddingCache(
+        tmp_path, name=SPEC.name, model_sha256="f" * 64, cleaning_version=CLEANING_VERSION, dims=DIM
+    )
+    shutil.copytree(cache.directory, another.directory)
+    switched = load_collection(
+        qdrant, name, snapshot.index, texts, another, batch=8, progress=progress
+    )
+    assert (switched.upserted, switched.skipped) == (40, 0)

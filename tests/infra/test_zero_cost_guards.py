@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from patchpulse.monitoring.cost_guard import MAX_JOB_SECONDS
+from patchpulse.pipeline.runner import NIGHT_RESERVE_S, NIGHT_SECONDS
 
 MAIN_BICEP = Path(__file__).resolve().parents[2] / "infra" / "main.bicep"
 
@@ -280,6 +281,14 @@ def test_nightly_job_has_the_index_budget(resources: list[dict[str, Any]]) -> No
     # Design D5: the index stage syncs Qdrant within 5 minutes; what's left waits a night.
     _, env = nightly_env(resources)
     assert env["PP_INDEX_BUDGET_MINUTES"] == "5"
+
+
+def test_the_runner_ends_the_night_before_the_job_timeout(resources: list[dict[str, Any]]) -> None:
+    # The runner's night deadline (budgeted stages stop at NIGHT_SECONDS - NIGHT_RESERVE_S) is only
+    # safe if it knows the timeout Azure kills the job at.
+    nightly, _ = nightly_env(resources)
+    assert literal_number(nightly["properties"]["configuration"]["replicaTimeout"]) == NIGHT_SECONDS
+    assert NIGHT_RESERVE_S >= 8 * 60
 
 
 def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) -> None:
