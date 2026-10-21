@@ -92,27 +92,28 @@ _INSERT = (
     f"SELECT {', '.join(name for name, _ in _COLUMNS)} FROM OPENJSON(:page) WITH "
     f"({', '.join(f'{name} {kind}' for name, kind in _COLUMNS)})"
 )
-# Has another model scored anything since the current one last did? Only after a return to an
-# earlier champion; every other night this is one pass over the run ids and the answer is no.
-_BEHIND = """
-SELECT CASE WHEN EXISTS (
-    SELECT 1 FROM raw.review_aspect_score
-    WHERE model_version <> :model_version
-      AND scored_run_id > (
-          SELECT MAX(scored_run_id) FROM raw.review_aspect_score
-          WHERE model_version = :model_version)
-) THEN 1 ELSE 0 END
-"""
-_RESTAMP = """
-UPDATE TOP (:batch) s SET scored_run_id = :run_id, scored_at = SYSUTCDATETIME()
-FROM raw.review_aspect_score AS s
-WHERE s.model_version = :model_version
+# A score of the current model that another model's later score outranks: only after a return to
+# an earlier champion. The check and the re-stamp share it, so a re-stamp the budget cut short is
+# found and finished the next night (comparing with the model's newest run id wasn't: the first
+# re-stamp statement raises it). One ordered pass over the primary key when nothing is outranked.
+_OUTRANKED = """
+s.model_version = :model_version
   AND EXISTS (
       SELECT 1 FROM raw.review_aspect_score AS o
       WHERE o.recommendation_id = s.recommendation_id
         AND o.timestamp_updated = s.timestamp_updated
         AND o.scored_run_id > s.scored_run_id)
 """
+_BEHIND = f"""
+SELECT CASE WHEN EXISTS (
+    SELECT 1 FROM raw.review_aspect_score AS s WHERE {_OUTRANKED}
+) THEN 1 ELSE 0 END
+"""  # noqa: S608 - SQL from constants; every value is a bound parameter
+_RESTAMP = f"""
+UPDATE TOP (:batch) s SET scored_run_id = :run_id, scored_at = SYSUTCDATETIME()
+FROM raw.review_aspect_score AS s
+WHERE {_OUTRANKED}
+"""  # noqa: S608
 RESTAMP_BATCH = 50_000
 
 
