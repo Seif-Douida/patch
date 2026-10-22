@@ -24,7 +24,13 @@ from datetime import date, timedelta
 import numpy as np
 
 from patchpulse.causal.bundles import Bundle
-from patchpulse.causal.its import POSITIVE_SHARE, VOLUME, ItsResult, Kind, its_effect
+from patchpulse.causal.its import (
+    POSITIVE_SHARE,
+    VOLUME,
+    ItsResult,
+    Kind,
+    calibrated_its_effect,
+)
 from patchpulse.causal.rules import FIT_DAYS, MIN_DONORS, POST_DAYS, eligible_donors, genre_group
 from patchpulse.causal.series import DailySeries
 from patchpulse.causal.synth import SynthFit, conformal_interval, placebo_p_value, synth_effect
@@ -193,11 +199,14 @@ def _estimate(
     start: date,
     horizon: int,
     kind: Kind,
+    sale_days: frozenset[date],
 ) -> list[Row]:
     """(method, estimate, lo, hi, p-value, fallback) for interrupted time series and for synthetic
     control as served (falling back to interrupted time series when it would)."""
-    earlier = [d for d in patch_days.get(treated.appid, ()) if d < start]
-    its = its_effect(treated, start, horizon, earlier, kind)
+    own = patch_days.get(treated.appid, ())
+    earlier = [d for d in own if d < start]
+    busy = frozenset(own) | sale_days
+    its = calibrated_its_effect(treated, start, horizon, earlier, kind, busy_days=busy)
     values = (its.effect, its.lo90, its.hi90) if isinstance(its, ItsResult) else (None, None, None)
     its_row: Row = ("its", *values, None, False)
     synth_row: Row = ("synth", *values, None, True)
@@ -223,6 +232,7 @@ def run_trials(
     groups: Mapping[int, Sequence[str]],
     patch_days: Mapping[int, Sequence[date]],
     *,
+    sale_days: frozenset[date],
     effects: Sequence[float] = SHARE_EFFECTS,
     volume_effects: Sequence[float] = VOLUME_EFFECTS,
     shapes: Sequence[str] = SHAPES,
@@ -250,7 +260,9 @@ def run_trials(
                     pool = {a: s for a, s in {**donors, **series}.items() if a != window.appid}
                     tier = _tier(base, window.start)
                     for horizon in horizons:
-                        rows = _estimate(hit, pool, groups, patch_days, window.start, horizon, kind)
+                        rows = _estimate(
+                            hit, pool, groups, patch_days, window.start, horizon, kind, sale_days
+                        )
                         for method, estimate, lo, hi, p_value, fallback in rows:
                             trials.append(
                                 Trial(
@@ -280,6 +292,7 @@ def placebo_in_space(
     patch_days: Mapping[int, Sequence[date]],
     *,
     seed: int,
+    sale_days: frozenset[date],
     horizon: int = POST_DAYS,
 ) -> list[Trial]:
     """Both methods on each comparison game that is quiet at a tracked patch's date; no injection,
@@ -297,7 +310,7 @@ def placebo_in_space(
                 continue
             pool = {a: s for a, s in donors.items() if a != appid}
             for method, estimate, lo, hi, p_value, fallback in _estimate(
-                data, pool, groups, patch_days, start, horizon, "share"
+                data, pool, groups, patch_days, start, horizon, "share", sale_days
             ):
                 trials.append(
                     Trial(
@@ -431,6 +444,15 @@ def render_benchmark_report(
             f"Synthetic control fell back to interrupted time series in {100 * rate:.0f}% "
             "of its trials (another patch in its fit window, fewer than 5 qualifying "
             "comparison games, or a twin that didn't track).",
+            "",
+        ]
+    its_trials = [t for t in trials if t.method == "its"]
+    if its_trials:
+        missing = np.mean([t.estimate is None for t in its_trials])
+        lines += [
+            "Interrupted time series' intervals are calibrated on quiet dates in the game's own "
+            f"past (ADR-007 amendment 1); {100 * missing:.0f}% of its trials had no estimate "
+            "(too little quiet history to calibrate, or too few reviews).",
             "",
         ]
     for outcome in sorted({key[1] for key in summary}):

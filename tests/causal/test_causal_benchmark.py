@@ -20,6 +20,7 @@ from patchpulse.causal.benchmark import (
     run_trials,
     summarise,
 )
+from patchpulse.causal.its import ItsResult, calibrated_its_effect
 from patchpulse.causal.series import DailySeries
 
 
@@ -163,7 +164,7 @@ def test_choose_default_follows_the_rule() -> None:
 def test_trials_cover_each_cell_and_method() -> None:
     inputs = world()
     series = {TREATED: inputs.series[TREATED]}
-    windows = [QuietWindow(TREATED, at(40)), QuietWindow(TREATED, at(45))]
+    windows = [QuietWindow(TREATED, at(110)), QuietWindow(TREATED, at(115))]
     groups = {a: inputs.games[a].genres for a in [*DONORS, TREATED]}
 
     trials = run_trials(
@@ -172,6 +173,7 @@ def test_trials_cover_each_cell_and_method() -> None:
         inputs.donors,
         groups,
         {},
+        sale_days=frozenset(),
         effects=(0.0, -5.0),
         shapes=("step",),
         per_cell=3,
@@ -184,17 +186,45 @@ def test_trials_cover_each_cell_and_method() -> None:
     assert cells == {("its", 0.0), ("its", -5.0), ("synth", 0.0), ("synth", -5.0)}
     assert len(trials) == 12
     assert all(t.estimate is None or np.isfinite(t.estimate) for t in trials)
+    assert all(t.estimate is not None for t in trials if t.method == "its")  # 11-12 quiet weeks
     assert {t.truth for t in trials if t.effect_pts == -5.0} == {-5.0}
+
+
+def test_benchmark_serves_the_calibrated_interval() -> None:
+    inputs = world()
+    series = inputs.series[TREATED]
+    sale = frozenset({at(60)})  # rules out 3 of the 13 placebo dates, leaving 10
+
+    trials = run_trials(
+        [QuietWindow(TREATED, at(130))],
+        {TREATED: series},
+        inputs.donors,
+        {a: inputs.games[a].genres for a in [*DONORS, TREATED]},
+        {},
+        effects=(0.0,),
+        shapes=("step",),
+        per_cell=1,
+        seed=1,
+        horizons=(14,),
+        outcomes=("positive_share",),
+        sale_days=sale,
+    )
+
+    served = calibrated_its_effect(series, at(130), 14, [], "share", busy_days=sale)
+    assert isinstance(served, ItsResult)
+    (its,) = [t for t in trials if t.method == "its"]
+    assert (its.estimate, its.lo90, its.hi90) == (served.effect, served.lo90, served.hi90)
 
 
 def test_ramp_truth_is_the_horizons_average() -> None:
     inputs = world()
     trials = run_trials(
-        [QuietWindow(TREATED, at(40))],
+        [QuietWindow(TREATED, at(110))],
         {TREATED: inputs.series[TREATED]},
         inputs.donors,
         {a: inputs.games[a].genres for a in [*DONORS, TREATED]},
         {},
+        sale_days=frozenset(),
         effects=(-7.0,),
         shapes=("ramp",),
         per_cell=1,
@@ -212,7 +242,7 @@ def test_placebo_in_space_runs_on_quiet_comparison_games() -> None:
     inputs = world()
     groups = {a: inputs.games[a].genres for a in DONORS}
 
-    trials = placebo_in_space(inputs.donors, [at(80)], groups, {}, seed=3)
+    trials = placebo_in_space(inputs.donors, [at(120)], groups, {}, seed=3, sale_days=frozenset())
 
     assert {t.appid for t in trials} <= set(DONORS)
     assert {t.effect_pts for t in trials} == {0.0}
@@ -237,5 +267,6 @@ def test_report_states_the_rule_and_the_limitations() -> None:
     assert "Default method: synth" in report
     assert "series,and" not in report  # the rule's last sentence reads cleanly
     assert "intervals weren't validated" in report
+    assert "calibrated on quiet dates in the game's own past" in report
     for limitation in ("Aspect", "rules classifier", "30 Sep 2026"):
         assert limitation in report

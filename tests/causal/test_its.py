@@ -14,10 +14,13 @@ from patchpulse.causal.its import (
     ItsResult,
     NoEstimate,
     aspect_outcome,
+    calibrated_its_effect,
+    conformal_critical,
     fixed_b_critical,
     hac_cov,
     its_effect,
     newey_west_lag,
+    placebo_starts,
 )
 from patchpulse.causal.series import DailySeries
 
@@ -158,3 +161,110 @@ def test_other_reasons() -> None:
     assert its_effect(flat, START, 14, [], "share") == NoEstimate(
         "too few reviews (median under 10 a day)"
     )
+
+
+# Calibration on the game's own past (Task 11b, ADR-007 amendment 1).
+
+LONG_DAYS = 300
+LONG_START = FIRST + timedelta(days=280)  # 35 weekly placebo dates with a 28-day pre-period
+
+
+def wobbly(
+    *,
+    seed: int,
+    shift: float = 0.0,
+    ar: float = 0.0,
+    wobble: float = 0.0,
+    drift: float = 0.0,
+    per_day: int = 150,
+) -> DailySeries:
+    """Binomial days around 80% plus an AR(1) day-to-day wobble and a random-walk drift."""
+    rng = np.random.default_rng(seed)
+    noise = np.zeros(LONG_DAYS)
+    for i in range(1, LONG_DAYS):
+        noise[i] = ar * noise[i - 1] + rng.normal(0.0, wobble)
+    p = 0.8 + noise + np.cumsum(rng.normal(0.0, drift, LONG_DAYS))
+    p[(LONG_START - FIRST).days :] += shift
+    totals = np.full(LONG_DAYS, per_day, dtype=np.int64)
+    positives = rng.binomial(totals, np.clip(p, 0.02, 0.98)).astype(np.int64)
+    return DailySeries(1, FIRST, positives, totals, np.ones(LONG_DAYS, dtype=bool))
+
+
+def test_placebo_dates_share_the_weekday_and_skip_busy_weeks() -> None:
+    start = date(2026, 6, 4)
+    busy = {start - timedelta(days=60)}
+
+    dates = placebo_starts(start, 14, busy, first_day=start - timedelta(days=500))
+
+    assert all((start - d).days % 7 == 0 for d in dates)
+    assert max(dates) == start - timedelta(days=14)  # its 14 days end the day before the patch
+    assert min(dates) == start - timedelta(days=364)  # a year back at most
+    # Busy from 7 days before a date to its horizon's end: the dates 56, 63 and 70 days back.
+    assert {start - timedelta(days=k) for k in (56, 63, 70)}.isdisjoint(dates)
+    assert {start - timedelta(days=k) for k in (49, 77)} <= set(dates)
+    assert len(dates) == 51 - 3
+    year = start - timedelta(days=500)
+    assert max(placebo_starts(start, 7, set(), first_day=year)) == start - timedelta(days=7)
+    near = placebo_starts(start, 14, set(), first_day=start - timedelta(days=100))
+    assert min(near) == start - timedelta(days=98)
+
+
+def test_conformal_critical_is_the_finite_sample_quantile() -> None:
+    nine = [-0.5, 1.0, 0.2, -2.5, 0.7, 1.1, -0.3, 0.9, 1.4]
+
+    assert conformal_critical(nine) == 2.5  # rank ceil(0.9 * 10) = 9 of 9: the largest |t|
+    assert conformal_critical([float(i) for i in range(1, 20)]) == 18.0  # rank 18 of 19
+    assert conformal_critical(nine[:8]) is None
+    assert conformal_critical([]) is None
+
+
+def test_too_little_quiet_history_gives_a_reason() -> None:
+    # 56 days of history: placebo dates 42, 35 and 28 days in have a 28-day pre-period, no more.
+    result = calibrated_its_effect(simulate(), START, 14, [], "share", busy_days=frozenset())
+
+    assert result == NoEstimate(
+        "too little quiet history to check the interval (3 of 9 placebo dates)"
+    )
+
+
+def test_calibrated_intervals_cover_a_wobbling_drifting_series() -> None:
+    fixed, calibrated = [], []
+    for seed in range(300):
+        series = wobbly(seed=1000 + seed, shift=-0.05, ar=0.6, wobble=0.015, drift=0.002)
+        plain = its_effect(series, LONG_START, 14, [], "share")
+        tuned = calibrated_its_effect(series, LONG_START, 14, [], "share", busy_days=frozenset())
+        assert isinstance(plain, ItsResult)
+        assert isinstance(tuned, ItsResult)
+        fixed.append(plain.lo90 <= -5.0 <= plain.hi90)
+        calibrated.append(tuned.lo90 <= -5.0 <= tuned.hi90)
+
+    assert float(np.mean(fixed)) < 0.85  # the problem: the theoretical interval is too narrow
+    assert 0.85 <= float(np.mean(calibrated)) <= 0.95
+
+
+def test_calibrated_intervals_stay_tight_on_independent_noise() -> None:
+    covered = []
+    for seed in range(300):
+        series = wobbly(seed=2000 + seed, shift=-0.05)
+        tuned = calibrated_its_effect(series, LONG_START, 14, [], "share", busy_days=frozenset())
+        assert isinstance(tuned, ItsResult)
+        covered.append(tuned.lo90 <= -5.0 <= tuned.hi90)
+
+    assert 0.85 <= float(np.mean(covered)) <= 0.95
+
+
+def test_calibration_reads_nothing_from_the_patch_window() -> None:
+    base = wobbly(seed=5, ar=0.6, wobble=0.015)
+    at = (LONG_START - FIRST).days
+    positives = base.positives.copy()
+    positives[at : at + 14] = positives[at : at + 14] * 9 // 10
+    hit = DailySeries(1, FIRST, positives, base.totals, base.observed)
+
+    before = calibrated_its_effect(base, LONG_START, 14, [], "share", busy_days=frozenset())
+    after = calibrated_its_effect(hit, LONG_START, 14, [], "share", busy_days=frozenset())
+
+    assert isinstance(before, ItsResult)
+    assert isinstance(after, ItsResult)
+    assert (before.critical, before.placebos) == (after.critical, after.placebos)
+    assert before.placebos == 35
+    assert after.effect < before.effect - 5

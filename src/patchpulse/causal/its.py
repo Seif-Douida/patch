@@ -8,11 +8,16 @@ comes from Newey-West (HAC) errors, since neighbouring days are alike: the lag b
 own rule (3 for ~70 rows) and fixed-b critical values (Kiefer & Vogelsang 2005), which correct the
 too-narrow intervals HAC gives on short series. Measured 21 Oct on 500 simulated series of 70 days
 with independent noise: 0.90 coverage, against 0.80 with a 7-day lag and Student-t quantiles.
+
+On real review series that interval is still too narrow (Task 11's dry run: 79% coverage), so the
+served estimate is `calibrated_its_effect` (ADR-007 amendment 1): the same fit at quiet dates in
+the game's own past, and the interval's critical value the conformal quantile of their |t|.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
@@ -28,6 +33,14 @@ Kind = Literal["share", "volume"]
 PRE_DAYS = 56
 MIN_PRE_DAYS = 28
 LEVEL = 0.90
+# Placebo dates for the calibration (ADR-007 amendment 1): weekly, so each shares the patch's
+# weekday; a year back at most; no patch, sale or discount from a week before one to its horizon's
+# end; at least 9, the fewest for which the 90% conformal rank exists.
+PLACEBO_STEP_DAYS = 7
+PLACEBO_LOOKBACK_DAYS = 364
+PLACEBO_CALM_DAYS = 7
+MIN_PLACEBOS = 9
+CALIBRATION_DAYS = PLACEBO_LOOKBACK_DAYS + PRE_DAYS  # how far before the patch an estimate reads
 
 
 def aspect_outcome(code: str) -> str:
@@ -50,6 +63,8 @@ class ItsResult:
     se: float  # of the step, in points (share) or log points x 100 (volume)
     n_pre: int  # rows before the patch
     binned: bool
+    critical: float  # the interval's half-width over se
+    placebos: int  # placebo dates the critical value came from; 0 for the fixed-b value
 
 
 def newey_west_lag(n: int) -> int:
@@ -134,7 +149,17 @@ def _pre_days_with_data(series: DailySeries, first: date, start: date, kind: Kin
     return int(data.sum())
 
 
-def its_effect(
+@dataclass(frozen=True)
+class _Fit:
+    step: float  # a share's fraction or log(1 + reviews)
+    se: float
+    lags: int
+    n: int
+    n_pre: int
+    binned: bool
+
+
+def _fit(
     series: DailySeries,
     start: date,
     horizon: int,
@@ -144,12 +169,7 @@ def its_effect(
     pre_days: int = PRE_DAYS,
     min_pre_days: int = MIN_PRE_DAYS,
     lag: int | None = None,
-    level: float = LEVEL,
-) -> ItsResult | NoEstimate:
-    """The patch's effect over `horizon` days from `start` (the patch day included). `lag` defaults
-    to Newey and West's rule for the number of rows; only the spec's 90% level is supported."""
-    if level != LEVEL:
-        raise ValueError("the fixed-b critical values are for the 90% level only")
+) -> _Fit | NoEstimate:
     end = start + timedelta(days=horizon - 1)
     if end > series.last_day:
         return NoEstimate("window not complete")
@@ -176,11 +196,111 @@ def its_effect(
     beta = np.linalg.lstsq(xw, yw, rcond=None)[0]
     lags = newey_west_lag(n) if lag is None else lag
     covariance = hac_cov(xw, yw - xw @ beta, lags)
-    step, se = float(beta[-1]), float(np.sqrt(covariance[-1, -1]))
-    half = fixed_b_critical((lags + 1) / n) * se
-    if kind == "share":
-        effect, lo, hi = 100 * step, 100 * (step - half), 100 * (step + half)
-    else:
-        effect, lo, hi = (100 * float(np.expm1(v)) for v in (step, step - half, step + half))
     n_pre = sum(day < start for day in rows.days)
-    return ItsResult(effect=effect, lo90=lo, hi90=hi, se=100 * se, n_pre=n_pre, binned=binned)
+    return _Fit(float(beta[-1]), float(np.sqrt(covariance[-1, -1])), lags, n, n_pre, binned)
+
+
+def _result(fit: _Fit, kind: Kind, critical: float, placebos: int) -> ItsResult:
+    bounds = (fit.step, fit.step - critical * fit.se, fit.step + critical * fit.se)
+    if kind == "share":
+        effect, lo, hi = (100 * v for v in bounds)
+    else:
+        effect, lo, hi = (100 * float(np.expm1(v)) for v in bounds)
+    return ItsResult(
+        effect=effect,
+        lo90=lo,
+        hi90=hi,
+        se=100 * fit.se,
+        n_pre=fit.n_pre,
+        binned=fit.binned,
+        critical=critical,
+        placebos=placebos,
+    )
+
+
+def its_effect(
+    series: DailySeries,
+    start: date,
+    horizon: int,
+    earlier_starts: Sequence[date],
+    kind: Kind,
+    *,
+    pre_days: int = PRE_DAYS,
+    min_pre_days: int = MIN_PRE_DAYS,
+    lag: int | None = None,
+    level: float = LEVEL,
+) -> ItsResult | NoEstimate:
+    """The patch's effect over `horizon` days from `start` (the patch day included), with the
+    uncalibrated fixed-b interval: the building block of `calibrated_its_effect`. `lag` defaults to
+    Newey and West's rule for the number of rows; only the spec's 90% level is supported."""
+    if level != LEVEL:
+        raise ValueError("the fixed-b critical values are for the 90% level only")
+    fit = _fit(
+        series,
+        start,
+        horizon,
+        earlier_starts,
+        kind,
+        pre_days=pre_days,
+        min_pre_days=min_pre_days,
+        lag=lag,
+    )
+    if isinstance(fit, NoEstimate):
+        return fit
+    return _result(fit, kind, fixed_b_critical((fit.lags + 1) / fit.n), 0)
+
+
+def placebo_starts(
+    start: date, horizon: int, busy_days: Collection[date], *, first_day: date
+) -> list[date]:
+    """The quiet dates in the game's past to rerun the fit at: every 7 days back from `start`, at
+    most a year and not before `first_day`, whose horizon ends before `start`, with no busy day
+    (a patch, sale or discount) from a week before the date to the horizon's end."""
+    oldest = max(first_day, start - timedelta(days=PLACEBO_LOOKBACK_DAYS))
+    dates: list[date] = []
+    candidate = start - timedelta(days=PLACEBO_STEP_DAYS)
+    while candidate >= oldest:
+        end = candidate + timedelta(days=horizon - 1)
+        calm_from = candidate - timedelta(days=PLACEBO_CALM_DAYS)
+        if end < start and not any(calm_from <= day <= end for day in busy_days):
+            dates.append(candidate)
+        candidate -= timedelta(days=PLACEBO_STEP_DAYS)
+    return sorted(dates)
+
+
+def conformal_critical(t_stats: Sequence[float], level: float = LEVEL) -> float | None:
+    """The ceil(level (m + 1))-th smallest |t| of m placebo t statistics: with the real date's t
+    exchangeable with theirs, the interval covers at least `level`. None when the rank exceeds m.
+    """
+    rank = math.ceil(level * (len(t_stats) + 1))
+    if rank > len(t_stats):
+        return None
+    return sorted(abs(t) for t in t_stats)[rank - 1]
+
+
+def calibrated_its_effect(
+    series: DailySeries,
+    start: date,
+    horizon: int,
+    earlier_starts: Sequence[date],
+    kind: Kind,
+    *,
+    busy_days: Collection[date],
+) -> ItsResult | NoEstimate:
+    """The served estimate (ADR-007 amendment 1): the fit's step with a critical value from the
+    same fit at the game's quiet past dates, which read nothing from `start` on."""
+    fit = _fit(series, start, horizon, earlier_starts, kind)
+    if isinstance(fit, NoEstimate):
+        return fit
+    t_stats: list[float] = []
+    for placebo in placebo_starts(start, horizon, busy_days, first_day=series.first_day):
+        other = _fit(series, placebo, horizon, earlier_starts, kind)
+        if isinstance(other, _Fit) and other.se > 0:
+            t_stats.append(other.step / other.se)
+    critical = conformal_critical(t_stats)
+    if critical is None:
+        return NoEstimate(
+            f"too little quiet history to check the interval ({len(t_stats)} of {MIN_PLACEBOS} "
+            "placebo dates)"
+        )
+    return _result(fit, kind, critical, len(t_stats))

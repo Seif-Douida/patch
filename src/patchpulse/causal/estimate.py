@@ -2,7 +2,8 @@
 
 For each bundle and each complete horizon (7 days; 14 when no other patch lands in days 8-14):
 - interrupted time series for the positive share, volume, each aspect's share among negative
-  reviews, and the positive share among established players (10+ hours at review);
+  reviews, and the positive share among established players (10+ hours at review), its interval
+  calibrated on quiet dates in the game's past (ADR-007 amendment 1);
 - synthetic control for the positive share and volume, or a row saying why not (another patch of
   the game in its fit window, fewer than 5 qualifying comparison games, a twin that didn't track).
 
@@ -25,13 +26,13 @@ import numpy as np
 
 from patchpulse.causal.bundles import Bundle, Patch, bundle_patches, window_complete
 from patchpulse.causal.its import (
+    CALIBRATION_DAYS,
     POSITIVE_SHARE,
-    PRE_DAYS,
     VOLUME,
     Kind,
     NoEstimate,
     aspect_outcome,
-    its_effect,
+    calibrated_its_effect,
 )
 from patchpulse.causal.rules import (
     FIT_DAYS,
@@ -44,7 +45,8 @@ from patchpulse.causal.rules import (
 from patchpulse.causal.series import DailySeries
 from patchpulse.causal.synth import conformal_interval, placebo_p_value, synth_effect
 
-EFFECTS_VERSION = "e1"  # bump when the maths or a threshold changes: every row is recomputed
+EFFECTS_VERSION = "e2"  # bump when the maths or a threshold changes: every row is recomputed
+# e2 (22 Oct 2026): interrupted time series' interval calibrated on the game's own past.
 HORIZONS = (7, 14)
 SALE_WINDOW_DAYS = 3
 SPIKE_SDS = 3.0
@@ -227,15 +229,19 @@ def _its_plan(
     kind: Kind,
     earlier: list[date],
     flags: frozenset[str],
+    busy: frozenset[date],
 ) -> _Plan:
     key = EstimateKey(bundle.bundle_id, outcome, sample, horizon, Method.ITS)
-    window = _clipped(
-        series, bundle.start - timedelta(days=PRE_DAYS), bundle.start + timedelta(days=horizon - 1)
+    # The placebo dates' fits read up to CALIBRATION_DAYS before the patch.
+    history = bundle.start - timedelta(days=CALIBRATION_DAYS)
+    window = _clipped(series, history, bundle.start + timedelta(days=horizon - 1))
+    busy_before = sorted(d for d in busy if history <= d < bundle.start)
+    print_ = fingerprint(
+        key, bundle.patch_ids, sorted(earlier), flags, busy_before, *_arrays(window)
     )
-    print_ = fingerprint(key, bundle.patch_ids, sorted(earlier), flags, *_arrays(window))
 
     def run() -> Estimate:
-        result = its_effect(series, bundle.start, horizon, earlier, kind)
+        result = calibrated_its_effect(series, bundle.start, horizon, earlier, kind, busy_days=busy)
         if isinstance(result, NoEstimate):
             return _row(bundle, key, print_, flags, reason=result.reason)
         extra = frozenset({"binned"}) if result.binned else frozenset()
@@ -334,6 +340,12 @@ def _plans(bundle: Bundle, inputs: EffectInputs, game_bundles: Sequence[Bundle])
     series = inputs.series[bundle.appid]
     earlier = [b.start for b in game_bundles if b.start < bundle.start]
     clear = own_fit_window_clear(bundle, game_bundles)
+    # A placebo date must be clear of the game's patches, Steam sales and the game's discounts.
+    busy = (
+        frozenset(p.day for p in inputs.patches.get(bundle.appid, []))
+        | inputs.sale_days
+        | inputs.discounts.get(bundle.appid, frozenset())
+    )
     plans: list[_Plan] = []
     for horizon in HORIZONS:
         if horizon == 14 and not bundle.allow_14:
@@ -351,7 +363,9 @@ def _plans(bundle: Bundle, inputs: EffectInputs, game_bundles: Sequence[Bundle])
         if established is not None:
             outcomes.append((POSITIVE_SHARE, Sample.ESTABLISHED, established, "share"))
         for outcome, sample, data, kind in outcomes:
-            plans.append(_its_plan(bundle, horizon, outcome, sample, data, kind, earlier, flags))
+            plans.append(
+                _its_plan(bundle, horizon, outcome, sample, data, kind, earlier, flags, busy)
+            )
         for outcome, kind in ((POSITIVE_SHARE, "share"), (VOLUME, "volume")):
             plans.append(_synth_plan(bundle, horizon, outcome, kind, inputs, clear, flags))
     return plans

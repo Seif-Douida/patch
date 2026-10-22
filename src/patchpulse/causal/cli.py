@@ -150,9 +150,13 @@ def run_benchmark(paths: BenchmarkPaths, *, per_cell: int, seed: int, dry_run: b
     if not windows:
         log.error("no quiet windows in the snapshot")
         return 1
-    trials = run_trials(windows, series, donors, groups, patch_days, per_cell=per_cell, seed=seed)
+    trials = run_trials(
+        windows, series, donors, groups, patch_days, sale_days=sales, per_cell=per_cell, seed=seed
+    )
     tracked_dates = sorted({d for a in tracked for d in patch_days.get(a, [])})
-    placebos = placebo_in_space(donors, tracked_dates, groups, patch_days, seed=seed)
+    placebos = placebo_in_space(
+        donors, tracked_dates, groups, patch_days, seed=seed, sale_days=sales
+    )
     choice = choose_default(trials)
     state = json.loads((paths.data_dir / "pull_state.json").read_text(encoding="utf-8"))
     meta: dict[str, Any] = {

@@ -13,8 +13,8 @@ from patchpulse.causal.estimate import EffectInputs, GameInfo
 from patchpulse.causal.series import DailySeries
 
 FIRST = date(2026, 1, 5)  # a Monday
-DAYS = 120
-PATCH_DAY = FIRST + timedelta(days=80)
+DAYS = 190
+PATCH_DAY = FIRST + timedelta(days=150)  # a Thursday, with 16 quiet weeks to calibrate on
 LAST_DAY = FIRST + timedelta(days=DAYS - 1)
 TREATED = 1
 DONORS = tuple(range(101, 109))  # eight comparison games, Action

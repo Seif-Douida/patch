@@ -72,7 +72,12 @@ def test_a_full_bundle_gets_every_row() -> None:
     assert len(rows) == 12
     its = find(rows, POSITIVE_SHARE, Method.ITS)
     synth = find(rows, POSITIVE_SHARE, Method.SYNTH)
-    assert its.effect == pytest.approx(-5.0, abs=2.0)
+    # The world's shared drift rises 1.8 points above its own trend in the 14 days after the
+    # patch: interrupted time series can't tell that from the patch (ADR-007), but its calibrated
+    # interval still holds the planted -5; synthetic control sees the drift in the donors.
+    assert its.lo90 is not None
+    assert its.hi90 is not None
+    assert its.lo90 <= -5.0 <= its.hi90
     assert synth.effect == pytest.approx(-5.0, abs=2.5)
     assert synth.lo90 is not None
     assert synth.hi90 is not None
@@ -202,10 +207,24 @@ def test_rows_follow_their_own_window() -> None:
         return replace(series, positives=positives)
 
     inside = {r.key: r.fingerprint for r in estimate_bundle(BUNDLE, world(treated=changed(-5)))}
-    outside = {r.key: r.fingerprint for r in estimate_bundle(BUNDLE, world(treated=changed(-70)))}
+    outside = {r.key: r.fingerprint for r in estimate_bundle(BUNDLE, world(treated=changed(20)))}
     key = EstimateKey(BUNDLE.bundle_id, POSITIVE_SHARE, Sample.ALL, 14, Method.ITS)
     assert inside[key] != rows[key]
-    assert outside[key] == rows[key]  # 70 days before is outside the 56-day pre-period
+    assert outside[key] == rows[key]  # 20 days after is past the 14-day horizon
+
+
+def test_its_fingerprint_covers_the_calibration_history() -> None:
+    series = steady(TREATED, seed=1, shift=-0.05)
+    key = EstimateKey(BUNDLE.bundle_id, POSITIVE_SHARE, Sample.ALL, 14, Method.ITS)
+    base = {r.key: r.fingerprint for r in estimate_bundle(BUNDLE, world(treated=series))}
+    positives = series.positives.copy()
+    positives[(day(-140) - FIRST).days] -= 1
+    early = world(treated=replace(series, positives=positives))
+    sale = world(treated=series, sale_days=frozenset({day(-100)}))
+
+    # Both are long before the 56-day pre-period, inside the placebo dates' history.
+    assert {r.key: r.fingerprint for r in estimate_bundle(BUNDLE, early)}[key] != base[key]
+    assert {r.key: r.fingerprint for r in estimate_bundle(BUNDLE, sale)}[key] != base[key]
 
 
 def test_bundles_to_estimate_skips_unchanged() -> None:
