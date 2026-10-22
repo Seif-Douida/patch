@@ -3,9 +3,13 @@ publish.
 
 1. Start an ops.pipeline_run; its id is the data_version.
 2. Upsert the games from config/games.yaml.
-3. Per game: reviews in the incremental window (the last 3 days to now), then news, classified.
-   A game that fails is recorded and skipped; the others carry on.
-4. Prices for every game, in batches.
+3. Per tracked game: reviews in the incremental window (the last 3 days to now); then news for
+   every game, comparison games too, classified. A game that fails is recorded and skipped; the
+   others carry on.
+4. Prices for every tracked game, in batches. Then the comparison games' review counts per day
+   (Phase 4, design D4): the days after each one's last stored or seeded day through yesterday,
+   at most 4 a night. If Steam stops answering, the stage stops with a `counts_stopped` warning
+   and the night goes on.
 5. Backfill: history older than each game's coverage, newest first, round-robin across games
    until the time budget runs out, so every game's history fills in together. If Steam stops
    answering (a rate limit), backfill stops for the night with a warning; the run still succeeds.
@@ -46,13 +50,16 @@ from sqlalchemy import Connection, Engine
 from patchpulse.config import Settings, SettingsError
 from patchpulse.export.site import AspectModel, build_site_export, read_aspect_model
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
+from patchpulse.ingest.day_counts import fetch_day_counts
 from patchpulse.ingest.games import GAMES_FILE, Game, load_games
 from patchpulse.ingest.http import SteamError, SteamHttp, SteamUnavailableError
 from patchpulse.ingest.load import (
+    last_count_days,
     purge_raw_pages,
     read_coverage,
     record_dq,
     record_page,
+    store_day_counts,
     upsert_classifications,
     upsert_games,
     upsert_news,
@@ -73,6 +80,10 @@ if TYPE_CHECKING:
 log = logging.getLogger("patchpulse.pipeline")
 
 RAW_RETENTION = timedelta(days=30)
+# Days a comparison game's counts may catch up a night: one request a day, so 30 games behind by
+# weeks cost at most 120 requests (~5 minutes at the pipeline's pace) and close the gap in a few
+# nights; a game up to date costs one.
+COUNT_DAYS_A_NIGHT = 4
 # pp-nightly's replicaTimeout (infra/modules/jobs.bicep; a guard test keeps them equal). The
 # budgeted stages (backfill, score, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S, whatever
 # their own budgets, so a killed job never takes the night's export and publish with it. The
@@ -341,6 +352,10 @@ def _run_stages(
         else:
             _store_prices(run, prices, now)
 
+    with run.stage("counts"):
+        donors = [g for g in games if g.donor]
+        run.stages["counts"] = _counts(run, steam, donors, now, clock)
+
     with run.stage("backfill"):
         reached = _backfill(run, settings, steam, tracked, plans, clock)
 
@@ -553,6 +568,57 @@ def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:
         "ok": len(prices.snapshots) - len(prices.failed),
         "failed": sorted(prices.failed),
     }
+
+
+def _counts(
+    run: _Run,
+    steam: SteamHttp,
+    donors: Sequence[Game],
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """Each comparison game's review counts for the days after its last counted day through
+    yesterday, oldest first, at most COUNT_DAYS_A_NIGHT a game; a day is stored as it arrives."""
+    yesterday = now.date() - timedelta(days=1)
+    with run.engine.connect() as connection:
+        last = last_count_days(connection)
+    stats: dict[str, Any] = {"requests": 0, "days": 0, "behind": 0, "stopped": None}
+    for game in donors:
+        first = last[game.appid] + timedelta(days=1) if game.appid in last else game.backfill_start
+        due = [first + timedelta(days=k) for k in range((yesterday - first).days + 1)]
+        stored = 0
+        tonight = [] if stats["stopped"] or game.appid in run.errors else due[:COUNT_DAYS_A_NIGHT]
+        for day in tonight:
+            if clock() >= run.night_end:
+                stats["stopped"] = "night deadline"
+                break
+            stats["requests"] += 1
+            try:
+                counts = fetch_day_counts(steam, game.appid, day)
+            except SteamUnavailableError as error:
+                # Steam is refusing us (a rate limit or an outage): no more counts tonight; every
+                # game resumes from its last stored day next night.
+                stats["stopped"] = f"{type(error).__name__}: {error}"
+                log.warning("counts stopped: %s", error)
+                with run.engine.begin() as connection:
+                    record_dq(
+                        connection,
+                        run_id=run.run_id,
+                        check="counts_stopped",
+                        appid=game.appid,
+                        severity="warn",
+                        detail=str(error),
+                    )
+                break
+            except SteamError as error:
+                run.fail_game(game.appid, error)
+                break
+            with run.engine.begin() as connection:
+                store_day_counts(connection, counts, run_id=run.run_id, fetched_at=now)
+            stored += 1
+        stats["days"] += stored
+        stats["behind"] += len(due) > stored
+    return stats
 
 
 def _window_done(seen: int, expected: int | None) -> bool:

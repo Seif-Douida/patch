@@ -1,8 +1,8 @@
 """The least-privilege database user the nightly job runs as (spec §12: `pp_writer`).
 
 `pp-migrate` connects as the server admin, applies migrations and calls `provision_writer`; every
-other job connects as `pp_writer`. The writer can read and write the raw and ops tables but not
-change them, and can create and replace dbt's tables and views in stg, core and mart. It has no
+other job connects as `pp_writer`. The writer can read and write the raw, ops and app tables but
+not change them, and can create and replace dbt's tables and views in stg, core and mart. It has no
 server-level rights and cannot create schemas.
 
 The user is contained in the database (it logs in with the database name, no server login), which
@@ -15,7 +15,7 @@ from __future__ import annotations
 from sqlalchemy import Connection, text
 
 WRITER_USER = "pp_writer"
-_LOADED_BY_PIPELINE = ("raw", "ops")
+_LOADED_BY_PIPELINE = ("raw", "ops", "app")
 _BUILT_BY_DBT = ("stg", "core", "mart")
 
 
@@ -32,7 +32,10 @@ def provision_writer(connection: Connection, *, password: str) -> None:
     literal = password.replace("'", "''")
     connection.exec_driver_sql(f"{verb} USER [{WRITER_USER}] WITH PASSWORD = N'{literal}'")
 
-    for schema in _LOADED_BY_PIPELINE:
+    # A schema a later migration adds (app, 0005) gets its grant on the next provisioning:
+    # pp-migrate provisions after every upgrade.
+    present = {row[0] for row in connection.execute(text("SELECT name FROM sys.schemas"))}
+    for schema in (s for s in _LOADED_BY_PIPELINE if s in present):
         connection.exec_driver_sql(
             f"GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA::[{schema}] TO [{WRITER_USER}]"
         )

@@ -11,6 +11,10 @@ sources:
       - name: steam_news
       - name: news_classification
       - name: steam_price
+      - name: steam_review_daily
+        description: >-
+          Comparison games' positive and negative reviews per UTC day (migration 0005), stored by
+          the nightly counts stage for the days after the seed donor_daily_counts.
       - name: review_aspect_score
         description: >-
           Aspect scores (migration 0002): one row per review version and model version, with each

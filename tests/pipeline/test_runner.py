@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -192,16 +192,52 @@ def test_nightly_end_to_end_with_mocked_steam(env: Env) -> None:
 
 
 DONOR = 1245620
+DONOR_2 = 2050650
+YESTERDAY = NOW.date() - timedelta(days=1)
+
+
+def add_donor(env: Env, appid: int = DONOR, name: str = "Elden Ring") -> None:
+    with env.games_file.open("a", encoding="utf-8") as games:
+        games.write(
+            f"  - {{appid: {appid}, name: {name}, genres: [Action, RPG], role: donor, "
+            f"backfill_start: {BACKFILL_START}}}\n"
+        )
+
+
+def ago(days: int) -> date:
+    return YESTERDAY - timedelta(days=days)
+
+
+def noon(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, 12, tzinfo=UTC)
+
+
+def store_count(env: Env, appid: int, day: date) -> None:
+    with env.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO raw.steam_review_daily "
+                "(appid, [day], positive, negative, fetched_run_id, fetched_at) "
+                "VALUES (:appid, :day, 0, 0, 0, '2026-01-01')"
+            ),
+            {"appid": appid, "day": day},
+        )
+
+
+def count_days(env: Env, appid: int) -> list[tuple[date, int, int]]:
+    return [
+        (r.day, r.positive, r.negative)
+        for r in env.rows(
+            "SELECT [day], positive, negative FROM raw.steam_review_daily "
+            f"WHERE appid = {appid} ORDER BY [day]"
+        )
+    ]
 
 
 def test_a_donor_never_reaches_reviews_backfill_prices_or_the_site(env: Env) -> None:
     # Phase 4: a comparison game gets its news (patch dates) and nothing else of the review
     # pipeline; review text, prices and the site are for tracked games only.
-    with env.games_file.open("a", encoding="utf-8") as games:
-        games.write(
-            f"  - {{appid: {DONOR}, name: Elden Ring, genres: [Action, RPG], role: donor, "
-            f"backfill_start: {BACKFILL_START}}}\n"
-        )
+    add_donor(env)
     env.steam.add_review(DONOR, 900, NOW - timedelta(days=1))
     env.steam.add_review(DONOR, 901, NOW - timedelta(days=20))
     env.steam.add_news(DONOR, "950", "Patch 1.16", NOW - timedelta(days=3))
@@ -216,7 +252,9 @@ def test_a_donor_never_reaches_reviews_backfill_prices_or_the_site(env: Env) -> 
 
     assert result.status == "succeeded"
     urls = [str(request.url) for request in env.steam.requests]
-    assert not [u for u in urls if f"/appreviews/{DONOR}" in u]
+    # Its reviews are only ever counted (num_per_page=0: no text), never fetched.
+    assert [u for u in urls if f"/appreviews/{DONOR}" in u]
+    assert not [u for u in urls if f"/appreviews/{DONOR}" in u and "num_per_page=0" not in u]
     assert not [u for u in urls if "appids=" in u and str(DONOR) in u]
     assert [u for u in urls if "GetNewsForApp" in u and f"appid={DONOR}" in u]
     ((files, _),) = env.publisher.calls
@@ -655,3 +693,99 @@ def test_index_stage_end_to_end_on_both_containers(
 
     assert (second.stages["index"]["upserted"], second.stages["index"]["mismatch"]) == (0, 0)
     assert env.publisher.alerts == []
+
+
+def test_counts_stage_catches_up_and_stops_cleanly(env: Env) -> None:
+    # Review focus 5: Steam stops answering mid-stage; the night still publishes, and the next
+    # night fills the gap without duplicates.
+    add_donor(env)
+    store_count(env, DONOR, ago(6))
+    env.steam.add_review(DONOR, 900, noon(ago(5)))
+    env.steam.add_review(DONOR, 901, noon(ago(5)), voted_up=False)
+    env.steam.add_review(DONOR, 902, noon(ago(0)))
+    env.steam.rate_limit_after = 4 + 2  # the reviews stage's 4 requests, then 2 days of counts
+
+    first = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert first.status == "succeeded"
+    assert len(env.publisher.calls) == 1
+    counts = first.stages["counts"]
+    assert (counts["requests"], counts["days"], counts["behind"]) == (3, 2, 1)
+    assert counts["stopped"].startswith("SteamUnavailableError")
+    checks = {(r.check_name, r.severity) for r in env.rows("SELECT * FROM ops.data_quality_result")}
+    assert ("counts_stopped", "warn") in checks
+
+    env.steam.rate_limit_after = None
+    second = env.run(dbt=ok_dbt, export=stub_export)
+    third = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert second.stages["counts"] == {"requests": 4, "days": 4, "behind": 0, "stopped": None}
+    assert third.stages["counts"] == {"requests": 0, "days": 0, "behind": 0, "stopped": None}
+    assert count_days(env, DONOR) == [
+        (ago(6), 0, 0),
+        (ago(5), 1, 1),
+        (ago(4), 0, 0),
+        (ago(3), 0, 0),
+        (ago(2), 0, 0),
+        (ago(1), 0, 0),
+        (ago(0), 1, 0),
+    ]
+
+
+def test_counts_start_after_the_seed_or_at_the_backfill_start(env: Env) -> None:
+    add_donor(env)
+    add_donor(env, DONOR_2, "Monster Hunter Wilds")
+    with env.engine.begin() as connection:  # what `dbt seed` loads into core
+        connection.execute(
+            text(
+                "CREATE TABLE core.donor_daily_counts "
+                "(appid int, [day] date, positive int, negative int)"
+            )
+        )
+        connection.execute(
+            text("INSERT INTO core.donor_daily_counts VALUES (:appid, :day, 5, 1)"),
+            {"appid": DONOR, "day": ago(2)},
+        )
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert [d for d, _, _ in count_days(env, DONOR)] == [ago(1), ago(0)]
+    # No seed and nothing stored: from its backfill start, 4 days a night (20 to fetch).
+    assert [d for d, _, _ in count_days(env, DONOR_2)] == [
+        BACKFILL_START + timedelta(days=k) for k in range(4)
+    ]
+    assert result.stages["counts"]["behind"] == 1
+
+
+def test_a_broken_count_fails_that_donor_only(env: Env) -> None:
+    add_donor(env)
+    add_donor(env, DONOR_2, "Monster Hunter Wilds")
+    for appid in (DONOR, DONOR_2):
+        store_count(env, appid, ago(2))
+    env.steam.day_counts_broken[DONOR] = "unsuccessful"
+
+    with pytest.raises(PipelineError, match=str(DONOR)):
+        env.run(dbt=ok_dbt, export=stub_export)
+
+    assert [d for d, _, _ in count_days(env, DONOR)] == [ago(2)]
+    assert [d for d, _, _ in count_days(env, DONOR_2)] == [ago(2), ago(1), ago(0)]
+    assert len(env.publisher.calls) == 1  # the night still ships
+
+
+def test_counts_stage_stops_at_the_night_deadline(env: Env) -> None:
+    add_donor(env)
+    store_count(env, DONOR, ago(3))
+
+    def clock() -> float:  # the night's time is used up once the prices (the stage before) are in
+        priced = any("appdetails" in str(request.url) for request in env.steam.requests)
+        return NIGHT_END + 1 if priced else 0.0
+
+    result = env.run(dbt=ok_dbt, export=stub_export, clock=clock)
+
+    assert result.status == "succeeded"
+    assert result.stages["counts"] == {
+        "requests": 0,
+        "days": 0,
+        "behind": 1,
+        "stopped": "night deadline",
+    }

@@ -80,6 +80,32 @@ models:
       - name: n_positive
         data_tests: [not_null]
 
+  - name: daily_comparison_counts
+    description: >-
+      One row per comparison game (role donor) and UTC day: positive and negative reviews from
+      Steam's per-day counts, the seed's history and the nightly counts stage's days (Phase 4,
+      design D4). Synthetic control's comparison games read these.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [game_key, date_key]
+    columns:
+      - name: game_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_key
+      - name: date_key
+        data_tests: [not_null]
+      - name: n_positive
+        data_tests: [not_null]
+      - name: n_negative
+        data_tests: [not_null]
+      - name: n_reviews
+        data_tests: [not_null]
+
   - name: patch_window
     description: Descriptive before/after aggregates per treatment candidate (not causal).
     columns:
