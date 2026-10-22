@@ -23,6 +23,7 @@ from patchpulse.db.provision import WRITER_USER, provision_writer
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.models.artifact import Scorer, load_scorer
 from patchpulse.models.s0 import S0Model, save_s0, train_s0
+from patchpulse.pipeline import scoring
 from patchpulse.pipeline.scoring import MODEL_NAME, score_reviews
 
 pytestmark = pytest.mark.integration
@@ -227,6 +228,31 @@ def test_returning_to_a_model_makes_its_scores_the_latest_again(
     assert len(scored(migrated_engine, "s0-20261014T000000Z")) == 3  # B's scores stay in raw
     again = score_reviews(migrated_engine, champion, run_id=10, budget_s=60, clock=Ticks(0.0))
     assert (again.scored, again.restamped, again.remaining) == (0, 0, 0)
+
+
+def test_a_restamp_cut_by_the_budget_finishes_the_next_night(
+    migrated_engine: Engine,
+    champion: Scorer,
+    s0_model: S0Model,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Phase 2 final review: the check compared other models' run ids with this model's newest,
+    # which the first re-stamp statement raises, so a re-stamp the budget cut short never resumed
+    # and the later model's labels stayed under the restored champion's name.
+    monkeypatch.setattr(scoring, "RESTAMP_BATCH", 1)
+    add_reviews(migrated_engine, [review(rid, NOW - timedelta(days=rid)) for rid in range(1, 4)])
+    score_reviews(migrated_engine, champion, run_id=7, budget_s=60, clock=Ticks(0.0))
+    successor = scorer(s0_model, tmp_path / "s0-b", "20261014T000000Z")
+    score_reviews(migrated_engine, successor, run_id=8, budget_s=60, clock=Ticks(0.0))
+
+    cut = score_reviews(
+        migrated_engine, champion, run_id=9, budget_s=60, clock=Ticks(*EXPIRES_AFTER_ONE_BATCH)
+    )
+    finished = score_reviews(migrated_engine, champion, run_id=10, budget_s=60, clock=Ticks(0.0))
+
+    assert (cut.restamped, finished.restamped, finished.remaining) == (1, 2, 0)
+    assert set(latest_models(migrated_engine).values()) == {"s0-20261013T000000Z"}
 
 
 def test_pp_writer_can_write_scores(

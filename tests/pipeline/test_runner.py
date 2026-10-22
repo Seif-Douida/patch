@@ -29,7 +29,12 @@ from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
 from patchpulse.pipeline.indexing import IndexOutcome, run_index
-from patchpulse.pipeline.runner import PipelineError, run_nightly
+from patchpulse.pipeline.runner import (
+    NIGHT_RESERVE_S,
+    NIGHT_SECONDS,
+    PipelineError,
+    run_nightly,
+)
 from patchpulse.retrieval.embedders import CANDIDATES
 from patchpulse.retrieval.pin import pin_for, write_pin
 from patchpulse.retrieval.qdrant import ensure_collection
@@ -304,6 +309,57 @@ def test_backfill_respects_the_time_budget(env: Env) -> None:
     assert loaded == 6  # the last 3 days only: 5 for A, 1 for B
 
 
+class LateClock:
+    """The run starts at 0; every later reading is `later` seconds into the night."""
+
+    def __init__(self, later: float) -> None:
+        self.later = later
+        self.readings = 0
+
+    def __call__(self) -> float:
+        self.readings += 1
+        return 0.0 if self.readings == 1 else self.later
+
+
+NIGHT_END = NIGHT_SECONDS - NIGHT_RESERVE_S
+
+
+def test_backfill_stops_at_the_night_deadline(env: Env) -> None:
+    # 30 minutes of budget, but the night has used its time by the backfill (the clock jumps once
+    # the prices, the stage before it, are in): export and publish keep theirs.
+    def clock() -> float:
+        priced = any("appdetails" in str(request.url) for request in env.steam.requests)
+        return NIGHT_END + 1 if priced else 0.0
+
+    result = env.run(dbt=ok_dbt, export=stub_export, clock=clock)
+
+    assert result.status == "succeeded"
+    assert result.stages["backfill"]["pages"] == 0
+    assert env.rows("SELECT COUNT(*) FROM raw.steam_review")[0][0] == 6  # the last 3 days only
+
+
+def test_an_early_empty_page_does_not_end_a_games_history(env: Env) -> None:
+    # 20 Oct 2026: Steam answered empty pages long before the counts it reported for three games'
+    # windows (282,709 reviews for Helldivers 2), and the backfill took them as the end of history.
+    env.steam.page_size = 1
+    env.steam.cut_short[GAME_A] = 1  # one review of the window's three, then empty pages
+    floor = start_of_day(BACKFILL_START).replace(tzinfo=None)
+
+    first = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert GAME_A not in first.stages["backfill"]["complete"]
+    (coverage,) = env.rows(f"SELECT covered_from FROM ops.ingest_state WHERE appid = {GAME_A}")
+    assert coverage.covered_from > floor  # resumes from its oldest review, not marked complete
+    env.steam.cut_short.clear()
+
+    second = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert GAME_A in second.stages["backfill"]["complete"]
+    (coverage,) = env.rows(f"SELECT covered_from FROM ops.ingest_state WHERE appid = {GAME_A}")
+    assert coverage.covered_from == floor
+    assert env.rows("SELECT COUNT(*) FROM raw.steam_review")[0][0] == 10
+
+
 def test_a_second_night_resumes_the_backfill_where_the_first_stopped(env: Env) -> None:
     no_budget = env.settings.model_copy(update={"backfill_budget_minutes": 0})
     env.run(settings=no_budget, dbt=ok_dbt, export=stub_export)
@@ -411,6 +467,7 @@ class FakeIndex:
 
     outcomes: list[IndexOutcome | Exception]
     calls: list[tuple[int, int]] = field(default_factory=list)
+    deadlines: list[float] = field(default_factory=list)
 
     def __call__(
         self,
@@ -420,8 +477,10 @@ class FakeIndex:
         run_id: int,
         health_appid: int,
         clock: Callable[[], float],
+        deadline: float,
     ) -> IndexOutcome:
         self.calls.append((run_id, health_appid))
+        self.deadlines.append(deadline)
         next_outcome = self.outcomes.pop(0)
         if isinstance(next_outcome, Exception):
             raise next_outcome
@@ -442,6 +501,27 @@ def test_index_stage_runs_between_dbt_and_export(env: Env, tmp_path: Path) -> No
     record = result.stages["index"]
     assert (record["upserted"], record["updated"], record["deleted"]) == (12, 3, 1)
     assert record["mismatch"] == 0
+
+
+@pytest.mark.parametrize(
+    ("later", "deadline"),
+    [(0.0, 5 * 60), (NIGHT_END - 60, NIGHT_END)],
+    ids=["early: its own 5 minutes", "late: the night's end"],
+)
+def test_index_stage_gets_its_budget_within_the_night(
+    env: Env, tmp_path: Path, later: float, deadline: float
+) -> None:
+    index = FakeIndex([outcome()])
+
+    env.run(
+        settings=with_qdrant(env.settings, tmp_path),
+        dbt=ok_dbt,
+        export=stub_export,
+        index=index,
+        clock=LateClock(later),
+    )
+
+    assert index.deadlines == [deadline]
 
 
 @pytest.mark.parametrize(
