@@ -50,6 +50,36 @@ models:
       - name: share_of_positive
         data_tests: [between_0_and_1]
 
+  - name: daily_playtime_sentiment
+    description: >-
+      One row per game, day and playtime bucket at review: reviews and positive reviews (Phase 4's
+      decompose_change). Its buckets add up to daily_game_sentiment.n_reviews
+      (tests/playtime_buckets_sum_to_daily_reviews.sql).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [game_key, date_key, playtime_bucket]
+    columns:
+      - name: game_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_key
+      - name: date_key
+        data_tests: [not_null]
+      - name: playtime_bucket
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [lt_2h, 2h_10h, 10h_50h, 50h_200h, 200h_plus, unknown]
+      - name: n_reviews
+        data_tests: [not_null]
+      - name: n_positive
+        data_tests: [not_null]
+
   - name: patch_window
     description: Descriptive before/after aggregates per treatment candidate (not causal).
     columns:

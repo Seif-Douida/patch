@@ -1,0 +1,21 @@
+version: 2
+
+seeds:
+  - name: donor_daily_counts
+    description: >-
+      Phase 4: each comparison game's positive and negative reviews per UTC day, from Steam's
+      per-day review summary (no text), fetched once by .github/workflows/donor-history.yml and
+      checked by `patchpulse-pipeline donor-history merge`. The nightly counts stage adds later days.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [appid, day]
+    columns:
+      - name: appid
+        data_tests: [not_null]
+      - name: day
+        data_tests: [not_null]
+      - name: positive
+        data_tests: [not_null]
+      - name: negative
+        data_tests: [not_null]

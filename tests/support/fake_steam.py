@@ -25,6 +25,10 @@ class FakeSteam:
         self.review_requests = 0
         self.prices_down = False
         self.requests: list[httpx2.Request] = []
+        # Phase 4: appdetails without filters (name, genres, release_date) per game, and per-day
+        # count requests to break: appid -> "unsuccessful" or "no summary".
+        self.details: dict[int, dict[str, Any]] = {}
+        self.day_counts_broken: dict[int, str] = {}
 
     def add_review(self, appid: int, rid: int, created: datetime, *, voted_up: bool = True) -> None:
         stamp = int(created.timestamp())
@@ -86,6 +90,8 @@ class FakeSteam:
         if "GetNewsForApp" in path:
             appid = int(params["appid"])
             return httpx2.Response(200, json={"appnews": {"newsitems": self.news.get(appid, [])}})
+        if "appdetails" in path and "filters" not in params:
+            return self._details(params["appids"])
         if self.prices_down:
             return httpx2.Response(503)
         body: dict[str, Any] = {}
@@ -109,6 +115,8 @@ class FakeSteam:
             key=lambda r: r["timestamp_created"],
             reverse=True,
         )
+        if params.get("num_per_page") == "0":
+            return self._summary(appid, matching)
         cursor = params["cursor"]
         offset = 0 if cursor == "*" else int(cursor[1:])
         page = matching[offset : offset + PAGE]
@@ -117,3 +125,29 @@ class FakeSteam:
             200,
             json={"success": 1, "query_summary": {}, "reviews": page, "cursor": next_cursor},
         )
+
+    def _summary(self, appid: int, matching: list[dict[str, Any]]) -> httpx2.Response:
+        """Like Steam with num_per_page=0: the window's counts and no reviews (Phase 4)."""
+        broken = self.day_counts_broken.get(appid)
+        if broken == "unsuccessful":
+            return httpx2.Response(200, json={"success": 2, "query_summary": {}, "reviews": []})
+        positive = sum(1 for r in matching if r["voted_up"])
+        summary = (
+            {}
+            if broken == "no summary"
+            else {
+                "num_reviews": 0,
+                "review_score": 0,
+                "total_positive": positive,
+                "total_negative": len(matching) - positive,
+                "total_reviews": len(matching),
+            }
+        )
+        return httpx2.Response(
+            200, json={"success": 1, "query_summary": summary, "reviews": [], "cursor": "*"}
+        )
+
+    def _details(self, appid: str) -> httpx2.Response:
+        detail = self.details.get(int(appid))
+        entry = {"success": True, "data": detail} if detail else {"success": False}
+        return httpx2.Response(200, json={appid: entry})

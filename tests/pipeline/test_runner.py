@@ -186,6 +186,41 @@ def test_nightly_end_to_end_with_mocked_steam(env: Env) -> None:
     assert stages["reviews"]["new_versions"] + stages["backfill"]["new_versions"] == 10
 
 
+DONOR = 1245620
+
+
+def test_a_donor_never_reaches_reviews_backfill_prices_or_the_site(env: Env) -> None:
+    # Phase 4: a comparison game gets its news (patch dates) and nothing else of the review
+    # pipeline; review text, prices and the site are for tracked games only.
+    with env.games_file.open("a", encoding="utf-8") as games:
+        games.write(
+            f"  - {{appid: {DONOR}, name: Elden Ring, genres: [Action, RPG], role: donor, "
+            f"backfill_start: {BACKFILL_START}}}\n"
+        )
+    env.steam.add_review(DONOR, 900, NOW - timedelta(days=1))
+    env.steam.add_review(DONOR, 901, NOW - timedelta(days=20))
+    env.steam.add_news(DONOR, "950", "Patch 1.16", NOW - timedelta(days=3))
+    env.steam.prices[DONOR] = {
+        "currency": "USD",
+        "initial": 5999,
+        "final": 5999,
+        "discount_percent": 0,
+    }
+
+    result = env.run()
+
+    assert result.status == "succeeded"
+    urls = [str(request.url) for request in env.steam.requests]
+    assert not [u for u in urls if f"/appreviews/{DONOR}" in u]
+    assert not [u for u in urls if "appids=" in u and str(DONOR) in u]
+    assert [u for u in urls if "GetNewsForApp" in u and f"appid={DONOR}" in u]
+    ((files, _),) = env.publisher.calls
+    assert f"games/{DONOR}.json" not in files
+    assert DONOR not in {g["appid"] for g in json.loads(files["index.json"])["games"]}
+    assert DONOR not in [r.appid for r in env.rows("SELECT appid FROM ops.ingest_state")]
+    assert [r.appid for r in env.rows("SELECT appid FROM raw.steam_review")].count(DONOR) == 0
+
+
 def test_watermark_moves_only_after_a_successful_run(env: Env) -> None:
     with pytest.raises(PipelineError, match="dbt"):
         env.run(dbt=failing_dbt, export=stub_export)

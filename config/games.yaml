@@ -8,7 +8,7 @@ games:
   - appid: 553850
     name: Helldivers 2
     genres: [Action]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01
     release_date: 2024-02-08
     developer: Arrowhead Game Studios
@@ -17,7 +17,7 @@ games:
   - appid: 949230
     name: "Cities: Skylines II"
     genres: [Simulation]
-    role: tracked
+    role: both
     backfill_start: 2023-10-24  # since launch: the launch-performance incident is in scope
     release_date: 2023-10-24
     developer: Iceflake Studios
@@ -26,7 +26,7 @@ games:
   - appid: 1091500
     name: Cyberpunk 2077
     genres: [RPG]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01
     release_date: 2020-12-09
     developer: CD PROJEKT RED
@@ -35,7 +35,7 @@ games:
   - appid: 2246340
     name: Monster Hunter Wilds
     genres: [Action, Adventure, RPG]
-    role: tracked
+    role: both
     backfill_start: 2025-02-27
     release_date: 2025-02-27
     developer: CAPCOM Co., Ltd.
@@ -44,7 +44,7 @@ games:
   - appid: 1903340
     name: "Clair Obscur: Expedition 33"
     genres: [Action, RPG]
-    role: tracked
+    role: both
     backfill_start: 2025-04-24
     release_date: 2025-04-24
     developer: Sandfall Interactive
@@ -53,7 +53,7 @@ games:
   - appid: 1086940
     name: Baldur's Gate 3
     genres: [Adventure, RPG, Strategy]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01
     release_date: 2023-08-03
     developer: Larian Studios
@@ -62,7 +62,7 @@ games:
   - appid: 275850
     name: No Man's Sky
     genres: [Action, Adventure]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01
     release_date: 2016-08-12
     developer: Hello Games
@@ -71,7 +71,7 @@ games:
   - appid: 548430
     name: Deep Rock Galactic
     genres: [Action]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01
     release_date: 2020-05-13
     developer: Ghost Ship Games
@@ -80,7 +80,7 @@ games:
   - appid: 1145350
     name: Hades II
     genres: [Action, Indie, RPG]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01  # Steam lists the 1.0 date; early access ran before it
     release_date: 2025-09-25
     developer: Supergiant Games
@@ -89,7 +89,7 @@ games:
   - appid: 1363080
     name: Manor Lords
     genres: [Simulation, Strategy]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01
     release_date: 2024-04-26
     developer: Slavic Magic
@@ -98,7 +98,7 @@ games:
   - appid: 292030
     name: "The Witcher 3: Wild Hunt"
     genres: [RPG]
-    role: tracked
+    role: both
     backfill_start: 2024-10-01  # a long stable pre-period before "Remastered" (2026-09-29)
     release_date: 2015-05-18
     developer: CD PROJEKT RED
@@ -107,8 +107,283 @@ games:
   - appid: 3751260
     name: The Blood of Dawnwalker
     genres: [Action, Adventure, RPG]
-    role: tracked
+    role: both
     backfill_start: 2026-09-02  # since launch
     release_date: 2026-09-02
     developer: Rebel Wolves
     publisher: Bandai Namco Entertainment
+
+  # Phase 4 comparison games (role donor, design D3; Seif approved 2026-10-21): daily review
+  # counts only, never reviews. Checked with `patchpulse-pipeline donor-candidates` on
+  # 2026-10-21: at least 20 reviews a day over 90 days, released before 2024-09-03, news reaching
+  # 2024-10-01. Action/RPG with at most 2 patches since Oct 2024; every Simulation game that passed.
+
+  - appid: 1174180
+    name: "Red Dead Redemption 2"
+    genres: [Action, Adventure]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2019-12-05
+    developer: "Rockstar Games"
+    publisher: "Rockstar Games"
+
+  - appid: 2050650
+    name: "Resident Evil 4"
+    genres: [Action, Adventure]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2023-03-23
+    developer: "CAPCOM Co., Ltd."
+    publisher: "CAPCOM Co., Ltd."
+
+  - appid: 1687950
+    name: "Persona 5 Royal"
+    genres: [RPG]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2022-10-20
+    developer: "ATLUS"
+    publisher: "SEGA"
+
+  - appid: 582010
+    name: "Monster Hunter: World"
+    genres: [Action]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2018-08-08
+    developer: "CAPCOM Co., Ltd."
+    publisher: "CAPCOM Co., Ltd."
+
+  - appid: 814380
+    name: "Sekiro™: Shadows Die Twice - GOTY Edition"
+    genres: [Action, Adventure]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2019-03-21
+    developer: "FromSoftware, Inc."
+    publisher: "Activision (Excluding Japan and Asia)"
+
+  - appid: 374320
+    name: "DARK SOULS™ III"
+    genres: [Action]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2016-04-11
+    developer: "FromSoftware, Inc."
+    publisher: "FromSoftware, Inc."
+
+  - appid: 1196590
+    name: "Resident Evil Village"
+    genres: [Action]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2021-05-06
+    developer: "CAPCOM Co., Ltd."
+    publisher: "CAPCOM Co., Ltd."
+
+  - appid: 1593500
+    name: "God of War"
+    genres: [Action, Adventure, RPG]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2022-01-14
+    developer: "Santa Monica Studio"
+    publisher: "PlayStation Publishing LLC"
+
+  - appid: 552520
+    name: "Far Cry® 5"
+    genres: [Action, Adventure]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2018-03-26
+    developer: "Ubisoft Montreal"
+    publisher: "Ubisoft"
+
+  - appid: 379720
+    name: "DOOM"
+    genres: [Action]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2016-05-12
+    developer: "id Software"
+    publisher: "Bethesda Softworks"
+
+  - appid: 435150
+    name: "Divinity: Original Sin 2 - Definitive Edition"
+    genres: [Adventure, RPG, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2017-09-14
+    developer: "Larian Studios"
+    publisher: "Larian Studios"
+
+  - appid: 782330
+    name: "DOOM Eternal"
+    genres: [Action]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2020-03-19
+    developer: "id Software"
+    publisher: "Bethesda Softworks"
+
+  - appid: 489830
+    name: "The Elder Scrolls V: Skyrim Special Edition"
+    genres: [RPG]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2016-10-27
+    developer: "Bethesda Game Studios"
+    publisher: "Bethesda Softworks"
+
+  - appid: 1817070
+    name: "Marvel’s Spider-Man Remastered"
+    genres: [Action, Adventure, Casual]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2022-08-12
+    developer: "Insomniac Games"
+    publisher: "PlayStation Publishing LLC"
+
+  - appid: 1426210
+    name: "It Takes Two"
+    genres: [Action, Adventure]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2021-03-25
+    developer: "Hazelight Studios"
+    publisher: "Electronic Arts"
+
+  - appid: 2054970
+    name: "Dragon's Dogma 2"
+    genres: [Action, RPG]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2024-03-21
+    developer: "CAPCOM Co., Ltd."
+    publisher: "CAPCOM Co., Ltd."
+
+  - appid: 1145360
+    name: "Hades"
+    genres: [Action, Indie, RPG]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2020-09-17
+    developer: "Supergiant Games"
+    publisher: "Supergiant Games"
+
+  - appid: 601150
+    name: "Devil May Cry 5"
+    genres: [Action]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2019-03-07
+    developer: "CAPCOM Co., Ltd."
+    publisher: "CAPCOM Co., Ltd."
+
+  - appid: 588650
+    name: "Dead Cells"
+    genres: [Action, Adventure, Indie]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2018-08-06
+    developer: "Motion Twin"
+    publisher: "Motion Twin"
+
+  - appid: 367520
+    name: "Hollow Knight"
+    genres: [Action, Adventure, Indie]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2017-02-24
+    developer: "Team Cherry"
+    publisher: "Team Cherry"
+
+  - appid: 2215430
+    name: "Ghost of Tsushima DIRECTOR'S CUT"
+    genres: [Action, Adventure]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2024-05-16
+    developer: "Sucker Punch Productions"
+    publisher: "PlayStation Publishing LLC"
+
+  - appid: 632470
+    name: "Disco Elysium - The Final Cut"
+    genres: [RPG]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2019-10-15
+    developer: "ZA/UM"
+    publisher: "ZA/UM"
+
+  - appid: 255710
+    name: "Cities: Skylines"
+    genres: [Simulation, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2015-03-10
+    developer: "Colossal Order"
+    publisher: "Paradox Interactive"
+
+  - appid: 294100
+    name: "RimWorld"
+    genres: [Indie, Simulation, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2018-10-17
+    developer: "Ludeon Studios"
+    publisher: "Ludeon Studios"
+
+  - appid: 427520
+    name: "Factorio"
+    genres: [Casual, Indie, Simulation, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2020-08-14
+    developer: "Wube Software LTD."
+    publisher: "Wube Software LTD."
+
+  - appid: 233450
+    name: "Prison Architect"
+    genres: [Indie, Simulation, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2015-10-06
+    developer: "Introversion Software"
+    publisher: "Paradox Interactive"
+
+  - appid: 220200
+    name: "Kerbal Space Program"
+    genres: [Indie, Simulation]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2015-04-27
+    developer: "Squad"
+    publisher: "Private Division"
+
+  - appid: 613100
+    name: "House Flipper"
+    genres: [Action, Adventure, Casual, Indie, Massively Multiplayer, Simulation, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2018-05-17
+    developer: "Empyrean"
+    publisher: "Frozen District"
+
+  - appid: 323190
+    name: "Frostpunk"
+    genres: [Simulation, Strategy]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2018-04-24
+    developer: "11 bit studios"
+    publisher: "11 bit studios"
+
+  - appid: 457140
+    name: "Oxygen Not Included"
+    genres: [Indie, Simulation]
+    role: donor
+    backfill_start: 2024-10-01
+    release_date: 2019-07-30
+    developer: "Klei Entertainment"
+    publisher: "Klei Entertainment"

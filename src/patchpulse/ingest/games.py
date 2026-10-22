@@ -35,6 +35,16 @@ class Game(BaseModel):
     developer: str | None = None
     publisher: str | None = None
 
+    @property
+    def tracked(self) -> bool:
+        """A game the site shows: its reviews are ingested, scored and indexed."""
+        return self.role in (Role.TRACKED, Role.BOTH)
+
+    @property
+    def donor(self) -> bool:
+        """A comparison game only (Phase 4): its news and daily counts, never its reviews."""
+        return self.role is Role.DONOR
+
 
 def load_games(path: Path, *, today: date | None = None) -> list[Game]:
     today = today or datetime.now(UTC).date()

@@ -1,0 +1,90 @@
+# Phase 4 (design D4): the comparison games' daily review counts, fetched once. Each game runs on
+# its own GitHub runner, so Steam's per-address limit applies per game (the 21 Oct 2026 spike saw
+# no refusal with three in parallel); each uploads one CSV. The seed job checks them all with
+# `donor-history merge` and uploads donor_daily_counts.csv, which Seif commits as the dbt seed.
+# Steam only: counts, no review text, no secrets. Run by hand, or by pushing to donor-history.
+name: donor-history
+
+on:
+  workflow_dispatch:
+    inputs:
+      last_day:
+        description: "Last day to fetch (UTC, YYYY-MM-DD); empty for yesterday"
+        required: false
+        default: ""
+  push:
+    branches: [donor-history]
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      last_day: ${{ steps.plan.outputs.last_day }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - id: plan
+        env:
+          LAST_DAY: ${{ inputs.last_day }}
+        run: >-
+          uv run --no-default-groups --group pipeline --group causal
+          patchpulse-pipeline donor-history plan --last "$LAST_DAY" >> "$GITHUB_OUTPUT"
+
+  fetch:
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        donor: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - env:
+          APPID: ${{ matrix.donor.appid }}
+          FIRST: ${{ matrix.donor.first }}
+          LAST: ${{ needs.plan.outputs.last_day }}
+        run: >-
+          uv run --no-default-groups --group pipeline --group causal
+          patchpulse-pipeline donor-history fetch
+          --appid "$APPID" --first "$FIRST" --last "$LAST" --out "donor-$APPID.csv"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: donor-${{ matrix.donor.appid }}
+          path: donor-${{ matrix.donor.appid }}.csv
+          retention-days: 7
+          if-no-files-found: error
+
+  # One seed file for Seif: every game's CSV, checked by the same merge command (each game has
+  # every day exactly once, no negative counts). A failed check fails this job and lists the gaps.
+  seed:
+    needs: [plan, fetch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: donor-*
+          path: donor-history
+      - env:
+          LAST: ${{ needs.plan.outputs.last_day }}
+        run: >-
+          uv run --no-default-groups --group pipeline --group causal
+          patchpulse-pipeline donor-history merge donor-history
+          --last "$LAST" --out donor_daily_counts.csv
+      - uses: actions/upload-artifact@v7
+        with:
+          name: donor-seed
+          path: donor_daily_counts.csv
+          retention-days: 7
+          if-no-files-found: error

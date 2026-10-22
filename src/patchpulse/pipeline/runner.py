@@ -270,13 +270,15 @@ def _run_stages(
     index: IndexStage | None,
 ) -> None:
     games = load_games(games_file, today=now.date())
+    # Comparison games (Phase 4) get news and daily counts only: no reviews, prices or coverage.
+    tracked = [g for g in games if g.tracked]
     with run.engine.begin() as connection:
         upsert_games(connection, games, run_id=run.run_id)
-        plans = {g.appid: _plan(connection, g, now) for g in games}
+        plans = {g.appid: _plan(connection, g, now) for g in tracked}
 
     with run.stage("reviews"):
         counters = {"pages": 0, "reviews": 0, "new_versions": 0}
-        for game in games:
+        for game in tracked:
             windows = plans[game.appid][1]
             start, end = windows.incremental
             try:
@@ -309,7 +311,7 @@ def _run_stages(
 
     with run.stage("prices"):
         try:
-            prices = fetch_prices(steam, [g.appid for g in games])
+            prices = fetch_prices(steam, [g.appid for g in tracked])
         except SteamError as error:
             # A missing day of prices is a gap in one snapshot, not a reason to lose the night.
             run.stages["prices"] = {"ok": 0, "error": f"{type(error).__name__}: {error}"}
@@ -326,7 +328,7 @@ def _run_stages(
             _store_prices(run, prices, now)
 
     with run.stage("backfill"):
-        reached = _backfill(run, settings, steam, games, plans, clock)
+        reached = _backfill(run, settings, steam, tracked, plans, clock)
 
     with run.stage("score"):
         run.stages["score"] = _score(run, settings, clock)
@@ -338,7 +340,7 @@ def _run_stages(
             raise PipelineError("dbt build failed: " + " | ".join(result.failures)[:3000])
 
     with run.engine.begin() as connection:
-        for game in games:
+        for game in tracked:
             if game.appid in run.errors:
                 continue
             previous, windows = plans[game.appid]
@@ -346,7 +348,8 @@ def _run_stages(
             write_coverage(connection, game.appid, coverage, run_id=run.run_id)
 
     with run.stage("index"):
-        run.stages["index"] = _index(run, settings, publisher, index, games[0].appid, clock)
+        health = (tracked or games)[0].appid
+        run.stages["index"] = _index(run, settings, publisher, index, health, clock)
 
     with run.stage("export"):
         with run.engine.connect() as connection:
