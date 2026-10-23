@@ -1,13 +1,18 @@
 """Page through a game's Steam reviews inside a date window (spec §6.1).
 
-Steam's `appreviews` accepts `start_date`, `end_date` and `date_range_type=include` (verified on
-2026-09-28), so both the nightly incremental and the progressive backfill ask for exactly the
-window they need, newest first. Paging stops on an empty page, a repeated cursor (Steam's known
-looping bug), a review older than the window, or the caller's deadline.
+Steam's Web API method `IUserReviewsService/GetAppReviews` (no key needed) takes its parameters as
+one `input_json` object, with `date_range_start` and `date_range_end` (unix seconds, both
+included), so both the nightly incremental and the progressive backfill ask for exactly the window
+they need, newest first. Valve switched off the store's `/appreviews` endpoint on 22 Oct 2026,
+which this replaced (it answers HTTP 302 to the store's home page since). The answer sits in
+`response`, with no `success` field: an HTTP error is the failure. Paging stops on an empty page,
+a repeated cursor (Steam's known looping bug), a review older than the window, or the caller's
+deadline.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -21,7 +26,11 @@ from patchpulse.ingest.http import SteamHttp, SteamRequestError
 from patchpulse.ingest.models import RawPage, ReviewRecord, schema_drift
 from patchpulse.ingest.privacy import strip_review_page
 
-REVIEWS_URL = "https://store.steampowered.com/appreviews/{appid}"
+REVIEWS_URL = "https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/"
+# EUserReviewsAppReviewsFilter and EUserReviewsPurchaseType
+# (partner.steamgames.com/doc/webapi/IUserReviewsService).
+FILTER_RECENT = 1
+PURCHASE_ALL = 1
 PAGE_SIZE = 100
 FIRST_CURSOR = "*"
 
@@ -48,6 +57,38 @@ class ReviewPage:
         return self.raw.payload
 
 
+def review_request(
+    appid: int,
+    start: datetime,
+    end: datetime,
+    *,
+    cursor: str = FIRST_CURSOR,
+    per_page: int = PAGE_SIZE,
+) -> dict[str, str | int]:
+    """GetAppReviews' parameters for reviews created in [start, end], newest first: every
+    language and purchase type, off-topic reviews included (the filters Phase 1 chose)."""
+    query = {
+        "appid": appid,
+        "filter": FILTER_RECENT,
+        "languages": ["all"],
+        "num_per_page": per_page,
+        "purchase_type": PURCHASE_ALL,
+        "filter_offtopic_activity": False,
+        "date_range_start": int(start.timestamp()),
+        "date_range_end": int(end.timestamp()),
+        "cursor": cursor,
+    }
+    return {"input_json": json.dumps(query, separators=(",", ":"))}
+
+
+def review_response(answer: dict[str, Any], appid: int) -> dict[str, Any]:
+    """The page inside GetAppReviews' answer; the method has no `success` field."""
+    payload = answer.get("response")
+    if not isinstance(payload, dict):
+        raise SteamRequestError(f"GetAppReviews {appid}: no response object")
+    return payload
+
+
 def fetch_review_pages(
     http: SteamHttp,
     appid: int,
@@ -64,21 +105,9 @@ def fetch_review_pages(
     while True:
         if deadline is not None and clock() >= deadline:
             return
-        request: dict[str, str | int] = {
-            "json": 1,
-            "filter": "recent",
-            "language": "all",
-            "num_per_page": PAGE_SIZE,
-            "purchase_type": "all",
-            "filter_offtopic_activity": 0,
-            "start_date": int(start.timestamp()),
-            "end_date": int(end.timestamp()),
-            "date_range_type": "include",
-            "cursor": cursor,
-        }
-        payload, status = http.get_json(REVIEWS_URL.format(appid=appid), request)
-        if payload.get("success") != 1:
-            raise SteamRequestError(f"appreviews {appid}: success={payload.get('success')!r}")
+        request = review_request(appid, start, end, cursor=cursor)
+        answer, status = http.get_json(REVIEWS_URL, request)
+        payload = review_response(answer, appid)
 
         reviews = payload.get("reviews") or []
         records: list[ReviewRecord] = []

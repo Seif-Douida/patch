@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from urllib.parse import parse_qs, urlsplit
 
@@ -32,20 +33,22 @@ def test_day_counts_from_the_summary() -> None:
 
     assert counts == DayCounts(appid=APP, day=DAY, positive=2, negative=1)
     (request,) = steam.requests
-    params = {k: v[0] for k, v in parse_qs(urlsplit(str(request.url)).query).items()}
-    assert params["num_per_page"] == "0"
-    assert (params["language"], params["purchase_type"], params["filter_offtopic_activity"]) == (
-        "all",
-        "all",
-        "0",
+    url = urlsplit(str(request.url))
+    assert url.path == "/IUserReviewsService/GetAppReviews/v1/"
+    query = json.loads(parse_qs(url.query)["input_json"][0])
+    # One review a page: 0 means Steam's default of 20; the counts come with the first page.
+    assert query["num_per_page"] == 1
+    assert (query["languages"], query["purchase_type"], query["filter_offtopic_activity"]) == (
+        ["all"],
+        1,
+        False,
     )
-    assert params["date_range_type"] == "include"
     start = int(datetime(2026, 10, 1, tzinfo=UTC).timestamp())
-    assert (int(params["start_date"]), int(params["end_date"])) == (start, start + 86_399)
+    assert (query["date_range_start"], query["date_range_end"]) == (start, start + 86_399)
 
 
 def test_zero_review_day() -> None:
-    # Steam answers success 1 with zero counts for a day with no reviews (checked 21 Oct 2026).
+    # A day with no reviews comes back as zero counts.
     assert fetch_day_counts(FakeSteam().http(), APP, DAY) == DayCounts(APP, DAY, 0, 0)
 
 
@@ -54,8 +57,8 @@ def test_missing_summary_or_failure_raises() -> None:
     steam.day_counts_broken[APP] = "no summary"
     with pytest.raises(SteamError, match="summary"):
         fetch_day_counts(steam.http(), APP, DAY)
-    steam.day_counts_broken[APP] = "unsuccessful"
-    with pytest.raises(SteamError, match="success"):
+    steam.day_counts_broken[APP] = "no response"
+    with pytest.raises(SteamError, match="no response object"):
         fetch_day_counts(steam.http(), APP, DAY)
 
 

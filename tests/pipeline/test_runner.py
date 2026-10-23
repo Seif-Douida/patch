@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
@@ -204,6 +205,15 @@ def add_donor(env: Env, appid: int = DONOR, name: str = "Elden Ring") -> None:
         )
 
 
+def review_query(request: Any) -> dict[str, Any] | None:
+    """A GetAppReviews request's input_json, or None for any other request."""
+    url = urlsplit(str(request.url))
+    if url.path != "/IUserReviewsService/GetAppReviews/v1/":
+        return None
+    query: dict[str, Any] = json.loads(parse_qs(url.query)["input_json"][0])
+    return query
+
+
 def ago(days: int) -> date:
     return YESTERDAY - timedelta(days=days)
 
@@ -252,9 +262,10 @@ def test_a_donor_never_reaches_reviews_backfill_prices_or_the_site(env: Env) -> 
 
     assert result.status == "succeeded"
     urls = [str(request.url) for request in env.steam.requests]
-    # Its reviews are only ever counted (num_per_page=0: no text), never fetched.
-    assert [u for u in urls if f"/appreviews/{DONOR}" in u]
-    assert not [u for u in urls if f"/appreviews/{DONOR}" in u and "num_per_page=0" not in u]
+    # Its reviews are only ever counted: one a page, read for the counts and dropped.
+    asked = [q for q in map(review_query, env.steam.requests) if q and q["appid"] == DONOR]
+    assert asked
+    assert {q["num_per_page"] for q in asked} == {1}
     assert not [u for u in urls if "appids=" in u and str(DONOR) in u]
     assert [u for u in urls if "GetNewsForApp" in u and f"appid={DONOR}" in u]
     ((files, _),) = env.publisher.calls
@@ -762,7 +773,7 @@ def test_a_broken_count_fails_that_donor_only(env: Env) -> None:
     add_donor(env, DONOR_2, "Monster Hunter Wilds")
     for appid in (DONOR, DONOR_2):
         store_count(env, appid, ago(2))
-    env.steam.day_counts_broken[DONOR] = "unsuccessful"
+    env.steam.day_counts_broken[DONOR] = "no response"
 
     with pytest.raises(PipelineError, match=str(DONOR)):
         env.run(dbt=ok_dbt, export=stub_export)
