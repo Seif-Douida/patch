@@ -283,6 +283,12 @@ def test_nightly_job_has_the_index_budget(resources: list[dict[str, Any]]) -> No
     assert env["PP_INDEX_BUDGET_MINUTES"] == "5"
 
 
+def test_nightly_job_has_the_effects_budget(resources: list[dict[str, Any]]) -> None:
+    # Phase 4 design D10: the effects stage estimates within 2 minutes; what's left waits a night.
+    _, env = nightly_env(resources)
+    assert env["PP_EFFECTS_BUDGET_MINUTES"] == "2"
+
+
 def test_the_runner_ends_the_night_before_the_job_timeout(resources: list[dict[str, Any]]) -> None:
     # The runner's night deadline (budgeted stages stop at NIGHT_SECONDS - NIGHT_RESERVE_S) is only
     # safe if it knows the timeout Azure kills the job at.
@@ -292,8 +298,8 @@ def test_the_runner_ends_the_night_before_the_job_timeout(resources: list[dict[s
 
 
 def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) -> None:
-    # Design D9: backfill, scoring and indexing leave at least 8 of the job's minutes for the
-    # incremental stages, dbt, the reconciliation and the export.
+    # Design D9: backfill, scoring, indexing and the effects leave at least 8 of the job's minutes
+    # for the incremental stages, dbt, the reconciliation and the export.
     nightly, env = nightly_env(resources)
     budgets = sum(
         int(env[name])
@@ -301,6 +307,7 @@ def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) 
             "PP_BACKFILL_BUDGET_MINUTES",
             "PP_SCORE_BUDGET_MINUTES",
             "PP_INDEX_BUDGET_MINUTES",
+            "PP_EFFECTS_BUDGET_MINUTES",
         )
     )
     timeout_minutes = literal_number(nightly["properties"]["configuration"]["replicaTimeout"]) / 60

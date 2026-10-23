@@ -29,6 +29,7 @@ from patchpulse.ingest.coverage import REREAD, start_of_day
 from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
+from patchpulse.pipeline.effects import EffectsOutcome
 from patchpulse.pipeline.indexing import IndexOutcome, run_index
 from patchpulse.pipeline.runner import (
     NIGHT_RESERVE_S,
@@ -190,6 +191,8 @@ def test_nightly_end_to_end_with_mocked_steam(env: Env) -> None:
     stages = json.loads(run.stages)
     assert {"reviews", "news", "prices", "backfill", "dbt", "export", "durations_s"} <= set(stages)
     assert stages["reviews"]["new_versions"] + stages["backfill"]["new_versions"] == 10
+    # The real stage on the real marts: the one patch is 2 days old, so no window is complete.
+    assert stages["effects"] == {"estimated": 0, "written": 0, "unchanged": 0, "remaining": 0}
 
 
 DONOR = 1245620
@@ -800,3 +803,80 @@ def test_counts_stage_stops_at_the_night_deadline(env: Env) -> None:
         "behind": 1,
         "stopped": "night deadline",
     }
+
+
+@dataclass
+class FakeEffects:
+    """The effects stage's work, replaced: each call returns (or raises) the next outcome."""
+
+    outcomes: list[EffectsOutcome | Exception]
+    deadlines: list[float] = field(default_factory=list)
+
+    def __call__(
+        self,
+        engine: Engine,
+        *,
+        run_id: int,
+        now: datetime,
+        clock: Callable[[], float],
+        deadline: float,
+    ) -> EffectsOutcome:
+        self.deadlines.append(deadline)
+        next_outcome = self.outcomes.pop(0)
+        if isinstance(next_outcome, Exception):
+            raise next_outcome
+        return next_outcome
+
+
+def test_effects_failure_is_a_warning_and_the_night_publishes(env: Env) -> None:
+    # Review focus 4: the estimates lag a night; the site still goes out.
+    effects = FakeEffects([RuntimeError("Invalid object name 'mart.daily_game_sentiment'")])
+
+    result = env.run(dbt=ok_dbt, export=stub_export, effects=effects)
+
+    assert result.status == "succeeded"
+    assert len(env.publisher.calls) == 1
+    order = list(result.stages["durations_s"])
+    assert order.index("dbt") < order.index("effects") < order.index("index")
+    assert result.stages["effects"]["skipped"].startswith("RuntimeError: Invalid object name")
+    (finding,) = env.rows(
+        "SELECT severity, detail FROM ops.data_quality_result WHERE check_name = 'effects_skipped'"
+    )
+    assert finding.severity == "warn"
+    assert finding.detail.startswith("RuntimeError")
+
+
+@pytest.mark.parametrize(
+    ("later", "deadline"),
+    [(0.0, 2 * 60), (NIGHT_END - 60, NIGHT_END)],
+    ids=["early: its own 2 minutes", "late: the night's end"],
+)
+def test_effects_stage_gets_its_budget_within_the_night(
+    env: Env, later: float, deadline: float
+) -> None:
+    effects = FakeEffects([EffectsOutcome(estimated=3, written=45, unchanged=1, remaining=0)])
+
+    result = env.run(dbt=ok_dbt, export=stub_export, effects=effects, clock=LateClock(later))
+
+    assert effects.deadlines == [deadline]
+    assert result.stages["effects"] == {
+        "estimated": 3,
+        "written": 45,
+        "unchanged": 1,
+        "remaining": 0,
+    }
+
+
+def test_effects_stage_is_off_at_a_budget_of_0(env: Env) -> None:
+    effects = FakeEffects([])
+
+    result = env.run(
+        settings=env.settings.model_copy(update={"effects_budget_minutes": 0}),
+        dbt=ok_dbt,
+        export=stub_export,
+        effects=effects,
+    )
+
+    assert result.status == "succeeded"
+    assert result.stages["effects"] == {"skipped": "turned off (PP_EFFECTS_BUDGET_MINUTES is 0)"}
+    assert effects.deadlines == []

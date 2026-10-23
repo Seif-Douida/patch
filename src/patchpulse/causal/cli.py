@@ -16,7 +16,7 @@ import json
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -35,7 +35,7 @@ from patchpulse.causal.benchmark import (
 )
 from patchpulse.causal.config import CAUSAL_CONFIG_PATH, CausalConfig, write_causal_config
 from patchpulse.causal.estimate import EFFECTS_VERSION
-from patchpulse.causal.series import DailySeries
+from patchpulse.causal.series import DailySeries, from_counts
 from patchpulse.config import LabSettings
 from patchpulse.ingest.games import GAMES_FILE, load_games
 from patchpulse.models.tracking import tracking_run
@@ -59,25 +59,6 @@ class BenchmarkPaths:
     config: Path = CAUSAL_CONFIG_PATH
 
 
-def _series(
-    appid: int,
-    first: date,
-    counts: Mapping[date, tuple[int, int]],
-    last: date,
-    *,
-    missing_is_zero: bool,
-) -> DailySeries:
-    days = (last - first).days + 1
-    positives = np.zeros(days, dtype=np.int64)
-    totals = np.zeros(days, dtype=np.int64)
-    observed = np.full(days, missing_is_zero)
-    for day, (positive, total) in counts.items():
-        if first <= day <= last:
-            i = (day - first).days
-            positives[i], totals[i], observed[i] = positive, total, True
-    return DailySeries(appid, first, positives, totals, observed)
-
-
 def series_from_reviews(
     reviews: pd.DataFrame, appids: Iterable[int], *, last_day: date
 ) -> dict[int, DailySeries]:
@@ -92,7 +73,7 @@ def series_from_reviews(
     ):
         counts[int(appid)][pd.Timestamp(day).date()] = (int(positive), int(total))
     return {
-        appid: _series(appid, min(days), days, last_day, missing_is_zero=True)
+        appid: from_counts(appid, min(days), last_day, days, missing_is_zero=True)
         for appid, days in counts.items()
     }
 
@@ -108,7 +89,7 @@ def series_from_seed(path: Path) -> dict[int, DailySeries]:
                 positive + negative,
             )
     return {
-        appid: _series(appid, min(days), days, max(days), missing_is_zero=False)
+        appid: from_counts(appid, min(days), max(days), days, missing_is_zero=False)
         for appid, days in counts.items()
     }
 

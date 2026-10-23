@@ -115,9 +115,9 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               secretRef: 'github-app-key'
             }
             {
-              // Of the 45 min: 25 backfill, 5 scoring and 5 indexing leave 10 for the incremental
-              // stages, dbt, the reconciliation and the export, or 5 after one Steam rate-limit
-              // pause (ingest/http.py).
+              // Of the 45 min: 25 backfill, 5 scoring, 5 indexing and 2 effects leave 8 for the
+              // incremental stages, dbt, the reconciliation and the export; the runner stops the
+              // budgeted stages 10 min before the timeout whatever their budgets (NIGHT_RESERVE_S).
               name: 'PP_BACKFILL_BUDGET_MINUTES'
               value: '25'
             }
@@ -131,6 +131,12 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               // image (PP_ENCODER_DIR); what's left waits a night. 0 turns it off.
               name: 'PP_INDEX_BUDGET_MINUTES'
               value: '5'
+            }
+            {
+              // Phase 4 (design D10): the effects stage estimates the patches whose window ended
+              // or whose inputs changed; what's left waits a night. 0 turns it off.
+              name: 'PP_EFFECTS_BUDGET_MINUTES'
+              value: '2'
             }
             {
               name: 'PP_QDRANT_URL'

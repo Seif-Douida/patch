@@ -6,6 +6,7 @@ is unobserved: its counts are 0 and it never counts as data.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -70,6 +71,28 @@ class DailySeries:
         if part is None:
             raise ValueError(f"{start}..{end} is outside {self.first_day}..{self.last_day}")
         return part
+
+
+def from_counts(
+    appid: int,
+    first: date,
+    last: date,
+    counts: Mapping[date, tuple[int, int]],
+    *,
+    missing_is_zero: bool,
+) -> DailySeries:
+    """The days from `first` to `last` from each day's (positive, total) counts. A day without
+    counts is an observed 0 when `missing_is_zero` (a tracked game's day without reviews), else
+    unobserved (a comparison game's day not fetched). Counts outside the span are left out."""
+    days = (last - first).days + 1
+    positives = np.zeros(days, dtype=np.int64)
+    totals = np.zeros(days, dtype=np.int64)
+    observed = np.full(days, missing_is_zero)
+    for day, (positive, total) in counts.items():
+        if first <= day <= last:
+            i = (day - first).days
+            positives[i], totals[i], observed[i] = positive, total, True
+    return DailySeries(appid, first, positives, totals, observed)
 
 
 @dataclass(frozen=True, eq=False)
