@@ -1,4 +1,4 @@
-"""Build the static JSON the dashboard reads (schema version 2).
+"""Build the static JSON the dashboard reads (schema version 3).
 
 Files (paths relative to the site's data folder):
 
@@ -9,15 +9,26 @@ Files (paths relative to the site's data folder):
   `genres`, `first_date`, `last_date`, `latest` (the last 30 days: `days`, `to`, `n`, `share`; null
   before the game has data) and `top_complaint_30d` (over the same 30 days, the aspect mentioned
   by the largest share of scored negative reviews: `code`, `share`, `n` scored negative reviews;
-  off-topic and aspects with an F1 under MIN_ASPECT_F1 don't count; null without any).
+  off-topic and aspects with an F1 under MIN_ASPECT_F1 don't count; null without any), and
+  `causal` (Phase 4): `default_method` (its or synth, from config/causal.yaml), `effects_version`
+  and `benchmark_report` (the report's path in the repository; null until the benchmark has run).
 * `games/{appid}.json`: the same header fields plus `appid`, `name`, `genres`, `series` (one
   point per day: `date`, `n`, `pos`, `share`, `lo`, `hi`, `sale`, `discount`), `patches`
-  (`date`, `title`, `url`, `type`, `treatment`) and `aspects`: `codes` (the taxonomy, in order)
-  and `days`, one per day with scored reviews: `date`, `scored` ([negative, positive] reviews
-  scored), `neg` and `pos` (per aspect, in `codes` order, how many of them mention it).
+  (`date`, `title`, `url`, `type`, `treatment`, `effect`) and `aspects`: `codes` (the taxonomy,
+  in order) and `days`, one per day with scored reviews: `date`, `scored` ([negative, positive]
+  reviews scored), `neg` and `pos` (per aspect, in `codes` order, how many of them mention it).
+
+A patch's `effect` (schema 3) is null unless it's a treatment candidate. Otherwise it's its
+bundle's (patches within 7 days of the first are estimated together): `start`, the bundle's first
+day, and `horizons`, one per horizon (7 and 14 days): `days`, `ends` (the window's last day), the
+estimated effect on the positive share in percentage points (`effect`, `lo90`, `hi90`, `method`,
+`flags`) as estimate_patch_effect serves it (the default method, or interrupted time series with
+the default's reason where the default has none), and `reason` when there's no estimate:
+`window_not_complete`, `another_patch_within_14_days` (14 days only), `not_estimated_yet` (the
+effects stage hasn't reached it), or the estimator's own words.
 
 Without a model (no `PP_MODEL_DIR`), `aspect_model`, `top_complaint_30d` and `aspects` are null.
-Schema 2 only adds fields, so a site that reads both versions treats them as optional.
+Each schema only adds fields, so a site that reads two versions treats the new ones as optional.
 
 Output is deterministic: sorted keys and rows, floats rounded to 4 places, UTF-8, a trailing
 newline. The same data always gives byte-identical files, so an unchanged night is a no-op commit.
@@ -36,11 +47,16 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from patchpulse.causal.bundles import LONG_HORIZON, Patch, bundle_patches, window_complete
+from patchpulse.causal.config import CAUSAL_CONFIG_PATH, read_causal_config
+from patchpulse.causal.estimate import EFFECTS_VERSION, HORIZONS, Method, Sample
+from patchpulse.causal.its import POSITIVE_SHARE
+from patchpulse.causal.store import latest_estimates, serve
 from patchpulse.labeling.taxonomy import ASPECTS
 
 log = logging.getLogger("patchpulse.export")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ATTRIBUTION = "Data from Steam"
 LATEST_DAYS = 30
 _PLACES = 4
@@ -48,6 +64,11 @@ NOT_A_COMPLAINT = "off_topic"  # memes and jokes, not a complaint about the game
 # An aspect the model detects with a gold-test F1 under this isn't named as a top complaint; the
 # site marks it (web/lib/aspects.ts uses the same bar).
 MIN_ASPECT_F1 = 0.5
+BENCHMARK_REPORT = "reports/causal/benchmark.md"
+# Why a treatment patch's horizon has no estimate when no stored row says.
+WINDOW_NOT_COMPLETE = "window_not_complete"
+ANOTHER_PATCH = "another_patch_within_14_days"
+NOT_ESTIMATED_YET = "not_estimated_yet"
 
 
 @dataclass(frozen=True)
@@ -79,6 +100,29 @@ class PatchRow:
     url: str
     patch_type: str
     is_treatment_candidate: bool
+    patch_id: str
+
+
+@dataclass(frozen=True)
+class EffectRow:
+    """The positive-share estimate served for one bundle and horizon (causal.store.serve)."""
+
+    bundle_id: str
+    horizon: int
+    effect: float | None  # percentage points
+    lo90: float | None
+    hi90: float | None
+    method: str
+    flags: frozenset[str]
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class Effects:
+    default_method: str
+    effects_version: str
+    benchmark_report: str | None
+    rows: Sequence[EffectRow]
 
 
 @dataclass(frozen=True)
@@ -195,6 +239,49 @@ def _aspect_series(aspect_days: Sequence[AspectDayRow]) -> dict[str, Any]:
     }
 
 
+def _horizon(days: int, ends: date, reason: str, row: EffectRow | None) -> dict[str, Any]:
+    """One horizon of a patch's `effect`: the served row, or `reason` without one."""
+    return {
+        "days": days,
+        "ends": ends.isoformat(),
+        "effect": _round(row.effect) if row else None,
+        "lo90": _round(row.lo90) if row else None,
+        "hi90": _round(row.hi90) if row else None,
+        "method": row.method if row else None,
+        "flags": sorted(row.flags) if row else [],
+        "reason": row.reason if row else reason,
+    }
+
+
+def _effect_blocks(
+    patches: Sequence[PatchRow], effects: Effects, last_complete_day: date
+) -> dict[str, dict[str, Any]]:
+    """Each treatment candidate's `effect`, by patch id: its bundle's, so every patch of a bundle
+    shows the same estimate."""
+    candidates = [
+        Patch(p.patch_id, p.appid, p.published_at.astimezone(UTC).date())
+        for p in patches
+        if p.is_treatment_candidate
+    ]
+    served = {(r.bundle_id, r.horizon): r for r in effects.rows}
+    blocks: dict[str, dict[str, Any]] = {}
+    for bundle in bundle_patches(candidates):
+        horizons = []
+        for days in HORIZONS:
+            ends = bundle.start + timedelta(days=days - 1)
+            if days == LONG_HORIZON and not bundle.allow_14:
+                horizons.append(_horizon(days, ends, ANOTHER_PATCH, None))
+            elif not window_complete(bundle, days, last_complete_day):
+                horizons.append(_horizon(days, ends, WINDOW_NOT_COMPLETE, None))
+            else:
+                row = served.get((bundle.bundle_id, days))
+                horizons.append(_horizon(days, ends, NOT_ESTIMATED_YET, row))
+        block = {"start": bundle.start.isoformat(), "horizons": horizons}
+        for patch_id in bundle.patch_ids:
+            blocks[patch_id] = block
+    return blocks
+
+
 def shape_site_export(
     games: Sequence[GameRow],
     days: Sequence[DayRow],
@@ -203,8 +290,10 @@ def shape_site_export(
     data_version: int,
     generated_at: datetime,
     aspects: Aspects | None = None,
+    effects: Effects | None = None,
 ) -> dict[str, bytes]:
-    """Turn mart rows into site files: {relative path: file bytes}."""
+    """Turn mart rows into site files: {relative path: file bytes}. Without `effects` (no
+    estimates read), the index's `causal` and every patch's `effect` are null."""
     header = {
         "schema_version": SCHEMA_VERSION,
         "data_version": data_version,
@@ -221,12 +310,16 @@ def shape_site_export(
     for aspect_day in sorted(aspects.days if aspects else [], key=lambda d: (d.appid, d.date)):
         aspects_by_game[aspect_day.appid].append(aspect_day)
 
+    last_complete_day = generated_at.astimezone(UTC).date() - timedelta(days=1)
+
     files: dict[str, bytes] = {}
     listing: list[dict[str, Any]] = []
     shown = (g for g in games if g.role != "donor")
     for game in sorted(shown, key=lambda g: (g.name, g.appid)):
         series = series_by_game.get(game.appid, [])
         aspect_days = aspects_by_game.get(game.appid, [])
+        game_patches = patches_by_game.get(game.appid, [])
+        blocks = _effect_blocks(game_patches, effects, last_complete_day) if effects else {}
         genres = [genre.strip() for genre in game.genres.split(",") if genre.strip()]
         latest = _latest(series)
         listing.append(
@@ -270,8 +363,9 @@ def shape_site_export(
                         "url": p.url,
                         "type": p.patch_type,
                         "treatment": p.is_treatment_candidate,
+                        "effect": blocks.get(p.patch_id),
                     }
-                    for p in patches_by_game.get(game.appid, [])
+                    for p in game_patches
                 ],
                 "aspects": _aspect_series(aspect_days) if aspects else None,
             }
@@ -284,7 +378,16 @@ def shape_site_export(
             "test_macro_f1": _round(aspects.model.test_macro_f1),
             "aspect_f1": {code: _round(f1) for code, f1 in aspects.model.aspect_f1.items()},
         }
-    files["index.json"] = _dump({**header, "aspect_model": model, "games": listing})
+    causal = None
+    if effects is not None:
+        causal = {
+            "default_method": effects.default_method,
+            "effects_version": effects.effects_version,
+            "benchmark_report": effects.benchmark_report,
+        }
+    files["index.json"] = _dump(
+        {**header, "aspect_model": model, "causal": causal, "games": listing}
+    )
     return files
 
 
@@ -322,14 +425,35 @@ def _aspect_days(connection: Connection) -> list[AspectDayRow]:
     ]
 
 
+def _effects(connection: Connection, config_path: Path) -> Effects:
+    """The stored positive-share estimates, served as estimate_patch_effect serves them."""
+    config = read_causal_config(config_path)
+    stored = latest_estimates(
+        connection,
+        outcome=POSITIVE_SHARE,
+        sample=Sample.ALL,
+        methods={config.default_method, Method.ITS},
+    )
+    return Effects(
+        default_method=config.default_method,
+        effects_version=EFFECTS_VERSION,
+        benchmark_report=BENCHMARK_REPORT if config.benchmarked else None,
+        rows=[
+            EffectRow(r.bundle_id, r.horizon, r.effect, r.lo90, r.hi90, r.method, r.flags, r.reason)
+            for r in serve(stored, config.default_method, fallback=True)
+        ],
+    )
+
+
 def build_site_export(
     connection: Connection,
     *,
     data_version: int,
     generated_at: datetime,
     aspect_model: AspectModel | None = None,
+    causal_config_path: Path = CAUSAL_CONFIG_PATH,
 ) -> dict[str, bytes]:
-    """Read the marts and shape the site files; aspects only with a model."""
+    """Read the marts and app.patch_effect and shape the site files; aspects only with a model."""
     games = [
         GameRow(r.appid, r.name, r.genres, r.role)
         for r in connection.execute(text("SELECT appid, name, genres, role FROM core.dim_game"))
@@ -361,15 +485,22 @@ def build_site_export(
             r.url,
             r.patch_type,
             bool(r.is_treatment_candidate),
+            str(r.patch_id),
         )
         for r in connection.execute(
             text(
-                "SELECT game_key, published_at, title, url, patch_type, is_treatment_candidate "
-                "FROM core.fact_patch"
+                "SELECT patch_id, game_key, published_at, title, url, patch_type, "
+                "is_treatment_candidate FROM core.fact_patch"
             )
         )
     ]
     aspects = None if aspect_model is None else Aspects(aspect_model, _aspect_days(connection))
     return shape_site_export(
-        games, days, patches, data_version=data_version, generated_at=generated_at, aspects=aspects
+        games,
+        days,
+        patches,
+        data_version=data_version,
+        generated_at=generated_at,
+        aspects=aspects,
+        effects=_effects(connection, causal_config_path),
     )

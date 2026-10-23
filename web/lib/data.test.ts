@@ -25,16 +25,20 @@ function siteData(schema: number): string {
 }
 
 describe("site data", () => {
-  it("site_reads_schema_1_and_2", () => {
-    expect(SUPPORTED_SCHEMAS).toEqual([1, 2]);
-    for (const schema of [1, 2]) {
+  it("site_reads_schema_2_and_3", () => {
+    expect(SUPPORTED_SCHEMAS).toEqual([2, 3]);
+    for (const schema of [2, 3]) {
       const dir = siteData(schema);
       expect(loadIndex(dir).schema_version).toBe(schema);
       expect(loadGame(900001, dir).schema_version).toBe(schema);
     }
+    // Schema 1 predates the aspects; no site data has been at 1 since Phase 2's first night.
+    const old = siteData(1);
+    expect(() => loadIndex(old)).toThrow("site data has schema 1; this site reads 2 or 3");
+    expect(() => loadGame(900001, old)).toThrow("schema 1");
     // A newer exporter than this site must fail the build, not render half the data.
-    const future = siteData(3);
-    expect(() => loadIndex(future)).toThrow("site data has schema 3; this site reads 1 or 2");
-    expect(() => loadGame(900001, future)).toThrow("schema 3");
+    const future = siteData(4);
+    expect(() => loadIndex(future)).toThrow("site data has schema 4; this site reads 2 or 3");
+    expect(() => loadGame(900001, future)).toThrow("schema 4");
   });
 });

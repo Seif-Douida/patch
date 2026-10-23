@@ -15,6 +15,8 @@ from patchpulse.export.site import (
     AspectModel,
     Aspects,
     DayRow,
+    EffectRow,
+    Effects,
     GameRow,
     PatchRow,
     read_aspect_model,
@@ -42,7 +44,9 @@ def day(appid: int, when: date, n: int, positive: int, **extra: Any) -> DayRow:
     )
 
 
-def patch(appid: int, when: date, title: str, patch_type: str = "patch") -> PatchRow:
+def patch(
+    appid: int, when: date, title: str, patch_type: str = "patch", patch_id: str | None = None
+) -> PatchRow:
     return PatchRow(
         appid=appid,
         published_at=datetime(when.year, when.month, when.day, 9, tzinfo=UTC),
@@ -50,6 +54,7 @@ def patch(appid: int, when: date, title: str, patch_type: str = "patch") -> Patc
         url=f"https://example.com/{appid}",
         patch_type=patch_type,
         is_treatment_candidate=patch_type in {"patch", "major_update"},
+        patch_id=patch_id or f"{appid}-{when}-{title}",
     )
 
 
@@ -61,9 +66,16 @@ def export(
     days: list[DayRow],
     patches: list[PatchRow],
     aspects: Aspects | None = None,
+    effects: Effects | None = None,
 ) -> dict[str, bytes]:
     return shape_site_export(
-        games, days, patches, data_version=42, generated_at=GENERATED, aspects=aspects
+        games,
+        days,
+        patches,
+        data_version=42,
+        generated_at=GENERATED,
+        aspects=aspects,
+        effects=effects,
     )
 
 
@@ -191,7 +203,7 @@ def test_export_v2_shape_is_deterministic() -> None:
 
     assert first == shuffled
     game = load(first, "games/553850.json")
-    assert game["schema_version"] == SCHEMA_VERSION == 2
+    assert game["schema_version"] == SCHEMA_VERSION == 3
     assert game["aspects"]["codes"] == list(ASPECTS)
     assert game["aspects"]["days"][0] == {
         "date": "2026-09-20",
@@ -232,7 +244,7 @@ def test_without_a_model_the_aspect_fields_are_null() -> None:
     files = export([HD2], [day(553850, D1, 3, 2)], [])
 
     index = load(files, "index.json")
-    assert index["schema_version"] == 2
+    assert index["schema_version"] == 3
     assert index["aspect_model"] is None
     assert index["games"][0]["top_complaint_30d"] is None
     assert load(files, "games/553850.json")["aspects"] is None
@@ -273,3 +285,127 @@ def test_weak_aspects_are_named_and_left_out_of_the_top_complaint() -> None:
     assert index["aspect_model"]["aspect_f1"] == {"performance": 0.87, "ux_controls": 0.48}
     assert MIN_ASPECT_F1 == 0.5
     assert index["games"][0]["top_complaint_30d"] == {"code": "performance", "share": 0.3, "n": 10}
+
+
+TOO_FEW = "too few comparison games without their own patch (3 of 5 needed)"
+NO_TRACK = "the comparison games didn't track the game before the patch"
+
+
+def effect_row(bundle_id: str, horizon: int, method: str, **values: Any) -> EffectRow:
+    return EffectRow(
+        bundle_id=bundle_id,
+        horizon=horizon,
+        effect=values.get("effect"),
+        lo90=values.get("lo90"),
+        hi90=values.get("hi90"),
+        method=method,
+        flags=frozenset(values.get("flags", ())),
+        reason=values.get("reason"),
+    )
+
+
+def effects(*rows: EffectRow, method: str = "synth", report: str | None = None) -> Effects:
+    return Effects(
+        default_method=method, effects_version="e2", benchmark_report=report, rows=list(rows)
+    )
+
+
+def horizon(days: int, ends: str, **values: Any) -> dict[str, Any]:
+    return {
+        "days": days,
+        "ends": ends,
+        "effect": values.get("effect"),
+        "lo90": values.get("lo90"),
+        "hi90": values.get("hi90"),
+        "method": values.get("method"),
+        "flags": values.get("flags", []),
+        "reason": values.get("reason"),
+    }
+
+
+def test_patch_effects_in_schema_3() -> None:
+    # The night of 29 Sep: the last complete day is 28 Sep.
+    patches = [
+        patch(553850, date(2026, 8, 1), "Patch 1.0", patch_id="a"),
+        patch(553850, date(2026, 8, 3), "Patch 1.0.1", patch_id="b"),  # joins a's bundle
+        patch(553850, date(2026, 8, 3), "Hotfix", "hotfix", patch_id="h"),  # not a candidate
+        patch(553850, date(2026, 8, 20), "Patch 1.1", patch_id="c"),  # d starts 10 days later
+        patch(553850, date(2026, 8, 30), "Patch 1.2", patch_id="d"),  # nothing stored yet
+        patch(553850, date(2026, 9, 25), "Patch 1.3", patch_id="e"),  # 7 days end 1 Oct
+    ]
+    served = effects(
+        effect_row(
+            "a",
+            7,
+            "synth",
+            effect=-4.123456,
+            lo90=-6.0,
+            hi90=-2.2,
+            flags={"volume_spike", "confounded"},
+        ),
+        # Synthetic control had none: interrupted time series, with synthetic control's reason.
+        effect_row("a", 14, "its", effect=-3.5, lo90=-5.0, hi90=-2.0, reason=TOO_FEW),
+        effect_row("c", 7, "synth", reason=NO_TRACK),
+    )
+
+    game = load(export([HD2], [], patches, effects=served), "games/553850.json")
+
+    blocks = {p["title"]: p["effect"] for p in game["patches"]}
+    estimated = {
+        "start": "2026-08-01",
+        "horizons": [
+            horizon(
+                7,
+                "2026-08-07",
+                effect=-4.1235,
+                lo90=-6.0,
+                hi90=-2.2,
+                method="synth",
+                flags=["confounded", "volume_spike"],
+            ),
+            horizon(
+                14, "2026-08-14", effect=-3.5, lo90=-5.0, hi90=-2.0, method="its", reason=TOO_FEW
+            ),
+        ],
+    }
+    assert blocks["Patch 1.0"] == estimated
+    assert blocks["Patch 1.0.1"] == estimated  # one bundle, one estimate
+    assert blocks["Hotfix"] is None
+    assert blocks["Patch 1.1"] == {
+        "start": "2026-08-20",
+        "horizons": [
+            horizon(7, "2026-08-26", method="synth", reason=NO_TRACK),
+            horizon(14, "2026-09-02", reason="another_patch_within_14_days"),
+        ],
+    }
+    assert blocks["Patch 1.2"] == {
+        "start": "2026-08-30",
+        "horizons": [
+            horizon(7, "2026-09-05", reason="not_estimated_yet"),
+            horizon(14, "2026-09-12", reason="not_estimated_yet"),
+        ],
+    }
+    assert blocks["Patch 1.3"] == {
+        "start": "2026-09-25",
+        "horizons": [
+            horizon(7, "2026-10-01", reason="window_not_complete"),
+            horizon(14, "2026-10-08", reason="window_not_complete"),
+        ],
+    }
+
+
+def test_index_names_the_default_method() -> None:
+    report = "reports/causal/benchmark.md"
+    patches = [patch(553850, D1, "Patch 1.0")]
+
+    with_effects = export([HD2], [], patches, effects=effects(method="synth", report=report))
+    without = export([HD2], [], patches)
+
+    assert load(with_effects, "index.json")["causal"] == {
+        "default_method": "synth",
+        "effects_version": "e2",
+        "benchmark_report": report,
+    }
+    # Without the effects input (no stored estimates read), no causal block and no estimates.
+    assert load(without, "index.json")["causal"] is None
+    assert [p["effect"] for p in load(without, "games/553850.json")["patches"]] == [None]

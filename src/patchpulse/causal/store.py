@@ -10,7 +10,7 @@ estimate and `as_of` reads an earlier night's. `patch_ids` and `donors` are stor
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -157,6 +157,45 @@ def _bundle_of(connection: Connection, patch_id: str, as_of: int | None) -> str 
     return None if found is None else str(found.bundle_id)
 
 
+def latest_estimates(
+    connection: Connection,
+    *,
+    outcome: str,
+    sample: str,
+    methods: Collection[str],
+    bundle_id: str | None = None,
+    as_of: int | None = None,
+) -> list[StoredEstimate]:
+    """The latest row of each key for an outcome, sample and methods (one bundle's, or all)."""
+    table = tables.patch_effect
+    where = [
+        table.c.outcome == outcome,
+        table.c.sample == sample,
+        table.c.method.in_(sorted(set(methods))),
+    ]
+    if bundle_id is not None:
+        where.append(table.c.bundle_id == bundle_id)
+    return [_stored(r) for r in connection.execute(_latest(*where, as_of=as_of))]
+
+
+def serve(rows: Iterable[StoredEstimate], method: str, *, fallback: bool) -> list[StoredEstimate]:
+    """One row per bundle and horizon: `method`'s, or, with `fallback`, the interrupted time
+    series row carrying `method`'s reason where `method` has no effect and it has one. Sorted by
+    bundle and horizon."""
+    by_key = {(r.bundle_id, r.horizon, r.method): r for r in rows}
+    served: list[StoredEstimate] = []
+    for bundle_id, horizon, row_method in sorted(by_key):
+        if row_method != method:
+            continue
+        default = by_key[(bundle_id, horizon, method)]
+        its = by_key.get((bundle_id, horizon, Method.ITS.value))
+        if fallback and default.effect is None and its is not None and its.effect is not None:
+            served.append(replace(its, reason=default.reason))
+        else:
+            served.append(default)
+    return served
+
+
 def estimate_patch_effect(
     connection: Connection,
     patch_id: str,
@@ -174,31 +213,15 @@ def estimate_patch_effect(
     if bundle_id is None:
         return []
     chosen = method or read_causal_config(config_path).default_method
-    table = tables.patch_effect
-    rows = [
-        _stored(r)
-        for r in connection.execute(
-            _latest(
-                table.c.bundle_id == bundle_id,
-                table.c.outcome == outcome,
-                table.c.sample == sample,
-                table.c.method.in_({chosen, Method.ITS.value}),
-                as_of=as_of,
-            )
-        )
-    ]
-    by_key = {(r.horizon, r.method): r for r in rows}
-    served: list[StoredEstimate] = []
-    for horizon in sorted({r.horizon for r in rows}):
-        default = by_key.get((horizon, chosen))
-        its = by_key.get((horizon, Method.ITS.value))
-        if default is None:
-            continue
-        if method is None and default.effect is None and its is not None and its.effect is not None:
-            served.append(replace(its, reason=default.reason))
-        else:
-            served.append(default)
-    return served
+    rows = latest_estimates(
+        connection,
+        outcome=outcome,
+        sample=sample,
+        methods={chosen, Method.ITS.value},
+        bundle_id=bundle_id,
+        as_of=as_of,
+    )
+    return serve(rows, chosen, fallback=method is None)
 
 
 def _bucket_counts(connection: Connection, appid: int, window: tuple[date, date]) -> BucketCounts:
