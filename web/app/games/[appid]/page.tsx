@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { GameCharts } from "@/components/GameCharts";
-import { MethodNote } from "@/components/MethodNote";
+import { EstimateNote, MethodNote } from "@/components/MethodNote";
 import { PatchAspectTables } from "@/components/PatchAspectTable";
 import { weakAspects } from "@/lib/aspects";
 import { loadGame, loadIndex } from "@/lib/data";
@@ -28,6 +28,8 @@ export default async function GamePage({ params }: Props) {
   const latest = index.games.find((g) => g.appid === game.appid)?.latest ?? null;
   const aspects = game.aspects && game.aspects.days.length > 0 ? game.aspects : null;
   const posts = [...game.patches].reverse();
+  // The first day with a price snapshot: discounts before it aren't known.
+  const discountsFrom = game.series.find((day) => day.discount !== null)?.date ?? null;
 
   return (
     <>
@@ -60,8 +62,13 @@ export default async function GamePage({ params }: Props) {
             aspects={aspects}
             patches={game.patches}
             model={index.aspect_model}
+            causal={index.causal ?? null}
+            discountsFrom={discountsFrom}
           />
-          <MethodNote model={index.aspect_model} />
+          <div className="method-notes">
+            <EstimateNote causal={index.causal} />
+            <MethodNote model={index.aspect_model} />
+          </div>
         </>
       )}
 
