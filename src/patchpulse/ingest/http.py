@@ -6,7 +6,9 @@ honours `Retry-After`; other 4xx responses are not retried.
 
 HTTP 429 is Steam's rate limit. Measured on 2026-09-29: /appreviews answered 429 after exactly
 150 requests, both at 1 request/s and at 0.8/s, and served again 5 minutes later, so about 150
-requests per 5 minutes per IP; the pace stays ~11% under it. On a 429 the client slows the shared
+requests per 5 minutes per IP; the pace stays ~11% under it. Its replacement since 22 Oct 2026,
+IUserReviewsService/GetAppReviews, has an unpublished, lower limit for calls without a key; the
+pace is unchanged until a night's 429s say otherwise. On a 429 the client slows the shared
 limiter, pauses once for the window to pass, and if Steam still refuses, gives up and fails every
 later request at once, so a blocked night ends quickly instead of waiting out the job timeout.
 """
@@ -132,6 +134,12 @@ class SteamHttp:
                     retry_after = _retry_after(response)
                 elif response.is_error:
                     raise SteamRequestError(f"HTTP {response.status_code} from {url}")
+                elif response.is_redirect:
+                    # Steam moves a retired endpoint to its home page (23 Oct 2026: /appreviews).
+                    target = response.headers.get("location", "?")
+                    raise SteamRequestError(
+                        f"HTTP {response.status_code} from {url}: a redirect to {target}"
+                    )
                 else:
                     return _json_object(response, url), response.status_code
             rate_limited = problem == "HTTP 429"
