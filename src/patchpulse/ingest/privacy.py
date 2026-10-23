@@ -43,7 +43,7 @@ def strip_personal_fields(review: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def strip_review_page(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of an `appreviews` response with every review stripped."""
+    """A copy of a GetAppReviews response with every review stripped."""
     stripped = dict(payload)
     reviews = payload.get("reviews")
     if isinstance(reviews, list):

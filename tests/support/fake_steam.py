@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -85,8 +86,11 @@ class FakeSteam:
         self.requests.append(request)
         path = urlsplit(str(request.url)).path
         params = {k: v[0] for k, v in parse_qs(urlsplit(str(request.url)).query).items()}
-        if path.startswith("/appreviews/"):
-            return self._reviews(int(path.rsplit("/", 1)[1]), params)
+        if path == "/IUserReviewsService/GetAppReviews/v1/":
+            query = json.loads(params["input_json"])
+            return self._reviews(int(query["appid"]), query)
+        if path.startswith("/appreviews/"):  # switched off by Valve on 22 Oct 2026
+            return httpx2.Response(302, headers={"Location": "https://store.steampowered.com/"})
         if "GetNewsForApp" in path:
             appid = int(params["appid"])
             return httpx2.Response(200, json={"appnews": {"newsitems": self.news.get(appid, [])}})
@@ -101,19 +105,20 @@ class FakeSteam:
             }
         return httpx2.Response(200, json=body)
 
-    def _reviews(self, appid: int, params: dict[str, str]) -> httpx2.Response:
+    def _reviews(self, appid: int, query: dict[str, Any]) -> httpx2.Response:
+        """Like GetAppReviews: the page inside `response`, no `success` field."""
         self.review_requests += 1
         if self.rate_limit_after is not None and self.review_requests > self.rate_limit_after:
             return httpx2.Response(429)
         if appid in self.failing:
             return httpx2.Response(500)
-        start, end = int(params["start_date"]), int(params["end_date"])
+        start, end = int(query["date_range_start"]), int(query["date_range_end"])
         matching = sorted(
             (r for r in self.reviews.get(appid, []) if start <= r["timestamp_created"] <= end),
             key=lambda r: r["timestamp_created"],
             reverse=True,
         )
-        cursor = params["cursor"]
+        cursor = str(query["cursor"])
         offset = 0 if cursor == "*" else int(cursor[1:])
         served = matching[: self.cut_short.get(appid, len(matching))]
         page = served[offset : offset + self.page_size]
@@ -123,5 +128,5 @@ class FakeSteam:
         summary = {"num_reviews": len(page), "total_reviews": len(matching)} if first else {}
         return httpx2.Response(
             200,
-            json={"success": 1, "query_summary": summary, "reviews": page, "cursor": next_cursor},
+            json={"response": {"query_summary": summary, "reviews": page, "cursor": next_cursor}},
         )

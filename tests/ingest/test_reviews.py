@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx2
+import pytest
 
-from patchpulse.ingest.http import RateLimiter, SteamHttp
+from patchpulse.ingest.http import RateLimiter, SteamHttp, SteamRequestError
 from patchpulse.ingest.reviews import ReviewPage, StopReason, fetch_review_pages
 
 START = datetime(2026, 9, 1, tzinfo=UTC)
@@ -55,12 +57,20 @@ def steam_review(rid: int, created: datetime, **overrides: Any) -> dict[str, Any
 
 
 def page(cursor: str, *reviews: dict[str, Any]) -> dict[str, Any]:
+    """A GetAppReviews answer: the page inside `response`, no `success` field."""
     return {
-        "success": 1,
-        "query_summary": {"num_reviews": len(reviews)},
-        "reviews": list(reviews),
-        "cursor": cursor,
+        "response": {
+            "query_summary": {"num_reviews": len(reviews)},
+            "reviews": list(reviews),
+            "cursor": cursor,
+        }
     }
+
+
+def sent(request: httpx2.Request) -> dict[str, Any]:
+    """The request's input_json, decoded."""
+    body: dict[str, Any] = json.loads(parse_qs(urlsplit(str(request.url)).query)["input_json"][0])
+    return body
 
 
 class Steam:
@@ -72,8 +82,7 @@ class Steam:
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
-        cursor = parse_qs(urlsplit(str(request.url)).query)["cursor"][0]
-        return httpx2.Response(200, json=self.by_cursor[cursor])
+        return httpx2.Response(200, json=self.by_cursor[sent(request)["cursor"]])
 
 
 def fetch(
@@ -112,18 +121,25 @@ def test_review_pages_follow_the_cursor_within_the_date_range() -> None:
 
     assert [len(p.records) for p in pages] == [2, 1, 0]
     assert pages[-1].next_stop is StopReason.EMPTY
-    first = parse_qs(urlsplit(str(steam.requests[0].url)).query)
-    assert first["filter"] == ["recent"]
-    assert first["language"] == ["all"]
-    assert first["num_per_page"] == ["100"]
-    assert first["purchase_type"] == ["all"]
-    assert first["filter_offtopic_activity"] == ["0"]
-    assert first["date_range_type"] == ["include"]
-    assert first["start_date"] == [str(int(START.timestamp()))]
-    assert first["end_date"] == [str(int(END.timestamp()))]
-    assert first["cursor"] == ["*"]
-    # The cursor contains + / = and must reach Steam URL-encoded.
-    assert "cursor=AoJ4%2Ba%2Fb%3D" in str(steam.requests[1].url)
+    # Steam's Web API method since 22 Oct 2026, when Valve switched off /appreviews.
+    url = urlsplit(str(steam.requests[0].url))
+    assert (url.netloc, url.path) == (
+        "api.steampowered.com",
+        "/IUserReviewsService/GetAppReviews/v1/",
+    )
+    assert sent(steam.requests[0]) == {
+        "appid": 553850,
+        "filter": 1,  # recent: newest first
+        "languages": ["all"],
+        "num_per_page": 100,
+        "purchase_type": 1,  # all purchases
+        "filter_offtopic_activity": False,  # off-topic reviews included
+        "date_range_start": int(START.timestamp()),
+        "date_range_end": int(END.timestamp()),
+        "cursor": "*",
+    }
+    # The cursor contains + / = and must reach Steam intact.
+    assert sent(steam.requests[1])["cursor"] == "AoJ4+a/b="
 
 
 def test_repeated_cursor_stops_paging_and_is_reported() -> None:
@@ -237,3 +253,10 @@ def test_invalid_review_is_reported_and_skipped() -> None:
 
     assert first.invalid == 1
     assert [r.recommendation_id for r in first.records] == [2]
+
+
+def test_an_answer_without_a_response_object_is_an_error() -> None:
+    steam = Steam({"*": {"error": "unknown"}})
+
+    with pytest.raises(SteamRequestError, match="no response object"):
+        fetch(steam)

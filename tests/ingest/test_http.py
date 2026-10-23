@@ -200,3 +200,15 @@ def test_user_agent_is_sent() -> None:
     request = handler.seen[0]  # type: ignore[attr-defined]
     assert request.headers["User-Agent"] == USER_AGENT
     assert "github.com/Seif-Douida/patch" in USER_AGENT
+
+
+def test_a_redirect_is_an_error_that_names_it() -> None:
+    # 23 Oct 2026: Steam answered the switched-off /appreviews with HTTP 302 to the store's home
+    # page and an empty body, which the night logged only as "invalid JSON".
+    handler = responses(
+        httpx2.Response(302, headers={"Location": "https://store.steampowered.com/"})
+    )
+    http = steam_http(handler, FakeTime())
+
+    with pytest.raises(SteamRequestError, match=r"HTTP 302 .*redirect to https://store"):
+        http.get_json(URL, {})

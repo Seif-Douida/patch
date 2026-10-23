@@ -87,7 +87,7 @@ class ReviewRecord(BaseModel):
 
     @classmethod
     def from_steam(cls, review: Mapping[str, Any], *, appid: int, salt: str) -> ReviewRecord:
-        """Parse one `appreviews` review. Raises (ValidationError, KeyError, ...) if unusable."""
+        """Parse one GetAppReviews review. Raises (ValidationError, KeyError, ...) if unusable."""
         author = review["author"]
         return cls.model_validate(
             {
