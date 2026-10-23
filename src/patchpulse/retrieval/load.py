@@ -45,11 +45,13 @@ class LoadStats:
     seconds: float
 
 
-def _confirmed(progress: Path | None, collection: str, index_set: str) -> int:
+def _confirmed(progress: Path | None, resume: dict[str, str]) -> int:
+    """The last review id an earlier run of this upload confirmed: same collection, index set and
+    encoder (its cache), or none."""
     if progress is None or not progress.is_file():
         return -1
     state = json.loads(progress.read_text(encoding="utf-8"))
-    same = state.get("collection") == collection and state.get("index_set") == index_set
+    same = all(state.get(key) == value for key, value in resume.items())
     return int(state["confirmed_through"]) if same else -1
 
 
@@ -72,8 +74,12 @@ def load_collection(
     versions = version_seconds(ordered["version"])
     digest = hashlib.sha256(np.asarray(ordered["review_id"], dtype=np.int64).tobytes())
     digest.update(versions.tobytes())
-    index_set = digest.hexdigest()[:16]
-    after = _confirmed(progress, collection, index_set)
+    resume = {
+        "collection": collection,
+        "index_set": digest.hexdigest()[:16],
+        "encoder": cache.directory.name,
+    }
+    after = _confirmed(progress, resume)
     records = cast(list[dict[str, Any]], ordered.to_dict("records"))
     todo = [i for i, row in enumerate(records) if int(row["review_id"]) > after]
     for start in range(0, len(todo), batch):
@@ -89,7 +95,7 @@ def load_collection(
         client.upsert(collection, points, wait=True)
         if progress is not None:
             last = int(records[todo[min(start + batch, len(todo)) - 1]]["review_id"])
-            state = {"collection": collection, "index_set": index_set, "confirmed_through": last}
+            state = {**resume, "confirmed_through": last}
             progress.write_text(json.dumps(state) + "\n", encoding="utf-8")
         if (start // batch) % 100 == 99:
             log.info("%s: %d of %d points", collection, start + len(points), len(todo))

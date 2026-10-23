@@ -23,6 +23,10 @@ class FakeSteam:
         self.failing: set[int] = set()
         self.rate_limit_after: int | None = None  # answer HTTP 429 once this many reviews requests
         self.review_requests = 0
+        self.page_size = PAGE
+        # appid -> reviews served from a window before Steam answers empty pages (20 Oct 2026: it
+        # ended three games' history windows long before the counts it reported for them).
+        self.cut_short: dict[int, int] = {}
         self.prices_down = False
         self.requests: list[httpx2.Request] = []
 
@@ -111,9 +115,13 @@ class FakeSteam:
         )
         cursor = params["cursor"]
         offset = 0 if cursor == "*" else int(cursor[1:])
-        page = matching[offset : offset + PAGE]
+        served = matching[: self.cut_short.get(appid, len(matching))]
+        page = served[offset : offset + self.page_size]
         next_cursor = f"o{offset + len(page)}"
+        # Like Steam: the window's count on the first page only.
+        first = cursor == "*"
+        summary = {"num_reviews": len(page), "total_reviews": len(matching)} if first else {}
         return httpx2.Response(
             200,
-            json={"success": 1, "query_summary": {}, "reviews": page, "cursor": next_cursor},
+            json={"success": 1, "query_summary": summary, "reviews": page, "cursor": next_cursor},
         )

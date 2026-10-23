@@ -73,6 +73,13 @@ if TYPE_CHECKING:
 log = logging.getLogger("patchpulse.pipeline")
 
 RAW_RETENTION = timedelta(days=30)
+# pp-nightly's replicaTimeout (infra/modules/jobs.bicep; a guard test keeps them equal). The
+# budgeted stages (backfill, score, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S, whatever
+# their own budgets, so a killed job never takes the night's export and publish with it. The
+# reserve covers what runs after them or between them, measured on 20 Oct (run 25): dbt 167 s,
+# export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled.
+NIGHT_SECONDS = 2_700
+NIGHT_RESERVE_S = 600
 # The index stage's alerts (design D5): one GitHub issue per title.
 OUT_OF_SYNC = "Qdrant out of sync"
 INDEX_SKIPPED = "index stage skipped"
@@ -127,6 +134,7 @@ class IndexStage(Protocol):
         run_id: int,
         health_appid: int,
         clock: Callable[[], float],
+        deadline: float,
     ) -> IndexOutcome: ...
 
 
@@ -151,10 +159,11 @@ class RunResult:
 class _Run:
     """The state of one run: counters for ops.pipeline_run.stages and per-game failures."""
 
-    def __init__(self, engine: Engine, run_id: int, salt: str) -> None:
+    def __init__(self, engine: Engine, run_id: int, salt: str, *, night_end: float) -> None:
         self.engine = engine
         self.run_id = run_id
         self.salt = salt
+        self.night_end = night_end
         self.stages: dict[str, Any] = {"durations_s": {}}
         self.errors: dict[int, str] = {}
 
@@ -164,6 +173,10 @@ class _Run:
         yield
         self.stages["durations_s"][name] = round(time.monotonic() - started, 1)
         log.info("stage %s done in %.1f s", name, self.stages["durations_s"][name])
+
+    def deadline(self, budget_s: float, clock: Callable[[], float]) -> float:
+        """A budgeted stage's deadline: its own budget from now, but never past the night's end."""
+        return min(clock() + budget_s, self.night_end)
 
     def fail_game(self, appid: int, error: Exception) -> None:
         self.errors[appid] = f"{appid}: {type(error).__name__}: {error}"
@@ -222,9 +235,10 @@ def run_nightly(
     """`index` replaces the index stage's work in tests; by default it's imported when needed."""
     if settings.author_hash_salt is None:
         raise SettingsError("missing or invalid settings: PP_AUTHOR_HASH_SALT")
+    night_end = clock() + NIGHT_SECONDS - NIGHT_RESERVE_S
     with engine.begin() as connection:
         run_id = start_run(connection, kind="nightly", image_version=os.environ.get("APP_VERSION"))
-    run = _Run(engine, run_id, settings.author_hash_salt.get_secret_value())
+    run = _Run(engine, run_id, settings.author_hash_salt.get_secret_value(), night_end=night_end)
     log.info("nightly run %d started", run_id)
     try:
         _run_stages(
@@ -379,7 +393,7 @@ def _score(run: _Run, settings: Settings, clock: Callable[[], float]) -> dict[st
             run.engine,
             load_scorer(settings.model_dir),
             run_id=run.run_id,
-            budget_s=settings.score_budget_minutes * 60,
+            budget_s=max(0.0, run.deadline(settings.score_budget_minutes * 60, clock) - clock()),
             clock=clock,
         )
     except Exception as error:  # aspects lag a night; ingest, dbt and the site go on
@@ -425,7 +439,12 @@ def _index(
 
             index = run_index
         outcome = index(
-            run.engine, settings, run_id=run.run_id, health_appid=health_appid, clock=clock
+            run.engine,
+            settings,
+            run_id=run.run_id,
+            health_appid=health_appid,
+            clock=clock,
+            deadline=run.deadline(settings.index_budget_minutes * 60, clock),
         )
     except Exception as error:  # the index lags a night; the site goes on
         detail = _scrub(f"{type(error).__name__}: {error}", settings)
@@ -533,6 +552,27 @@ def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:
     }
 
 
+def _window_done(seen: int, expected: int | None) -> bool:
+    """Whether Steam's end of a backfill window is the real one: about as many reviews seen as it
+    counted (1% slack for reviews deleted while paging). On 20 Oct 2026 it had ended three games'
+    windows with empty pages hundreds of thousands of reviews early (282,709 for Helldivers 2)."""
+    return expected is None or seen >= expected - expected // 100
+
+
+def _cut_short(run: _Run, appid: int, seen: int, expected: int | None) -> None:
+    detail = f"Steam ended the backfill window after {seen} of {expected} reviews; resuming"
+    log.warning("game %d: %s", appid, detail)
+    with run.engine.begin() as connection:
+        record_dq(
+            connection,
+            run_id=run.run_id,
+            check="backfill_cut_short",
+            appid=appid,
+            severity="warn",
+            detail=detail,
+        )
+
+
 def _plan(connection: Connection, game: Game, now: datetime) -> tuple[Coverage | None, Windows]:
     previous = read_coverage(connection, game.appid)
     return previous, plan_windows(previous, backfill_start=game.backfill_start, now=now)
@@ -547,7 +587,7 @@ def _backfill(
     clock: Callable[[], float],
 ) -> dict[int, datetime | None]:
     """Fill history round-robin until the budget runs out; returns how far each game got."""
-    deadline = clock() + settings.backfill_budget_minutes * 60
+    deadline = run.deadline(settings.backfill_budget_minutes * 60, clock)
     counters = {"pages": 0, "reviews": 0, "new_versions": 0}
     pagers: dict[int, Iterator[ReviewPage]] = {}
     windows: dict[int, tuple[datetime, datetime]] = {}
@@ -567,6 +607,8 @@ def _backfill(
         )
 
     oldest: dict[int, datetime] = {}
+    seen: dict[int, int] = {}  # reviews of tonight's window, valid or not
+    expected: dict[int, int] = {}  # the window's count, as Steam reported it
     reached: dict[int, datetime | None] = {}
     complete: list[int] = []
     stopped: str | None = None
@@ -598,17 +640,23 @@ def _backfill(
                 continue
             if page is not None:
                 run.store_page(page, counters)
+                if page.total is not None:
+                    expected[appid] = page.total
+                seen[appid] = seen.get(appid, 0) + len(page.records) + page.invalid
                 if page.records:
                     earliest = min(r.timestamp_created for r in page.records)
                     oldest[appid] = min(oldest.get(appid, earliest), earliest)
             if page is None or page.next_stop is not None:
-                if page is not None and page.next_stop in {
+                ended = page is not None and page.next_stop in {
                     StopReason.EMPTY,
                     StopReason.WINDOW_PASSED,
-                }:
+                }
+                if ended and _window_done(seen.get(appid, 0), expected.get(appid)):
                     reached[appid] = windows[appid][0]  # the whole window is covered
                     complete.append(appid)
-                else:  # deadline or a repeated cursor: resume from the oldest review next night
+                else:  # resume from the oldest review next night
+                    if ended:
+                        _cut_short(run, appid, seen.get(appid, 0), expected.get(appid))
                     reached[appid] = oldest.get(appid)
                 del pagers[appid]
     run.stages["backfill"] = {

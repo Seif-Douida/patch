@@ -2,8 +2,10 @@
 
 In order:
 1. read the collection back into an empty mirror (the first night after the laptop's upload);
-2. repair the game-days the previous night's reconciliation found off;
-3. plan the sync and apply it within the stage's budget (PP_INDEX_BUDGET_MINUTES);
+2. plan the sync and apply it until the runner's deadline (PP_INDEX_BUDGET_MINUTES, within the
+   night);
+3. once the sync has caught up, repair the game-days the previous night's reconciliation found
+   off, with what's left of the time;
 4. reconcile the counts per game and day;
 5. a fixed hybrid search on one game, to check that Qdrant answers.
 
@@ -31,6 +33,7 @@ from sqlalchemy import Engine
 
 from patchpulse.config import Settings
 from patchpulse.models.artifact import sha256_file
+from patchpulse.models.text import CLEANING_VERSION
 from patchpulse.retrieval.embedders import MANIFEST_FILE, OnnxEmbedder
 from patchpulse.retrieval.pin import PIN_PATH, read_pin
 from patchpulse.retrieval.qdrant import make_client
@@ -41,6 +44,7 @@ from patchpulse.retrieval.reconcile import (
     reconcile,
     repair,
 )
+from patchpulse.retrieval.rules import INDEX_RULES_VERSION
 from patchpulse.retrieval.search import search
 from patchpulse.retrieval.sync import SyncError, SyncStats, apply_sync, plan_sync, read_back
 
@@ -98,13 +102,25 @@ def run_index(
     run_id: int,
     health_appid: int,
     clock: Callable[[], float],
+    deadline: float,
     pin_path: Path = PIN_PATH,
 ) -> IndexOutcome:
-    """The stage, with the client and encoder its settings name."""
+    """The stage, with the client and encoder its settings name, working until `deadline` (the
+    runner's: PP_INDEX_BUDGET_MINUTES, within the night)."""
     if settings.qdrant_url is None or settings.encoder_dir is None:
         raise ValueError("the index stage needs PP_QDRANT_URL and PP_ENCODER_DIR")
-    deadline = clock() + settings.index_budget_minutes * 60
     pin = read_pin(pin_path)
+    # Design D2: new index rules or a new cleaning build a new collection, never rewrite this one.
+    if pin.rules_version != INDEX_RULES_VERSION:
+        raise SyncError(
+            f"{pin.collection} has rules version {pin.rules_version}, the code "
+            f"{INDEX_RULES_VERSION}"
+        )
+    if pin.cleaning_version != CLEANING_VERSION:
+        raise SyncError(
+            f"{pin.collection} has cleaning version {pin.cleaning_version}, the code "
+            f"{CLEANING_VERSION}"
+        )
     if sha256_file(settings.encoder_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
         raise SyncError(f"the encoder in PP_ENCODER_DIR isn't the one {pin_path} pins")
     embedder = index_embedder(settings.encoder_dir)
@@ -156,12 +172,6 @@ def _index(
 
     started = time.perf_counter()
     with engine.connect() as connection:
-        days = mismatched_days(connection, collection, before_run=run_id)
-    repaired = repair(client, engine, collection, days, deadline=deadline, clock=clock)
-    step("repair", started)
-
-    started = time.perf_counter()
-    with engine.connect() as connection:
         plan = plan_sync(connection, collection=collection)
     stats = apply_sync(
         client,
@@ -174,6 +184,17 @@ def _index(
         clock=clock,
     )
     step("sync", started)
+
+    # Repair only once the sync has caught up: until then the mismatched days are mostly pending
+    # upserts, which only the sync can fix. A repaired review the mirror forgets is upserted the
+    # next night.
+    started = time.perf_counter()
+    repaired = RepairStats(days=0, missing=0, extra=0)
+    if stats.remaining == 0:
+        with engine.connect() as connection:
+            days = mismatched_days(connection, collection, before_run=run_id)
+        repaired = repair(client, engine, collection, days, deadline=deadline, clock=clock)
+    step("repair", started)
 
     started = time.perf_counter()
     reconciliation = reconcile(client, engine, collection, run_id=run_id)
