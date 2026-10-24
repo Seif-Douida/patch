@@ -1,6 +1,6 @@
 """SQLAlchemy Core definitions of the tables Alembic owns, for the loaders.
 
-They mirror migrations 0001 to 0003; `test_table_definitions_match_the_migrated_schema` keeps
+They mirror migrations 0001 to 0005; `test_table_definitions_match_the_migrated_schema` keeps
 them in step. Datetime columns hold naive UTC (DATETIME2 has no time zone).
 """
 
@@ -21,6 +21,7 @@ from sqlalchemy import (
     Unicode,
     UnicodeText,
 )
+from sqlalchemy.dialects.mssql import TINYINT
 
 metadata = MetaData()
 
@@ -216,4 +217,43 @@ qdrant_reconciliation = Table(
     Column("sql_count", Integer, nullable=False),
     Column("qdrant_count", Integer, nullable=False),
     schema="ops",
+)
+
+
+# Phase 4 (migration 0005): the comparison games' daily counts and the stored effect estimates.
+steam_review_daily = Table(
+    "steam_review_daily",
+    metadata,
+    Column("appid", Integer, primary_key=True, autoincrement=False),
+    Column("day", Date, primary_key=True),
+    Column("positive", Integer, nullable=False),
+    Column("negative", Integer, nullable=False),
+    Column("fetched_run_id", BigInteger, nullable=False),
+    Column("fetched_at", DateTime, nullable=False),
+    schema="raw",
+)
+
+patch_effect = Table(
+    "patch_effect",
+    metadata,
+    Column("bundle_id", Unicode(32), primary_key=True),
+    Column("patch_ids", Unicode(400), nullable=False),
+    Column("appid", Integer, nullable=False),
+    Column("outcome", Unicode(64), primary_key=True),
+    Column("sample", Unicode(16), primary_key=True),
+    Column("horizon", TINYINT, primary_key=True, autoincrement=False),
+    Column("method", Unicode(8), primary_key=True),
+    Column("run_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("effect", REAL),
+    Column("lo90", REAL),
+    Column("hi90", REAL),
+    Column("p_value", REAL),
+    Column("pre_fit_rmse", REAL),
+    Column("donors", UnicodeText, nullable=False),
+    Column("flags", Unicode(200), nullable=False),
+    Column("reason", Unicode(200)),
+    Column("fingerprint", CHAR(64), nullable=False),
+    Column("version", Unicode(8), nullable=False),
+    Column("computed_at", DateTime, nullable=False),
+    schema="app",
 )

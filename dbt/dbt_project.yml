@@ -69,6 +69,14 @@ seeds:
         name: nvarchar(64)
         description: nvarchar(200)
         taxonomy_version: nvarchar(8)
+    # Phase 4: comparison games' daily counts, fetched once (donor-history merge); header-only until
+    # the history is fetched.
+    donor_daily_counts:
+      +column_types:
+        appid: int
+        day: date
+        positive: int
+        negative: int
 
 flags:
   send_anonymous_usage_stats: false

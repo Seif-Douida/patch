@@ -3,9 +3,13 @@ publish.
 
 1. Start an ops.pipeline_run; its id is the data_version.
 2. Upsert the games from config/games.yaml.
-3. Per game: reviews in the incremental window (the last 3 days to now), then news, classified.
-   A game that fails is recorded and skipped; the others carry on.
-4. Prices for every game, in batches.
+3. Per tracked game: reviews in the incremental window (the last 3 days to now); then news for
+   every game, comparison games too, classified. A game that fails is recorded and skipped; the
+   others carry on.
+4. Prices for every tracked game, in batches. Then the comparison games' review counts per day
+   (Phase 4, design D4): the days after each one's last stored or seeded day through yesterday,
+   at most 4 a night. If Steam stops answering, the stage stops with a `counts_stopped` warning
+   and the night goes on.
 5. Backfill: history older than each game's coverage, newest first, round-robin across games
    until the time budget runs out, so every game's history fills in together. If Steam stops
    answering (a rate limit), backfill stops for the night with a warning; the run still succeeds.
@@ -15,14 +19,18 @@ publish.
    and the night goes on without fresh aspects.
 7. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
    advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
-8. Index (Phase 3, design D5): keep the Qdrant collection in step with core.review_index within
+8. Effects (Phase 4, design D10): estimate the patch bundles whose window has ended or whose
+   inputs changed, newest first, within PP_EFFECTS_BUDGET_MINUTES (pipeline/effects.py); what's
+   left waits a night. A budget of 0 is an INFO line; any failure is an `effects_skipped` warning,
+   the stored estimates stay as they were, and the night goes on.
+9. Index (Phase 3, design D5): keep the Qdrant collection in step with core.review_index within
    PP_INDEX_BUDGET_MINUTES, reconcile the counts per game and day, and check that a search
    answers (pipeline/indexing.py). No PP_QDRANT_URL or PP_ENCODER_DIR, or a budget of 0, is an
    INFO line. Any failure is an `index_skipped` warning and an alert ("Qdrant unreachable" when
    Qdrant didn't answer); counts more than 0.5% apart are a `qdrant_mismatch` warning and an
    alert. A clean night closes all three alerts. The night goes on either way.
-9. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
-10. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
+10. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
+11. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
     success). A failure to report is logged and never changes the run's own result.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
@@ -46,13 +54,16 @@ from sqlalchemy import Connection, Engine
 from patchpulse.config import Settings, SettingsError
 from patchpulse.export.site import AspectModel, build_site_export, read_aspect_model
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
+from patchpulse.ingest.day_counts import fetch_day_counts
 from patchpulse.ingest.games import GAMES_FILE, Game, load_games
 from patchpulse.ingest.http import SteamError, SteamHttp, SteamUnavailableError
 from patchpulse.ingest.load import (
+    last_count_days,
     purge_raw_pages,
     read_coverage,
     record_dq,
     record_page,
+    store_day_counts,
     upsert_classifications,
     upsert_games,
     upsert_news,
@@ -68,15 +79,20 @@ from patchpulse.pipeline.dbt import DbtResult, run_dbt
 from patchpulse.pipeline.runs import finish_run, start_run
 
 if TYPE_CHECKING:
+    from patchpulse.pipeline.effects import EffectsOutcome
     from patchpulse.pipeline.indexing import IndexOutcome
 
 log = logging.getLogger("patchpulse.pipeline")
 
 RAW_RETENTION = timedelta(days=30)
+# Days a comparison game's counts may catch up a night: one request a day, so 30 games behind by
+# weeks cost at most 120 requests (~5 minutes at the pipeline's pace) and close the gap in a few
+# nights; a game up to date costs one.
+COUNT_DAYS_A_NIGHT = 4
 # pp-nightly's replicaTimeout (infra/modules/jobs.bicep; a guard test keeps them equal). The
-# budgeted stages (backfill, score, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S, whatever
-# their own budgets, so a killed job never takes the night's export and publish with it. The
-# reserve covers what runs after them or between them, measured on 20 Oct (run 25): dbt 167 s,
+# budgeted stages (backfill, score, effects, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S,
+# whatever their own budgets, so a killed job never takes the night's export and publish with it.
+# The reserve covers what runs after them or between them, measured on 20 Oct (run 25): dbt 167 s,
 # export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled.
 NIGHT_SECONDS = 2_700
 NIGHT_RESERVE_S = 600
@@ -136,6 +152,20 @@ class IndexStage(Protocol):
         clock: Callable[[], float],
         deadline: float,
     ) -> IndexOutcome: ...
+
+
+class EffectsStage(Protocol):
+    """The effects stage's work: pipeline.effects.run_effects, or a fake in tests."""
+
+    def __call__(
+        self,
+        engine: Engine,
+        *,
+        run_id: int,
+        now: datetime,
+        clock: Callable[[], float],
+        deadline: float,
+    ) -> EffectsOutcome: ...
 
 
 class Exporter(Protocol):
@@ -231,8 +261,10 @@ def run_nightly(
     export: Exporter = build_site_export,
     clock: Callable[[], float] = time.monotonic,
     index: IndexStage | None = None,
+    effects: EffectsStage | None = None,
 ) -> RunResult:
-    """`index` replaces the index stage's work in tests; by default it's imported when needed."""
+    """`index` and `effects` replace those stages' work in tests; by default each is imported when
+    needed."""
     if settings.author_hash_salt is None:
         raise SettingsError("missing or invalid settings: PP_AUTHOR_HASH_SALT")
     night_end = clock() + NIGHT_SECONDS - NIGHT_RESERVE_S
@@ -242,7 +274,18 @@ def run_nightly(
     log.info("nightly run %d started", run_id)
     try:
         _run_stages(
-            run, settings, steam, now, publisher, target_root, games_file, dbt, export, clock, index
+            run,
+            settings,
+            steam,
+            now,
+            publisher,
+            target_root,
+            games_file,
+            dbt,
+            export,
+            clock,
+            index,
+            effects,
         )
     except Exception as error:
         with engine.begin() as connection:
@@ -282,15 +325,18 @@ def _run_stages(
     export: Exporter,
     clock: Callable[[], float],
     index: IndexStage | None,
+    effects: EffectsStage | None,
 ) -> None:
     games = load_games(games_file, today=now.date())
+    # Comparison games (Phase 4) get news and daily counts only: no reviews, prices or coverage.
+    tracked = [g for g in games if g.tracked]
     with run.engine.begin() as connection:
         upsert_games(connection, games, run_id=run.run_id)
-        plans = {g.appid: _plan(connection, g, now) for g in games}
+        plans = {g.appid: _plan(connection, g, now) for g in tracked}
 
     with run.stage("reviews"):
         counters = {"pages": 0, "reviews": 0, "new_versions": 0}
-        for game in games:
+        for game in tracked:
             windows = plans[game.appid][1]
             start, end = windows.incremental
             try:
@@ -323,7 +369,7 @@ def _run_stages(
 
     with run.stage("prices"):
         try:
-            prices = fetch_prices(steam, [g.appid for g in games])
+            prices = fetch_prices(steam, [g.appid for g in tracked])
         except SteamError as error:
             # A missing day of prices is a gap in one snapshot, not a reason to lose the night.
             run.stages["prices"] = {"ok": 0, "error": f"{type(error).__name__}: {error}"}
@@ -339,8 +385,12 @@ def _run_stages(
         else:
             _store_prices(run, prices, now)
 
+    with run.stage("counts"):
+        donors = [g for g in games if g.donor]
+        run.stages["counts"] = _counts(run, steam, donors, now, clock)
+
     with run.stage("backfill"):
-        reached = _backfill(run, settings, steam, games, plans, clock)
+        reached = _backfill(run, settings, steam, tracked, plans, clock)
 
     with run.stage("score"):
         run.stages["score"] = _score(run, settings, clock)
@@ -352,15 +402,19 @@ def _run_stages(
             raise PipelineError("dbt build failed: " + " | ".join(result.failures)[:3000])
 
     with run.engine.begin() as connection:
-        for game in games:
+        for game in tracked:
             if game.appid in run.errors:
                 continue
             previous, windows = plans[game.appid]
             coverage = advance(previous, windows, backfill_reached=reached.get(game.appid))
             write_coverage(connection, game.appid, coverage, run_id=run.run_id)
 
+    with run.stage("effects"):
+        run.stages["effects"] = _effects(run, settings, effects, now, clock)
+
     with run.stage("index"):
-        run.stages["index"] = _index(run, settings, publisher, index, games[0].appid, clock)
+        health = (tracked or games)[0].appid
+        run.stages["index"] = _index(run, settings, publisher, index, health, clock)
 
     with run.stage("export"):
         with run.engine.connect() as connection:
@@ -410,6 +464,47 @@ def _score(run: _Run, settings: Settings, clock: Callable[[], float]) -> dict[st
             )
         return {"skipped": detail[:500]}
     return asdict(stats)
+
+
+def _effects(
+    run: _Run,
+    settings: Settings,
+    effects: EffectsStage | None,
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The effects stage's record for ops.pipeline_run.stages; never raises."""
+    if settings.effects_budget_minutes <= 0:
+        reason = "turned off (PP_EFFECTS_BUDGET_MINUTES is 0)"
+        log.info("effects stage skipped: %s", reason)
+        return {"skipped": reason}
+    try:
+        if effects is None:
+            # Imported here: the stage needs the `causal` group, which an older image may lack.
+            from patchpulse.pipeline.effects import run_effects
+
+            effects = run_effects
+        outcome = effects(
+            run.engine,
+            run_id=run.run_id,
+            now=now,
+            clock=clock,
+            deadline=run.deadline(settings.effects_budget_minutes * 60, clock),
+        )
+    except Exception as error:  # the estimates lag a night; the stored ones and the site go on
+        detail = f"{type(error).__name__}: {error}"
+        log.warning("effects stage skipped: %s", detail)
+        with run.engine.begin() as connection:
+            record_dq(
+                connection,
+                run_id=run.run_id,
+                check="effects_skipped",
+                appid=None,
+                severity="warn",
+                detail=detail,
+            )
+        return {"skipped": detail[:500]}
+    return asdict(outcome)
 
 
 def _index(
@@ -550,6 +645,57 @@ def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:
         "ok": len(prices.snapshots) - len(prices.failed),
         "failed": sorted(prices.failed),
     }
+
+
+def _counts(
+    run: _Run,
+    steam: SteamHttp,
+    donors: Sequence[Game],
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """Each comparison game's review counts for the days after its last counted day through
+    yesterday, oldest first, at most COUNT_DAYS_A_NIGHT a game; a day is stored as it arrives."""
+    yesterday = now.date() - timedelta(days=1)
+    with run.engine.connect() as connection:
+        last = last_count_days(connection)
+    stats: dict[str, Any] = {"requests": 0, "days": 0, "behind": 0, "stopped": None}
+    for game in donors:
+        first = last[game.appid] + timedelta(days=1) if game.appid in last else game.backfill_start
+        due = [first + timedelta(days=k) for k in range((yesterday - first).days + 1)]
+        stored = 0
+        tonight = [] if stats["stopped"] or game.appid in run.errors else due[:COUNT_DAYS_A_NIGHT]
+        for day in tonight:
+            if clock() >= run.night_end:
+                stats["stopped"] = "night deadline"
+                break
+            stats["requests"] += 1
+            try:
+                counts = fetch_day_counts(steam, game.appid, day)
+            except SteamUnavailableError as error:
+                # Steam is refusing us (a rate limit or an outage): no more counts tonight; every
+                # game resumes from its last stored day next night.
+                stats["stopped"] = f"{type(error).__name__}: {error}"
+                log.warning("counts stopped: %s", error)
+                with run.engine.begin() as connection:
+                    record_dq(
+                        connection,
+                        run_id=run.run_id,
+                        check="counts_stopped",
+                        appid=game.appid,
+                        severity="warn",
+                        detail=str(error),
+                    )
+                break
+            except SteamError as error:
+                run.fail_game(game.appid, error)
+                break
+            with run.engine.begin() as connection:
+                store_day_counts(connection, counts, run_id=run.run_id, fetched_at=now)
+            stored += 1
+        stats["days"] += stored
+        stats["behind"] += len(due) > stored
+    return stats
 
 
 def _window_done(seen: int, expected: int | None) -> bool:

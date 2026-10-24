@@ -57,6 +57,38 @@ class ReviewPage:
         return self.raw.payload
 
 
+def review_request(
+    appid: int,
+    start: datetime,
+    end: datetime,
+    *,
+    cursor: str = FIRST_CURSOR,
+    per_page: int = PAGE_SIZE,
+) -> dict[str, str | int]:
+    """GetAppReviews' parameters for reviews created in [start, end], newest first: every
+    language and purchase type, off-topic reviews included (the filters Phase 1 chose)."""
+    query = {
+        "appid": appid,
+        "filter": FILTER_RECENT,
+        "languages": ["all"],
+        "num_per_page": per_page,
+        "purchase_type": PURCHASE_ALL,
+        "filter_offtopic_activity": False,
+        "date_range_start": int(start.timestamp()),
+        "date_range_end": int(end.timestamp()),
+        "cursor": cursor,
+    }
+    return {"input_json": json.dumps(query, separators=(",", ":"))}
+
+
+def review_response(answer: dict[str, Any], appid: int) -> dict[str, Any]:
+    """The page inside GetAppReviews' answer; the method has no `success` field."""
+    payload = answer.get("response")
+    if not isinstance(payload, dict):
+        raise SteamRequestError(f"GetAppReviews {appid}: no response object")
+    return payload
+
+
 def fetch_review_pages(
     http: SteamHttp,
     appid: int,
@@ -73,22 +105,9 @@ def fetch_review_pages(
     while True:
         if deadline is not None and clock() >= deadline:
             return
-        query = {
-            "appid": appid,
-            "filter": FILTER_RECENT,
-            "languages": ["all"],
-            "num_per_page": PAGE_SIZE,
-            "purchase_type": PURCHASE_ALL,
-            "filter_offtopic_activity": False,  # off-topic reviews included
-            "date_range_start": int(start.timestamp()),
-            "date_range_end": int(end.timestamp()),
-            "cursor": cursor,
-        }
-        request: dict[str, str | int] = {"input_json": json.dumps(query, separators=(",", ":"))}
+        request = review_request(appid, start, end, cursor=cursor)
         answer, status = http.get_json(REVIEWS_URL, request)
-        payload = answer.get("response")
-        if not isinstance(payload, dict):
-            raise SteamRequestError(f"GetAppReviews {appid}: no response object")
+        payload = review_response(answer, appid)
 
         reviews = payload.get("reviews") or []
         records: list[ReviewRecord] = []

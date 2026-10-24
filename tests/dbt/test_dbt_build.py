@@ -17,6 +17,9 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import Engine, text
 
+from patchpulse.causal.config import CausalConfig, write_causal_config
+from patchpulse.causal.estimate import EFFECTS_VERSION, Estimate, Method, Sample
+from patchpulse.causal.store import write_estimates
 from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import upgrade_to_head
@@ -203,6 +206,64 @@ def test_site_export_reads_the_marts(built: Built) -> None:
     assert [(p["title"], p["type"], p["treatment"]) for p in game["patches"]] == [
         ("Devoid of Liberty: 7.1.1", "patch", True)
     ]
+
+
+TOO_FEW = "too few comparison games without their own patch (3 of 5 needed)"
+
+
+def estimate(horizon: int, method: Method, effect: float | None, **values: Any) -> Estimate:
+    return Estimate(
+        bundle_id="100",
+        patch_ids=("100",),
+        appid=GAME_A,
+        outcome=values.get("outcome", "positive_share"),
+        sample=values.get("sample", Sample.ALL),
+        horizon=horizon,
+        method=method,
+        effect=effect,
+        lo90=None if effect is None else effect - 2,
+        hi90=None if effect is None else effect + 2,
+        p_value=None,
+        pre_fit_rmse=None,
+        donors=(),
+        flags=frozenset(),
+        reason=values.get("reason"),
+        fingerprint=f"{horizon}{method}{values}".ljust(64, "0")[:64],
+        version=EFFECTS_VERSION,
+    )
+
+
+def test_site_export_serves_the_stored_estimates(built: Built, tmp_path: Path) -> None:
+    # Phase 4 schema 3: the default method's positive-share row per horizon, or interrupted time
+    # series with the default's reason where the default has none; other outcomes and samples
+    # never reach the site.
+    synth_default = tmp_path / "causal.yaml"
+    write_causal_config(CausalConfig("synth", EFFECTS_VERSION, "ab" * 32), synth_default)
+    later = TODAY + timedelta(days=30)  # both windows after patch 100 (DAY2) have ended
+    rows = [
+        estimate(7, Method.SYNTH, -4.0),
+        estimate(7, Method.ITS, -3.0),
+        estimate(14, Method.SYNTH, None, reason=TOO_FEW),
+        estimate(14, Method.ITS, -2.5),
+        estimate(14, Method.ITS, -9.0, sample=Sample.ESTABLISHED),
+        estimate(7, Method.SYNTH, 12.0, outcome="volume"),
+    ]
+    with built.admin.begin() as connection:
+        write_estimates(connection, rows, run_id=1, computed_at=TODAY)
+        files = build_site_export(
+            connection, data_version=1, generated_at=later, causal_config_path=synth_default
+        )
+
+    assert json.loads(files["index.json"])["causal"] == {
+        "default_method": "synth",
+        "effects_version": EFFECTS_VERSION,
+        "benchmark_report": "reports/causal/benchmark.md",
+    }
+    (patch,) = json.loads(files[f"games/{GAME_A}.json"])["patches"]
+    served = [
+        (h["days"], h["method"], h["effect"], h["reason"]) for h in patch["effect"]["horizons"]
+    ]
+    assert served == [(7, "synth", -4.0, None), (14, "its", -2.5, TOO_FEW)]
 
 
 def test_reloading_an_edited_review_updates_not_duplicates(built: Built) -> None:

@@ -5,8 +5,9 @@ import {
   beforeAfter,
   weakAspects,
 } from "@/lib/aspects";
+import { describeEffect } from "@/lib/effects";
 import { formatCount, formatDate, formatShare } from "@/lib/series";
-import type { AspectModel, AspectSeries, Patch } from "@/lib/types";
+import type { AspectModel, AspectSeries, CausalInfo, Patch } from "@/lib/types";
 
 /** Percentage points with their sign: "+20", "−4", "0". */
 function signed(value: number): string {
@@ -52,9 +53,38 @@ function Notes({ comparison }: { comparison: PatchComparison }) {
   ) : null;
 }
 
-type TableProps = { patch: Patch; aspects: AspectSeries; open: boolean; weak: Set<string> };
+type EstimateContext = { causal: CausalInfo | null; discountsFrom: string | null };
 
-function PatchTable({ patch, aspects, open, weak }: TableProps) {
+/** Schema 3: the patch's estimated effect on positive reviews, or why there's none. */
+function Estimate({ patch, causal, discountsFrom }: { patch: Patch } & EstimateContext) {
+  if (!patch.effect) return null; // schema 2, or not a treatment candidate
+  const { line, notes } = describeEffect(patch.effect, {
+    patchDate: patch.date,
+    defaultMethod: causal?.default_method ?? null,
+    discountsFrom,
+  });
+  return (
+    <div className="patch-effect">
+      <p className="patch-effect-line">{line}</p>
+      {notes.length > 0 && (
+        <ul className="patch-effect-notes">
+          {notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+type TableProps = {
+  patch: Patch;
+  aspects: AspectSeries;
+  open: boolean;
+  weak: Set<string>;
+} & EstimateContext;
+
+function PatchTable({ patch, aspects, open, weak, causal, discountsFrom }: TableProps) {
   const comparison = beforeAfter(aspects, patch.date);
   return (
     <details className="patch-aspect" open={open}>
@@ -62,6 +92,7 @@ function PatchTable({ patch, aspects, open, weak }: TableProps) {
         <span className="patch-aspect-title">{patch.title}</span>
         <span className="patch-aspect-date">{formatDate(patch.date)}</span>
       </summary>
+      <Estimate patch={patch} causal={causal} discountsFrom={discountsFrom} />
       <Notes comparison={comparison} />
       <div className="table-scroll">
         <table>
@@ -100,15 +131,23 @@ function PatchTable({ patch, aspects, open, weak }: TableProps) {
   );
 }
 
-/** One table per major update or patch, newest first (the first one open). */
+/**
+ * One table per major update or patch, newest first (the first one open), each under its
+ * estimated effect when the data has one (schema 3). `discountsFrom` is the first day the game's
+ * price is known.
+ */
 export function PatchAspectTables({
   aspects,
   patches,
   model = null,
+  causal = null,
+  discountsFrom = null,
 }: {
   aspects: AspectSeries;
   patches: Patch[];
   model?: AspectModel | null;
+  causal?: CausalInfo | null;
+  discountsFrom?: string | null;
 }) {
   const weak = weakAspects(model);
   const treatments = patches
@@ -131,6 +170,8 @@ export function PatchAspectTables({
           aspects={aspects}
           open={index === 0}
           weak={weak}
+          causal={causal}
+          discountsFrom={discountsFrom}
         />
       ))}
       {aspects.codes.some((code) => weak.has(code)) && <p className="chart-note">{WEAK_NOTE}</p>}

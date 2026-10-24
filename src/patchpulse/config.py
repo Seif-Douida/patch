@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     qdrant_api_key: SecretStr | None = None
     encoder_dir: Path | None = None
     index_budget_minutes: int = 5
+    # Phase 4's effects stage (design D10): estimating the patches whose window ended or whose
+    # inputs changed; what's left waits a night. 0 turns it off.
+    effects_budget_minutes: int = 2
     github_repository: str | None = None
     github_app_id: str | None = None
     github_app_private_key: SecretStr | None = None

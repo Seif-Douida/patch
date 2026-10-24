@@ -87,6 +87,7 @@ dev = [
     { include-group = "ml" },
     { include-group = "scoring" },
     { include-group = "retrieval" },
+    { include-group = "causal" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
     # Tests build tiny ONNX graphs as fake encoders; the jobs image doesn't need it.
@@ -122,6 +123,11 @@ ml = [
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
     "tzdata>=2026.4",
+]
+# Phase 4: the causal estimators (design D1): the nightly effects stage and the benchmark.
+causal = [
+    "numpy>=2.5.3",
+    "scipy>=1.18.1",
 ]
 # Phase 2: what the jobs image needs to score reviews (design D5, D8): S0 through scikit-learn,
 # S1a and S1b through ONNX Runtime and tokenizers. Never PyTorch.

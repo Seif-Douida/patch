@@ -30,6 +30,11 @@ class FakeSteam:
         self.cut_short: dict[int, int] = {}
         self.prices_down = False
         self.requests: list[httpx2.Request] = []
+        # Phase 4: appdetails without filters (name, genres, release_date) per game, and per-day
+        # review requests to break: appid -> "no response" (no `response` object) or "no summary"
+        # (no counts on the first page).
+        self.details: dict[int, dict[str, Any]] = {}
+        self.day_counts_broken: dict[int, str] = {}
 
     def add_review(self, appid: int, rid: int, created: datetime, *, voted_up: bool = True) -> None:
         stamp = int(created.timestamp())
@@ -94,6 +99,8 @@ class FakeSteam:
         if "GetNewsForApp" in path:
             appid = int(params["appid"])
             return httpx2.Response(200, json={"appnews": {"newsitems": self.news.get(appid, [])}})
+        if "appdetails" in path and "filters" not in params:
+            return self._details(params["appids"])
         if self.prices_down:
             return httpx2.Response(503)
         body: dict[str, Any] = {}
@@ -118,15 +125,30 @@ class FakeSteam:
             key=lambda r: r["timestamp_created"],
             reverse=True,
         )
+        broken = self.day_counts_broken.get(appid)
+        if broken == "no response":
+            return httpx2.Response(200, json={})
         cursor = str(query["cursor"])
+        per_page = min(int(query.get("num_per_page", 20)), self.page_size)
         offset = 0 if cursor == "*" else int(cursor[1:])
         served = matching[: self.cut_short.get(appid, len(matching))]
-        page = served[offset : offset + self.page_size]
+        page = served[offset : offset + per_page]
         next_cursor = f"o{offset + len(page)}"
-        # Like Steam: the window's count on the first page only.
-        first = cursor == "*"
-        summary = {"num_reviews": len(page), "total_reviews": len(matching)} if first else {}
+        # Like Steam: the window's counts on the first page only.
+        summary: dict[str, int] = {"num_reviews": len(page)}
+        if cursor == "*" and broken != "no summary":
+            positive = sum(1 for r in matching if r["voted_up"])
+            summary |= {
+                "total_positive": positive,
+                "total_negative": len(matching) - positive,
+                "total_reviews": len(matching),
+            }
         return httpx2.Response(
             200,
             json={"response": {"query_summary": summary, "reviews": page, "cursor": next_cursor}},
         )
+
+    def _details(self, appid: str) -> httpx2.Response:
+        detail = self.details.get(int(appid))
+        entry = {"success": True, "data": detail} if detail else {"success": False}
+        return httpx2.Response(200, json={appid: entry})

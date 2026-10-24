@@ -7,9 +7,10 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
@@ -28,6 +29,7 @@ from patchpulse.ingest.coverage import REREAD, start_of_day
 from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
+from patchpulse.pipeline.effects import EffectsOutcome
 from patchpulse.pipeline.indexing import IndexOutcome, run_index
 from patchpulse.pipeline.runner import (
     NIGHT_RESERVE_S,
@@ -189,6 +191,91 @@ def test_nightly_end_to_end_with_mocked_steam(env: Env) -> None:
     stages = json.loads(run.stages)
     assert {"reviews", "news", "prices", "backfill", "dbt", "export", "durations_s"} <= set(stages)
     assert stages["reviews"]["new_versions"] + stages["backfill"]["new_versions"] == 10
+    # The real stage on the real marts: the one patch is 2 days old, so no window is complete.
+    assert stages["effects"] == {"estimated": 0, "written": 0, "unchanged": 0, "remaining": 0}
+
+
+DONOR = 1245620
+DONOR_2 = 2050650
+YESTERDAY = NOW.date() - timedelta(days=1)
+
+
+def add_donor(env: Env, appid: int = DONOR, name: str = "Elden Ring") -> None:
+    with env.games_file.open("a", encoding="utf-8") as games:
+        games.write(
+            f"  - {{appid: {appid}, name: {name}, genres: [Action, RPG], role: donor, "
+            f"backfill_start: {BACKFILL_START}}}\n"
+        )
+
+
+def review_query(request: Any) -> dict[str, Any] | None:
+    """A GetAppReviews request's input_json, or None for any other request."""
+    url = urlsplit(str(request.url))
+    if url.path != "/IUserReviewsService/GetAppReviews/v1/":
+        return None
+    query: dict[str, Any] = json.loads(parse_qs(url.query)["input_json"][0])
+    return query
+
+
+def ago(days: int) -> date:
+    return YESTERDAY - timedelta(days=days)
+
+
+def noon(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, 12, tzinfo=UTC)
+
+
+def store_count(env: Env, appid: int, day: date) -> None:
+    with env.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO raw.steam_review_daily "
+                "(appid, [day], positive, negative, fetched_run_id, fetched_at) "
+                "VALUES (:appid, :day, 0, 0, 0, '2026-01-01')"
+            ),
+            {"appid": appid, "day": day},
+        )
+
+
+def count_days(env: Env, appid: int) -> list[tuple[date, int, int]]:
+    return [
+        (r.day, r.positive, r.negative)
+        for r in env.rows(
+            "SELECT [day], positive, negative FROM raw.steam_review_daily "
+            f"WHERE appid = {appid} ORDER BY [day]"
+        )
+    ]
+
+
+def test_a_donor_never_reaches_reviews_backfill_prices_or_the_site(env: Env) -> None:
+    # Phase 4: a comparison game gets its news (patch dates) and nothing else of the review
+    # pipeline; review text, prices and the site are for tracked games only.
+    add_donor(env)
+    env.steam.add_review(DONOR, 900, NOW - timedelta(days=1))
+    env.steam.add_review(DONOR, 901, NOW - timedelta(days=20))
+    env.steam.add_news(DONOR, "950", "Patch 1.16", NOW - timedelta(days=3))
+    env.steam.prices[DONOR] = {
+        "currency": "USD",
+        "initial": 5999,
+        "final": 5999,
+        "discount_percent": 0,
+    }
+
+    result = env.run()
+
+    assert result.status == "succeeded"
+    urls = [str(request.url) for request in env.steam.requests]
+    # Its reviews are only ever counted: one a page, read for the counts and dropped.
+    asked = [q for q in map(review_query, env.steam.requests) if q and q["appid"] == DONOR]
+    assert asked
+    assert {q["num_per_page"] for q in asked} == {1}
+    assert not [u for u in urls if "appids=" in u and str(DONOR) in u]
+    assert [u for u in urls if "GetNewsForApp" in u and f"appid={DONOR}" in u]
+    ((files, _),) = env.publisher.calls
+    assert f"games/{DONOR}.json" not in files
+    assert DONOR not in {g["appid"] for g in json.loads(files["index.json"])["games"]}
+    assert DONOR not in [r.appid for r in env.rows("SELECT appid FROM ops.ingest_state")]
+    assert [r.appid for r in env.rows("SELECT appid FROM raw.steam_review")].count(DONOR) == 0
 
 
 def test_watermark_moves_only_after_a_successful_run(env: Env) -> None:
@@ -620,3 +707,176 @@ def test_index_stage_end_to_end_on_both_containers(
 
     assert (second.stages["index"]["upserted"], second.stages["index"]["mismatch"]) == (0, 0)
     assert env.publisher.alerts == []
+
+
+def test_counts_stage_catches_up_and_stops_cleanly(env: Env) -> None:
+    # Review focus 5: Steam stops answering mid-stage; the night still publishes, and the next
+    # night fills the gap without duplicates.
+    add_donor(env)
+    store_count(env, DONOR, ago(6))
+    env.steam.add_review(DONOR, 900, noon(ago(5)))
+    env.steam.add_review(DONOR, 901, noon(ago(5)), voted_up=False)
+    env.steam.add_review(DONOR, 902, noon(ago(0)))
+    env.steam.rate_limit_after = 4 + 2  # the reviews stage's 4 requests, then 2 days of counts
+
+    first = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert first.status == "succeeded"
+    assert len(env.publisher.calls) == 1
+    counts = first.stages["counts"]
+    assert (counts["requests"], counts["days"], counts["behind"]) == (3, 2, 1)
+    assert counts["stopped"].startswith("SteamUnavailableError")
+    checks = {(r.check_name, r.severity) for r in env.rows("SELECT * FROM ops.data_quality_result")}
+    assert ("counts_stopped", "warn") in checks
+
+    env.steam.rate_limit_after = None
+    second = env.run(dbt=ok_dbt, export=stub_export)
+    third = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert second.stages["counts"] == {"requests": 4, "days": 4, "behind": 0, "stopped": None}
+    assert third.stages["counts"] == {"requests": 0, "days": 0, "behind": 0, "stopped": None}
+    assert count_days(env, DONOR) == [
+        (ago(6), 0, 0),
+        (ago(5), 1, 1),
+        (ago(4), 0, 0),
+        (ago(3), 0, 0),
+        (ago(2), 0, 0),
+        (ago(1), 0, 0),
+        (ago(0), 1, 0),
+    ]
+
+
+def test_counts_start_after_the_seed_or_at_the_backfill_start(env: Env) -> None:
+    add_donor(env)
+    add_donor(env, DONOR_2, "Monster Hunter Wilds")
+    with env.engine.begin() as connection:  # what `dbt seed` loads into core
+        connection.execute(
+            text(
+                "CREATE TABLE core.donor_daily_counts "
+                "(appid int, [day] date, positive int, negative int)"
+            )
+        )
+        connection.execute(
+            text("INSERT INTO core.donor_daily_counts VALUES (:appid, :day, 5, 1)"),
+            {"appid": DONOR, "day": ago(2)},
+        )
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert [d for d, _, _ in count_days(env, DONOR)] == [ago(1), ago(0)]
+    # No seed and nothing stored: from its backfill start, 4 days a night (20 to fetch).
+    assert [d for d, _, _ in count_days(env, DONOR_2)] == [
+        BACKFILL_START + timedelta(days=k) for k in range(4)
+    ]
+    assert result.stages["counts"]["behind"] == 1
+
+
+def test_a_broken_count_fails_that_donor_only(env: Env) -> None:
+    add_donor(env)
+    add_donor(env, DONOR_2, "Monster Hunter Wilds")
+    for appid in (DONOR, DONOR_2):
+        store_count(env, appid, ago(2))
+    env.steam.day_counts_broken[DONOR] = "no response"
+
+    with pytest.raises(PipelineError, match=str(DONOR)):
+        env.run(dbt=ok_dbt, export=stub_export)
+
+    assert [d for d, _, _ in count_days(env, DONOR)] == [ago(2)]
+    assert [d for d, _, _ in count_days(env, DONOR_2)] == [ago(2), ago(1), ago(0)]
+    assert len(env.publisher.calls) == 1  # the night still ships
+
+
+def test_counts_stage_stops_at_the_night_deadline(env: Env) -> None:
+    add_donor(env)
+    store_count(env, DONOR, ago(3))
+
+    def clock() -> float:  # the night's time is used up once the prices (the stage before) are in
+        priced = any("appdetails" in str(request.url) for request in env.steam.requests)
+        return NIGHT_END + 1 if priced else 0.0
+
+    result = env.run(dbt=ok_dbt, export=stub_export, clock=clock)
+
+    assert result.status == "succeeded"
+    assert result.stages["counts"] == {
+        "requests": 0,
+        "days": 0,
+        "behind": 1,
+        "stopped": "night deadline",
+    }
+
+
+@dataclass
+class FakeEffects:
+    """The effects stage's work, replaced: each call returns (or raises) the next outcome."""
+
+    outcomes: list[EffectsOutcome | Exception]
+    deadlines: list[float] = field(default_factory=list)
+
+    def __call__(
+        self,
+        engine: Engine,
+        *,
+        run_id: int,
+        now: datetime,
+        clock: Callable[[], float],
+        deadline: float,
+    ) -> EffectsOutcome:
+        self.deadlines.append(deadline)
+        next_outcome = self.outcomes.pop(0)
+        if isinstance(next_outcome, Exception):
+            raise next_outcome
+        return next_outcome
+
+
+def test_effects_failure_is_a_warning_and_the_night_publishes(env: Env) -> None:
+    # Review focus 4: the estimates lag a night; the site still goes out.
+    effects = FakeEffects([RuntimeError("Invalid object name 'mart.daily_game_sentiment'")])
+
+    result = env.run(dbt=ok_dbt, export=stub_export, effects=effects)
+
+    assert result.status == "succeeded"
+    assert len(env.publisher.calls) == 1
+    order = list(result.stages["durations_s"])
+    assert order.index("dbt") < order.index("effects") < order.index("index")
+    assert result.stages["effects"]["skipped"].startswith("RuntimeError: Invalid object name")
+    (finding,) = env.rows(
+        "SELECT severity, detail FROM ops.data_quality_result WHERE check_name = 'effects_skipped'"
+    )
+    assert finding.severity == "warn"
+    assert finding.detail.startswith("RuntimeError")
+
+
+@pytest.mark.parametrize(
+    ("later", "deadline"),
+    [(0.0, 2 * 60), (NIGHT_END - 60, NIGHT_END)],
+    ids=["early: its own 2 minutes", "late: the night's end"],
+)
+def test_effects_stage_gets_its_budget_within_the_night(
+    env: Env, later: float, deadline: float
+) -> None:
+    effects = FakeEffects([EffectsOutcome(estimated=3, written=45, unchanged=1, remaining=0)])
+
+    result = env.run(dbt=ok_dbt, export=stub_export, effects=effects, clock=LateClock(later))
+
+    assert effects.deadlines == [deadline]
+    assert result.stages["effects"] == {
+        "estimated": 3,
+        "written": 45,
+        "unchanged": 1,
+        "remaining": 0,
+    }
+
+
+def test_effects_stage_is_off_at_a_budget_of_0(env: Env) -> None:
+    effects = FakeEffects([])
+
+    result = env.run(
+        settings=env.settings.model_copy(update={"effects_budget_minutes": 0}),
+        dbt=ok_dbt,
+        export=stub_export,
+        effects=effects,
+    )
+
+    assert result.status == "succeeded"
+    assert result.stages["effects"] == {"skipped": "turned off (PP_EFFECTS_BUDGET_MINUTES is 0)"}
+    assert effects.deadlines == []

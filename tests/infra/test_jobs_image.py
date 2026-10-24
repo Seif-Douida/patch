@@ -159,22 +159,42 @@ def test_downloads_run_with_only_the_steps_groups(step: str, command: list[str])
     assert "--to" in result.stdout
 
 
-def test_the_index_stage_imports_with_only_the_jobs_image_groups() -> None:
-    # 20 Oct: retrieval/sync.py imported pandas and retrieval/pin.py MLflow, neither in the jobs
-    # image, so the nightly index stage would have failed on import. Its modules must load with
-    # only the groups Dockerfile.jobs syncs.
+def jobs_image_groups() -> set[str]:
+    """The groups Dockerfile.jobs syncs (both of its `uv sync` commands name the same ones)."""
     dockerfile = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8")
     (installed,) = {
         frozenset(re.findall(r"--group (\w+)", sync))
         for sync in re.findall(r"uv sync [^\n]*", dockerfile)
     }
-    assert {"pandas", "mlflow", "pyarrow"} <= hidden_modules(set(installed))
+    return set(installed)
+
+
+def test_the_index_stage_imports_with_only_the_jobs_image_groups() -> None:
+    # 20 Oct: retrieval/sync.py imported pandas and retrieval/pin.py MLflow, neither in the jobs
+    # image, so the nightly index stage would have failed on import. Its modules must load with
+    # only the groups Dockerfile.jobs syncs.
+    installed = jobs_image_groups()
+    assert {"pandas", "mlflow", "pyarrow"} <= hidden_modules(installed)
 
     result = run_with_only(
-        set(installed),
+        installed,
         "import patchpulse.pipeline.cli, patchpulse.pipeline.indexing\n"
         "from patchpulse.pipeline.indexing import run_index\n"
         "print('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"
+
+
+def test_the_effects_stage_imports_with_only_the_jobs_image_groups() -> None:
+    # Phase 4: the effects stage reads its series through causal/series.py, never the benchmark's
+    # causal/cli.py, which imports pandas (not in the jobs image).
+    installed = jobs_image_groups()
+    assert "causal" in installed
+
+    result = run_with_only(
+        installed, "from patchpulse.pipeline.effects import run_effects\nprint('imported')\n"
     )
 
     assert result.returncode == 0, result.stderr[-1500:]
