@@ -10,8 +10,9 @@ Files (paths relative to the site's data folder):
   before the game has data) and `top_complaint_30d` (over the same 30 days, the aspect mentioned
   by the largest share of scored negative reviews: `code`, `share`, `n` scored negative reviews;
   off-topic and aspects with an F1 under MIN_ASPECT_F1 don't count; null without any), and
-  `causal` (Phase 4): `default_method` (its or synth, from config/causal.yaml), `effects_version`
-  and `benchmark_report` (the report's path in the repository; null until the benchmark has run).
+  `causal` (Phase 4): `default_method` (its or synth, from config/causal.yaml), `effects_version`,
+  `benchmark_report` (the report's path in the repository; null until the benchmark has run) and
+  `validated` (a method met ADR-007's rule; false until then).
 * `games/{appid}.json`: the same header fields plus `appid`, `name`, `genres`, `series` (one
   point per day: `date`, `n`, `pos`, `share`, `lo`, `hi`, `sale`, `discount`), `patches`
   (`date`, `title`, `url`, `type`, `treatment`, `effect`) and `aspects`: `codes` (the taxonomy,
@@ -122,6 +123,7 @@ class Effects:
     default_method: str
     effects_version: str
     benchmark_report: str | None
+    validated: bool  # a method met ADR-007's rule (config/causal.yaml)
     rows: Sequence[EffectRow]
 
 
@@ -384,6 +386,7 @@ def shape_site_export(
             "default_method": effects.default_method,
             "effects_version": effects.effects_version,
             "benchmark_report": effects.benchmark_report,
+            "validated": effects.validated,
         }
     files["index.json"] = _dump(
         {**header, "aspect_model": model, "causal": causal, "games": listing}
@@ -438,6 +441,7 @@ def _effects(connection: Connection, config_path: Path) -> Effects:
         default_method=config.default_method,
         effects_version=EFFECTS_VERSION,
         benchmark_report=BENCHMARK_REPORT if config.benchmarked else None,
+        validated=config.validated,
         rows=[
             EffectRow(r.bundle_id, r.horizon, r.effect, r.lo90, r.hi90, r.method, r.flags, r.reason)
             for r in serve(stored, config.default_method, fallback=True)

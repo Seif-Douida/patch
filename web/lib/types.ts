@@ -50,6 +50,7 @@ export type CausalInfo = {
   default_method: CausalMethod;
   effects_version: string;
   benchmark_report: string | null; // its path in the repository; null until the benchmark ran
+  validated: boolean; // a method met the benchmark's rule (ADR-007); false until it ran
 };
 
 export type SiteIndex = Header & {

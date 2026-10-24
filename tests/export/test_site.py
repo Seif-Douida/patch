@@ -304,9 +304,15 @@ def effect_row(bundle_id: str, horizon: int, method: str, **values: Any) -> Effe
     )
 
 
-def effects(*rows: EffectRow, method: str = "synth", report: str | None = None) -> Effects:
+def effects(
+    *rows: EffectRow, method: str = "synth", report: str | None = None, validated: bool = True
+) -> Effects:
     return Effects(
-        default_method=method, effects_version="e2", benchmark_report=report, rows=list(rows)
+        default_method=method,
+        effects_version="e2",
+        benchmark_report=report,
+        validated=validated,
+        rows=list(rows),
     )
 
 
@@ -399,13 +405,18 @@ def test_index_names_the_default_method() -> None:
     patches = [patch(553850, D1, "Patch 1.0")]
 
     with_effects = export([HD2], [], patches, effects=effects(method="synth", report=report))
+    unvalidated = export(
+        [HD2], [], patches, effects=effects(method="its", report=report, validated=False)
+    )
     without = export([HD2], [], patches)
 
     assert load(with_effects, "index.json")["causal"] == {
         "default_method": "synth",
         "effects_version": "e2",
         "benchmark_report": report,
+        "validated": True,
     }
+    assert load(unvalidated, "index.json")["causal"]["validated"] is False  # ADR-007 rule 3
     # Without the effects input (no stored estimates read), no causal block and no estimates.
     assert load(without, "index.json")["causal"] is None
     assert [p["effect"] for p in load(without, "games/553850.json")["patches"]] == [None]

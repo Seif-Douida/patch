@@ -178,7 +178,10 @@ def run_benchmark(paths: BenchmarkPaths, *, per_cell: int, seed: int, dry_run: b
             }
         )
         mlflow.log_artifact(str(target))
-    write_causal_config(CausalConfig(choice.method, EFFECTS_VERSION, digest), paths.config)
+    write_causal_config(
+        CausalConfig(choice.method, EFFECTS_VERSION, digest, validated=choice.validated),
+        paths.config,
+    )
     return 0
 
 

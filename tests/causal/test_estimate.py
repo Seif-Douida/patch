@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import math
+import os
+import subprocess
+import sys
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 import numpy as np
 import pytest
@@ -22,6 +25,7 @@ from patchpulse.causal import estimate
 from patchpulse.causal.bundles import Bundle, Patch
 from patchpulse.causal.estimate import (
     EFFECTS_VERSION,
+    EffectInputs,
     Estimate,
     EstimateKey,
     Method,
@@ -195,6 +199,41 @@ def test_synth_falls_back_with_its_reason() -> None:
     )
 
 
+def test_seven_day_synth_waits_for_the_comparison_games_fourteen_days() -> None:
+    def night(last: date) -> EffectInputs:
+        """The inputs a night reads: every series ends at the last complete day."""
+
+        def cut(series: DailySeries) -> DailySeries:
+            part = series.span(series.first_day, last)
+            assert part is not None
+            return part
+
+        full = world()
+        return replace(
+            full,
+            series={a: cut(s) for a, s in full.series.items()},
+            established={a: cut(s) for a, s in full.established.items()},
+            aspects={a: {c: cut(s) for c, s in m.items()} for a, m in full.aspects.items()},
+            donors={a: cut(s) for a, s in full.donors.items()},
+            last_complete_day=last,
+        )
+
+    waiting = [
+        find(estimate_bundle(BUNDLE, night(day(n))), POSITIVE_SHARE, Method.SYNTH, 7)
+        for n in (8, 9)
+    ]
+
+    assert {row.effect for row in waiting} == {None}
+    assert {row.reason for row in waiting} == {
+        "the comparison games are checked over the 14 days after the patch, which end on "
+        "17 Jun 2026"
+    }
+    assert waiting[0].fingerprint == waiting[1].fingerprint  # not recomputed every night
+    ready = find(estimate_bundle(BUNDLE, night(day(13))), POSITIVE_SHARE, Method.SYNTH, 7)
+    assert ready.effect is not None
+    assert ready.fingerprint != waiting[0].fingerprint
+
+
 def test_fourteen_days_only_when_allowed_and_complete() -> None:
     def horizons(rows: list[Estimate]) -> set[int]:
         return {r.horizon for r in rows}
@@ -202,6 +241,27 @@ def test_fourteen_days_only_when_allowed_and_complete() -> None:
     assert horizons(estimate_bundle(BUNDLE, world())) == {7, 14}
     assert horizons(estimate_bundle(replace(BUNDLE, allow_14=False), world())) == {7}
     assert horizons(estimate_bundle(BUNDLE, world(last_day=PATCH_DAY + timedelta(days=10)))) == {7}
+
+
+def test_fingerprint_is_the_same_in_every_process() -> None:
+    # Each night is a new process, and a set's order follows that process's string hashing.
+    code = (
+        "from patchpulse.causal.estimate import fingerprint; print(fingerprint('k', "
+        "frozenset({'confounded', 'discounts_unknown', 'volume_spike'}), "
+        "('p1', frozenset({'binned', 'volume_spike'}))))"
+    )
+    prints = {
+        subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        for seed in range(1, 7)
+    }
+
+    assert len(prints) == 1
 
 
 def test_fingerprint_changes_with_any_input_and_the_version(

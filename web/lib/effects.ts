@@ -32,6 +32,7 @@ const PLAIN: readonly (readonly [string, string])[] = [
   ["singular design", "the model couldn't be fitted"],
   ["non-finite result", "the model couldn't be fitted"],
   ["interval wider than the grid", "the 90% range was too wide to state"],
+  ["interval empty", "the comparison games didn't fit the days after the patch"],
   ["window not complete", "the days after the patch haven't ended"],
 ];
 

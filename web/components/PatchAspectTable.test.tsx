@@ -125,6 +125,7 @@ const SYNTH: CausalInfo = {
   default_method: "synth",
   effects_version: "e2",
   benchmark_report: "reports/causal/benchmark.md",
+  validated: true,
 };
 const TOO_FEW = "too few comparison games without their own patch (3 of 5 needed)";
 
@@ -273,9 +274,14 @@ describe("PatchAspectTables estimates", () => {
         method: "synth",
         reason: "interval wider than the grid",
       }),
+      none("Patch F", "2026-08-30", {
+        effect: -1.0,
+        method: "synth",
+        reason: "interval empty: no effect size passed the conformal test",
+      }),
     ]);
 
-    const lines = ["Patch A", "Patch B", "Patch C", "Patch D", "Patch E"].map(
+    const lines = ["Patch A", "Patch B", "Patch C", "Patch D", "Patch E", "Patch F"].map(
       (title) => estimateOf(title).line,
     );
     expect(lines).toEqual([
@@ -285,6 +291,7 @@ describe("PatchAspectTables estimates", () => {
       "No estimate: too little quiet history before the patch to check the range.",
       // An effect is never shown without its range.
       "No estimate: the 90% range was too wide to state.",
+      "No estimate: the comparison games didn't fit the days after the patch.",
     ]);
   });
 

@@ -32,6 +32,7 @@ from patchpulse.causal.estimate import (
 )
 from patchpulse.causal.series import from_counts
 from patchpulse.causal.store import stored_fingerprints, write_estimates
+from patchpulse.ingest.load import record_dq
 
 log = logging.getLogger("patchpulse.pipeline.effects")
 
@@ -48,6 +49,7 @@ class EffectsOutcome:
     written: int  # rows stored (only those whose fingerprint changed)
     unchanged: int  # bundles with a complete window whose rows were all current
     remaining: int  # bundles due but left for the next night by the deadline
+    failed: int  # bundles whose estimation raised; tried again the next night
 
 
 def _day(date_key: int) -> date:
@@ -182,7 +184,9 @@ def run_effects(
     deadline: float,
 ) -> EffectsOutcome:
     """Estimate the due bundles, newest first, each in its own transaction, until `deadline` (on
-    `clock`); a bundle started before the deadline finishes."""
+    `clock`); a bundle started before the deadline finishes. A bundle that raises is a warning
+    (effects_bundle_failed) and the rest go on: otherwise the newest one could block every older
+    bundle night after night."""
     began = time.monotonic()
     with engine.connect() as connection:
         inputs = read_inputs(connection, today=now.date())
@@ -192,11 +196,26 @@ def run_effects(
     complete = [
         b for b in tracked_bundles(inputs) if window_complete(b, shortest, inputs.last_complete_day)
     ]
-    estimated = written = 0
+    estimated = written = failed = 0
     for bundle in due:
         if clock() >= deadline:
             break
-        rows = estimate_bundle(bundle, inputs)
+        try:
+            rows = estimate_bundle(bundle, inputs)
+        except Exception as error:
+            failed += 1
+            detail = f"bundle {bundle.bundle_id}: {type(error).__name__}: {error}"
+            log.warning("effects: %s", detail)
+            with engine.begin() as connection:
+                record_dq(
+                    connection,
+                    run_id=run_id,
+                    check="effects_bundle_failed",
+                    appid=bundle.appid,
+                    severity="warn",
+                    detail=detail,
+                )
+            continue
         with engine.begin() as connection:
             written += write_estimates(connection, rows, run_id=run_id, computed_at=now)
         estimated += 1
@@ -204,15 +223,17 @@ def run_effects(
         estimated=estimated,
         written=written,
         unchanged=len(complete) - len(due),
-        remaining=len(due) - estimated,
+        remaining=len(due) - estimated - failed,
+        failed=failed,
     )
     log.info(
         "effects: %d bundles estimated, %d rows written, %d unchanged, %d left for the next "
-        "night (%.1f s)",
+        "night, %d failed (%.1f s)",
         outcome.estimated,
         outcome.written,
         outcome.unchanged,
         outcome.remaining,
+        outcome.failed,
         time.monotonic() - began,
     )
     return outcome

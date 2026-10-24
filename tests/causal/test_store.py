@@ -63,7 +63,7 @@ def estimate(**changes: object) -> Estimate:
 
 def config(tmp_path: Path, method: str) -> Path:
     path = tmp_path / "causal.yaml"
-    write_causal_config(CausalConfig(method, "e2", "ab" * 32), path)
+    write_causal_config(CausalConfig(method, "e2", "ab" * 32, validated=True), path)
     return path
 
 

@@ -18,21 +18,31 @@ export function MethodNote({ model }: { model: AspectModel | null | undefined })
   );
 }
 
-/** What the patch estimates are, what their range means and can't rule out (schema 3). */
+/** What the patch estimates are, what their range means and can't rule out (schema 3). With no
+ * method passing the benchmark's rule (ADR-007 rule 3) the range's promise isn't made. */
 export function EstimateNote({ causal }: { causal: CausalInfo | null | undefined }) {
   if (!causal) return null;
   const method = METHOD_NAMES[causal.default_method];
+  const unvalidated = causal.benchmark_report !== null && !causal.validated;
   return (
     <p className="method-note">
       An estimated effect is the gap between what happened to a game&apos;s share of positive
       reviews after a patch and what was expected without it, from the game&apos;s own history
       (interrupted time series) or from similar games without a patch of their own (synthetic
-      control). The 90% range should hold the true effect about 9 times in 10. It can&apos;t rule
-      out something else that changed at the same time, such as an event, news or a big launch.{" "}
+      control).{" "}
+      {unvalidated
+        ? "The tests below didn't confirm that the 90% range holds the true effect about 9 " +
+          "times in 10, so read it as a rough guide."
+        : "The 90% range should hold the true effect about 9 times in 10."}{" "}
+      It can&apos;t rule out something else that changed at the same time, such as an event, news
+      or a big launch.{" "}
       {causal.benchmark_report ? (
         <>
-          Estimates use {method} where it&apos;s possible, chosen by testing both methods on
-          effects added to quiet stretches of real data.{" "}
+          {unvalidated
+            ? `Estimates use ${method}: neither method passed the test on effects added to ` +
+              "quiet stretches of real data."
+            : `Estimates use ${method} where it's possible, chosen by testing both methods on ` +
+              "effects added to quiet stretches of real data."}{" "}
           <a href={`${REPO_URL}/blob/main/${causal.benchmark_report}`}>
             How the methods were tested
           </a>

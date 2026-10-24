@@ -238,7 +238,9 @@ def test_site_export_serves_the_stored_estimates(built: Built, tmp_path: Path) -
     # series with the default's reason where the default has none; other outcomes and samples
     # never reach the site.
     synth_default = tmp_path / "causal.yaml"
-    write_causal_config(CausalConfig("synth", EFFECTS_VERSION, "ab" * 32), synth_default)
+    write_causal_config(
+        CausalConfig("synth", EFFECTS_VERSION, "ab" * 32, validated=True), synth_default
+    )
     later = TODAY + timedelta(days=30)  # both windows after patch 100 (DAY2) have ended
     rows = [
         estimate(7, Method.SYNTH, -4.0),
@@ -258,6 +260,7 @@ def test_site_export_serves_the_stored_estimates(built: Built, tmp_path: Path) -
         "default_method": "synth",
         "effects_version": EFFECTS_VERSION,
         "benchmark_report": "reports/causal/benchmark.md",
+        "validated": True,
     }
     (patch,) = json.loads(files[f"games/{GAME_A}.json"])["patches"]
     served = [

@@ -22,7 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy import Engine, insert, text
 
 from patchpulse.causal.bundles import Patch
-from patchpulse.causal.estimate import GameInfo
+from patchpulse.causal.estimate import GameInfo, estimate_bundle
 from patchpulse.causal.its import POSITIVE_SHARE, VOLUME, aspect_outcome
 from patchpulse.config import Settings
 from patchpulse.db import tables
@@ -39,6 +39,7 @@ from patchpulse.ingest.load import (
 )
 from patchpulse.ingest.models import NewsItem, PriceSnapshot, ReviewRecord
 from patchpulse.ingest.patches import OFFICIAL_FEED, classify
+from patchpulse.pipeline import effects
 from patchpulse.pipeline.dbt import run_dbt
 from patchpulse.pipeline.effects import EffectsOutcome, read_inputs, run_effects
 
@@ -277,7 +278,7 @@ def test_first_night_estimates_every_complete_bundle(
     outcome = night(marts, run_id=1)
 
     # The first bundle's 7 and 14 days, the second's 7 (its 14 days end after tonight).
-    assert outcome == EffectsOutcome(estimated=2, written=45, unchanged=0, remaining=0)
+    assert outcome == EffectsOutcome(estimated=2, written=45, unchanged=0, remaining=0, failed=0)
     rows = stored(marts.engine)
     assert {key(r) for r in rows} == (
         keys_for(marts.engine, B1, 7)
@@ -294,6 +295,12 @@ def test_first_night_estimates_every_complete_bundle(
     assert PATCHED_DONOR not in donors  # its own patch is in the fit window
     assert json.loads(by_key[(B2, POSITIVE_SHARE, "all", 7, "its")].patch_ids) == [B2, "7003"]
     assert all("confounded" in r.flags for r in rows if r.bundle_id == B2)  # the discount
+    waiting = by_key[(B2, POSITIVE_SHARE, "all", 7, "synth")]
+    assert (waiting.effect, waiting.reason) == (
+        None,
+        "the comparison games are checked over the 14 days after the patch, which end on "
+        "7 Sep 2022",
+    )
     assert not any("confounded" in r.flags for r in rows if r.bundle_id == B1)
     (line,) = [r.getMessage() for r in caplog.records if r.name == "patchpulse.pipeline.effects"]
     assert line.startswith("effects: 2 bundles estimated, 45 rows written")
@@ -304,7 +311,7 @@ def test_second_night_writes_nothing_new(marts: World) -> None:
     second = night(marts, run_id=2)
 
     assert first.written == 45
-    assert second == EffectsOutcome(estimated=0, written=0, unchanged=2, remaining=0)
+    assert second == EffectsOutcome(estimated=0, written=0, unchanged=2, remaining=0, failed=0)
     assert {r.run_id for r in stored(marts.engine)} == {1}
 
 
@@ -319,14 +326,12 @@ def test_a_refilled_history_day_recomputes_its_bundle(marts: World) -> None:
 
     outcome = night(marts, run_id=3)
 
-    assert outcome == EffectsOutcome(estimated=1, written=4, unchanged=1, remaining=0)
+    assert outcome == EffectsOutcome(estimated=1, written=2, unchanged=1, remaining=0, failed=0)
     rows = stored(marts.engine)
     assert {key(r) for r in rows if r.run_id == 3} == {
         (B2, POSITIVE_SHARE, "all", 7, "its"),
         (B2, VOLUME, "all", 7, "its"),
-        (B2, POSITIVE_SHARE, "all", 7, "synth"),
-        (B2, VOLUME, "all", 7, "synth"),
-    }
+    }  # its synthetic control waits for day 13 and doesn't read the day yet
     assert sum(r.run_id == 1 for r in rows) == 45  # the earlier rows stay readable
 
 
@@ -336,10 +341,38 @@ def test_budget_stops_and_the_next_night_resumes(marts: World) -> None:
 
     first = run_effects(marts.engine, run_id=1, now=NOW, clock=clock, deadline=50.0)
 
-    assert first == EffectsOutcome(estimated=1, written=15, unchanged=0, remaining=1)
+    assert first == EffectsOutcome(estimated=1, written=15, unchanged=0, remaining=1, failed=0)
     assert {r.bundle_id for r in stored(marts.engine)} == {B2}  # newest first
 
     second = night(marts, run_id=2)
 
-    assert second == EffectsOutcome(estimated=1, written=30, unchanged=1, remaining=0)
+    assert second == EffectsOutcome(estimated=1, written=30, unchanged=1, remaining=0, failed=0)
     assert {(r.bundle_id, r.run_id) for r in stored(marts.engine)} == {(B2, 1), (B1, 2)}
+
+
+def test_a_failing_bundle_is_a_warning_and_the_others_go_on(
+    marts: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review focus 4: newest first, so one bundle failing every night would block all the rest.
+    real = estimate_bundle
+
+    def fails_on_b2(bundle: Any, inputs: Any) -> Any:
+        if bundle.bundle_id == B2:
+            raise ValueError("a series the estimators choke on")
+        return real(bundle, inputs)
+
+    monkeypatch.setattr(effects, "estimate_bundle", fails_on_b2)
+
+    outcome = night(marts, run_id=1)
+
+    assert outcome == EffectsOutcome(estimated=1, written=30, unchanged=0, remaining=0, failed=1)
+    assert {r.bundle_id for r in stored(marts.engine)} == {B1}
+    with marts.engine.connect() as connection:
+        warnings = connection.execute(
+            text(
+                "SELECT severity, appid, detail FROM ops.data_quality_result "
+                "WHERE check_name = 'effects_bundle_failed'"
+            )
+        ).all()
+    assert [(w.severity, w.appid) for w in warnings] == [("warn", GAME)]
+    assert warnings[0].detail == f"bundle {B2}: ValueError: a series the estimators choke on"

@@ -178,18 +178,28 @@ def latest_estimates(
     return [_stored(r) for r in connection.execute(_latest(*where, as_of=as_of))]
 
 
+NOT_RUN = "synthetic control isn't run for this outcome or sample"
+
+
+def _estimated(row: StoredEstimate) -> bool:
+    """An effect with its 90% range: what the site shows as an estimate."""
+    return row.effect is not None and row.lo90 is not None and row.hi90 is not None
+
+
 def serve(rows: Iterable[StoredEstimate], method: str, *, fallback: bool) -> list[StoredEstimate]:
-    """One row per bundle and horizon: `method`'s, or, with `fallback`, the interrupted time
-    series row carrying `method`'s reason where `method` has no effect and it has one. Sorted by
-    bundle and horizon."""
+    """One row per bundle and horizon: `method`'s; with `fallback`, the interrupted time series
+    row where `method` has no estimate with a range and it has one (carrying `method`'s reason),
+    or where `method` has no row at all (aspects and the established sample have only interrupted
+    time series). Sorted by bundle and horizon."""
     by_key = {(r.bundle_id, r.horizon, r.method): r for r in rows}
     served: list[StoredEstimate] = []
-    for bundle_id, horizon, row_method in sorted(by_key):
-        if row_method != method:
-            continue
-        default = by_key[(bundle_id, horizon, method)]
+    for bundle_id, horizon in sorted({(b, h) for b, h, _ in by_key}):
+        default = by_key.get((bundle_id, horizon, method))
         its = by_key.get((bundle_id, horizon, Method.ITS.value))
-        if fallback and default.effect is None and its is not None and its.effect is not None:
+        if default is None:
+            if fallback and its is not None:
+                served.append(replace(its, reason=NOT_RUN) if _estimated(its) else its)
+        elif fallback and not _estimated(default) and its is not None and _estimated(its):
             served.append(replace(its, reason=default.reason))
         else:
             served.append(default)

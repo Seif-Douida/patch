@@ -23,13 +23,14 @@ from datetime import date, timedelta
 
 import numpy as np
 
-from patchpulse.causal.bundles import Bundle
+from patchpulse.causal.bundles import Bundle, Patch, bundle_patches
 from patchpulse.causal.estimate import volume_spike
 from patchpulse.causal.its import (
     POSITIVE_SHARE,
     VOLUME,
     ItsResult,
     Kind,
+    NoEstimate,
     calibrated_its_effect,
 )
 from patchpulse.causal.rules import FIT_DAYS, MIN_DONORS, POST_DAYS, eligible_donors, genre_group
@@ -206,7 +207,9 @@ def _estimate(
     """(method, estimate, lo, hi, p-value, fallback) for interrupted time series and for synthetic
     control as served (falling back to interrupted time series when it would)."""
     own = patch_days.get(treated.appid, ())
-    earlier = [d for d in own if d < start]
+    # Steps at the earlier bundles' starts, as the nightly estimates fit them.
+    bundles = bundle_patches([Patch(f"p{i}", treated.appid, d) for i, d in enumerate(own)])
+    earlier = [b.start for b in bundles if b.start < start]
     busy = frozenset(own) | sale_days
     its = calibrated_its_effect(treated, start, horizon, earlier, kind, busy_days=busy)
     values = (its.effect, its.lo90, its.hi90) if isinstance(its, ItsResult) else (None, None, None)
@@ -221,9 +224,10 @@ def _estimate(
         fit = synth_effect(treated, donors, start, horizon, kind)
         if isinstance(fit, SynthFit) and fit.fit_ok:
             interval = conformal_interval(treated, donors, start, horizon, kind)
-            p_value = placebo_p_value(treated, donors, start, horizon, kind, fit)
-            lo, hi = interval if interval else (None, None)
-            synth_row = ("synth", fit.effect, lo, hi, p_value, False)
+            # Without a range the site serves the fallback instead.
+            if not isinstance(interval, NoEstimate):
+                p_value = placebo_p_value(treated, donors, start, horizon, kind, fit)
+                synth_row = ("synth", fit.effect, *interval, p_value, False)
     return [its_row, synth_row]
 
 

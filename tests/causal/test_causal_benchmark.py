@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from causal_fixtures import DONORS, FIRST, TREATED, steady, world
 
+from patchpulse.causal import benchmark
 from patchpulse.causal.benchmark import (
     Choice,
     QuietWindow,
@@ -21,7 +22,7 @@ from patchpulse.causal.benchmark import (
     run_trials,
     summarise,
 )
-from patchpulse.causal.its import ItsResult, calibrated_its_effect
+from patchpulse.causal.its import ItsResult, NoEstimate, calibrated_its_effect
 from patchpulse.causal.series import DailySeries
 
 
@@ -218,6 +219,36 @@ def test_benchmark_serves_the_calibrated_interval() -> None:
     assert (its.estimate, its.lo90, its.hi90) == (served.effect, served.lo90, served.hi90)
 
 
+def test_benchmark_steps_at_earlier_bundles_as_the_nightly_estimates_do() -> None:
+    inputs = world()
+    series = inputs.series[TREATED]
+    patches = [at(80), at(83)]  # one bundle (within 7 days) inside the 56-day pre-period
+
+    trials = run_trials(
+        [QuietWindow(TREATED, at(130))],
+        {TREATED: series},
+        inputs.donors,
+        {a: inputs.games[a].genres for a in [*DONORS, TREATED]},
+        {TREATED: patches},
+        effects=(0.0,),
+        shapes=("step",),
+        per_cell=1,
+        seed=1,
+        horizons=(14,),
+        outcomes=("positive_share",),
+        sale_days=frozenset(),
+    )
+
+    busy = frozenset(patches)
+    served = calibrated_its_effect(series, at(130), 14, [at(80)], "share", busy_days=busy)
+    per_patch = calibrated_its_effect(series, at(130), 14, patches, "share", busy_days=busy)
+    assert isinstance(served, ItsResult)
+    assert isinstance(per_patch, ItsResult)
+    assert served.effect != per_patch.effect
+    (its,) = [t for t in trials if t.method == "its"]
+    assert (its.estimate, its.lo90, its.hi90) == (served.effect, served.lo90, served.hi90)
+
+
 def test_ramp_truth_is_the_horizons_average() -> None:
     inputs = world()
     trials = run_trials(
@@ -321,3 +352,30 @@ def test_report_splits_the_metrics_by_volume_spike() -> None:
     assert "50% of the trials" in report
     assert "| Positive share | its | no | 40 | +1.00 | 1.00 | 90% | 5% |" in report
     assert "| Positive share | its | yes | 40 | +3.00 | 3.00 | 50% | 50% |" in report
+
+
+def test_synth_without_a_range_is_scored_as_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The site shows interrupted time series where synthetic control has no 90% range.
+    no_range = NoEstimate("interval wider than the grid")
+    monkeypatch.setattr(benchmark, "conformal_interval", lambda *args, **kwargs: no_range)
+    inputs = world()
+    groups = {a: inputs.games[a].genres for a in [*DONORS, TREATED]}
+
+    trials = run_trials(
+        [QuietWindow(TREATED, at(110))],
+        {TREATED: inputs.series[TREATED]},
+        inputs.donors,
+        groups,
+        {},
+        sale_days=frozenset(),
+        effects=(-5.0,),
+        shapes=("step",),
+        per_cell=1,
+        seed=7,
+        horizons=(14,),
+        outcomes=("positive_share",),
+    )
+
+    its, synth = sorted(trials, key=lambda t: t.method)
+    assert (synth.estimate, synth.lo90, synth.hi90) == (its.estimate, its.lo90, its.hi90)
+    assert synth.fallback

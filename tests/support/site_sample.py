@@ -206,6 +206,7 @@ EFFECTS = Effects(
     default_method="synth",
     effects_version="e2",
     benchmark_report="reports/causal/benchmark.md",
+    validated=True,
     rows=[
         EffectRow("5001", 7, -12.4, -16.0, -8.9, "synth", frozenset(), None),
         EffectRow("5001", 14, -9.8, -13.1, -6.4, "synth", frozenset(), None),

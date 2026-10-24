@@ -41,6 +41,7 @@ describe("EstimateNote", () => {
           default_method: "synth",
           effects_version: "e2",
           benchmark_report: "reports/causal/benchmark.md",
+          validated: true,
         }}
       />,
     );
@@ -62,7 +63,12 @@ describe("EstimateNote", () => {
   it("says_the_methods_are_not_yet_compared", () => {
     render(
       <EstimateNote
-        causal={{ default_method: "its", effects_version: "e2", benchmark_report: null }}
+        causal={{
+          default_method: "its",
+          effects_version: "e2",
+          benchmark_report: null,
+          validated: false,
+        }}
       />,
     );
 
@@ -71,6 +77,32 @@ describe("EstimateNote", () => {
         "published yet.",
     );
     expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("says_the_ranges_were_not_validated", () => {
+    // ADR-007 rule 3: no method met the benchmark's rule, so the range's promise isn't made.
+    render(
+      <EstimateNote
+        causal={{
+          default_method: "its",
+          effects_version: "e2",
+          benchmark_report: "reports/causal/benchmark.md",
+          validated: false,
+        }}
+      />,
+    );
+
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain("should hold the true effect");
+    expect(text).toContain(
+      "The tests below didn't confirm that the 90% range holds the true effect about 9 times " +
+        "in 10, so read it as a rough guide.",
+    );
+    expect(text).toContain(
+      "Estimates use interrupted time series: neither method passed the test on effects added " +
+        "to quiet stretches of real data.",
+    );
+    expect(screen.getByRole("link", { name: "How the methods were tested" })).toBeTruthy();
   });
 
   it("no_estimates_no_note", () => {

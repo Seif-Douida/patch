@@ -192,7 +192,13 @@ def test_nightly_end_to_end_with_mocked_steam(env: Env) -> None:
     assert {"reviews", "news", "prices", "backfill", "dbt", "export", "durations_s"} <= set(stages)
     assert stages["reviews"]["new_versions"] + stages["backfill"]["new_versions"] == 10
     # The real stage on the real marts: the one patch is 2 days old, so no window is complete.
-    assert stages["effects"] == {"estimated": 0, "written": 0, "unchanged": 0, "remaining": 0}
+    assert stages["effects"] == {
+        "estimated": 0,
+        "written": 0,
+        "unchanged": 0,
+        "remaining": 0,
+        "failed": 0,
+    }
 
 
 DONOR = 1245620
@@ -854,7 +860,9 @@ def test_effects_failure_is_a_warning_and_the_night_publishes(env: Env) -> None:
 def test_effects_stage_gets_its_budget_within_the_night(
     env: Env, later: float, deadline: float
 ) -> None:
-    effects = FakeEffects([EffectsOutcome(estimated=3, written=45, unchanged=1, remaining=0)])
+    effects = FakeEffects(
+        [EffectsOutcome(estimated=3, written=45, unchanged=1, remaining=0, failed=0)]
+    )
 
     result = env.run(dbt=ok_dbt, export=stub_export, effects=effects, clock=LateClock(later))
 
@@ -864,6 +872,7 @@ def test_effects_stage_gets_its_budget_within_the_night(
         "written": 45,
         "unchanged": 1,
         "remaining": 0,
+        "failed": 0,
     }
 
 

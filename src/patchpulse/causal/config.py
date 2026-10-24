@@ -1,6 +1,8 @@
 """`config/causal.yaml`: the default method the benchmark chose (ADR-007's rule), committed with
-the report it came from. Until the real benchmark has run, the default is interrupted time series
-with no report hash, which reads as "not yet benchmarked"."""
+the report it came from, and whether a method met the rule (`validated`; with none the default is
+interrupted time series and the site says its intervals weren't validated). Until the real
+benchmark has run, the default is interrupted time series with no report hash, which reads as
+"not yet benchmarked"."""
 
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ class CausalConfig:
     default_method: str
     effects_version: str
     report_sha256: str | None
+    validated: bool  # a method met ADR-007's rule; False until the benchmark has run
 
     @property
     def benchmarked(self) -> bool:
@@ -29,7 +32,12 @@ def read_causal_config(path: Path = CAUSAL_CONFIG_PATH) -> CausalConfig:
     if method not in {"its", "synth"}:
         raise ValueError(f"{path}: default_method must be its or synth, not {method!r}")
     sha = data.get("report_sha256")
-    return CausalConfig(method, str(data["effects_version"]), str(sha) if sha else None)
+    return CausalConfig(
+        method,
+        str(data["effects_version"]),
+        str(sha) if sha else None,
+        validated=bool(data.get("validated", False)),
+    )
 
 
 def write_causal_config(config: CausalConfig, path: Path = CAUSAL_CONFIG_PATH) -> None:
@@ -41,6 +49,7 @@ def write_causal_config(config: CausalConfig, path: Path = CAUSAL_CONFIG_PATH) -
                 "default_method": config.default_method,
                 "effects_version": config.effects_version,
                 "report_sha256": config.report_sha256,
+                "validated": config.validated,
             },
             sort_keys=False,
         ),
