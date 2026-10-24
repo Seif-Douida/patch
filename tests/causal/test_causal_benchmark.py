@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 
 import numpy as np
@@ -96,6 +97,7 @@ def trial(method: str, effect: float, estimate: float, lo: float, hi: float, **k
         "hi90": hi,
         "p_value": None,
         "fallback": False,
+        "volume_spike": False,
     }
     values.update(kw)
     return Trial(**values)  # type: ignore[arg-type]
@@ -238,6 +240,37 @@ def test_ramp_truth_is_the_horizons_average() -> None:
     assert truths[14] == pytest.approx(-7.0 * 11 / 14)
 
 
+def test_trials_carry_the_sites_volume_spike_flag() -> None:
+    inputs = world()
+    base = inputs.series[TREATED]
+    totals, positives = base.totals.copy(), base.positives.copy()
+    i = base.index_of(at(112))  # the third day of the window starting at(110)
+    totals[i], positives[i] = totals[i] * 5, positives[i] * 5
+    jumped = replace(base, totals=totals, positives=positives)
+    groups = {a: inputs.games[a].genres for a in [*DONORS, TREATED]}
+
+    def flags(series: DailySeries) -> set[bool]:
+        trials = run_trials(
+            [QuietWindow(TREATED, at(110))],
+            {TREATED: series},
+            inputs.donors,
+            groups,
+            {},
+            sale_days=frozenset(),
+            effects=(0.0,),
+            volume_effects=(-25.0,),  # thinned, the jump is still a spike
+            shapes=("step",),
+            per_cell=1,
+            seed=7,
+            horizons=(7, 14),
+        )
+        assert {t.outcome for t in trials} == {"positive_share", "volume"}
+        return {t.volume_spike for t in trials}
+
+    assert flags(jumped) == {True}
+    assert flags(base) == {False}
+
+
 def test_placebo_in_space_runs_on_quiet_comparison_games() -> None:
     inputs = world()
     groups = {a: inputs.games[a].genres for a in DONORS}
@@ -247,6 +280,7 @@ def test_placebo_in_space_runs_on_quiet_comparison_games() -> None:
     assert {t.appid for t in trials} <= set(DONORS)
     assert {t.effect_pts for t in trials} == {0.0}
     assert {t.method for t in trials} == {"its", "synth"}
+    assert {t.volume_spike for t in trials} == {False}  # steady comparison games
 
 
 def test_report_states_the_rule_and_the_limitations() -> None:
@@ -270,3 +304,20 @@ def test_report_states_the_rule_and_the_limitations() -> None:
     assert "calibrated on quiet dates in the game's own past" in report
     for limitation in ("Aspect", "rules classifier", "30 Sep 2026"):
         assert limitation in report
+
+
+def test_report_splits_the_metrics_by_volume_spike() -> None:
+    calm = calibrated("its", miss=2, alarms=1, error=1.0)
+    spiky = [
+        replace(t, volume_spike=True) for t in calibrated("its", miss=10, alarms=10, error=3.0)
+    ]
+    trials = calm + spiky
+
+    report = render_benchmark_report(
+        summarise(trials), choose_default(trials), trials, [], {"seed": 7}
+    )
+
+    assert "## Windows with a volume spike" in report
+    assert "50% of the trials" in report
+    assert "| Positive share | its | no | 40 | +1.00 | 1.00 | 90% | 5% |" in report
+    assert "| Positive share | its | yes | 40 | +3.00 | 3.00 | 50% | 50% |" in report

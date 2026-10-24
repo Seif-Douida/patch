@@ -30,6 +30,7 @@ from patchpulse.causal.estimate import (
     estimate_bundle,
     fingerprint,
     flags_for,
+    volume_spike,
 )
 from patchpulse.causal.its import POSITIVE_SHARE, VOLUME, aspect_outcome
 from patchpulse.causal.series import DailySeries
@@ -149,6 +150,24 @@ def test_each_flag() -> None:
 
     rows = estimate_bundle(BUNDLE, world(treated=steady(TREATED, per_day=15, seed=1)))
     assert "binned" in find(rows, POSITIVE_SHARE, Method.ITS).flags
+
+
+def test_volume_spike_is_a_day_three_sds_above_the_month_before() -> None:
+    def jumped(series: DailySeries, offset: int, factor: float) -> DailySeries:
+        totals, positives = series.totals.copy(), series.positives.copy()
+        i = series.index_of(day(offset))
+        totals[i], positives[i] = int(totals[i] * factor), int(positives[i] * factor)
+        return replace(series, totals=totals, positives=positives)
+
+    base = steady(TREATED, seed=1)
+
+    assert not volume_spike(base, PATCH_DAY, 14)
+    assert volume_spike(jumped(base, 2, 5), PATCH_DAY, 14)
+    assert volume_spike(jumped(base, 2, 5), PATCH_DAY, 7)
+    assert not volume_spike(jumped(base, 10, 5), PATCH_DAY, 7)  # after the horizon
+    assert not volume_spike(jumped(base, 2, 0.2), PATCH_DAY, 14)  # a drop isn't a spike
+    late = steady(TREATED, first=PATCH_DAY - timedelta(days=5), days=40, seed=1)
+    assert not volume_spike(jumped(late, 2, 5), PATCH_DAY, 14)  # under 7 days before
 
 
 def test_synth_falls_back_with_its_reason() -> None:

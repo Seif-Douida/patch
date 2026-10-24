@@ -24,6 +24,7 @@ from datetime import date, timedelta
 import numpy as np
 
 from patchpulse.causal.bundles import Bundle
+from patchpulse.causal.estimate import volume_spike
 from patchpulse.causal.its import (
     POSITIVE_SHARE,
     VOLUME,
@@ -66,6 +67,7 @@ class Trial:
     hi90: float | None
     p_value: float | None
     fallback: bool  # synthetic control fell back to interrupted time series
+    volume_spike: bool  # the site's flag on the (injected) window: a real event the calendar missed
 
 
 @dataclass(frozen=True)
@@ -263,6 +265,7 @@ def run_trials(
                         rows = _estimate(
                             hit, pool, groups, patch_days, window.start, horizon, kind, sale_days
                         )
+                        spike = volume_spike(hit, window.start, horizon)
                         for method, estimate, lo, hi, p_value, fallback in rows:
                             trials.append(
                                 Trial(
@@ -280,6 +283,7 @@ def run_trials(
                                     hi,
                                     p_value,
                                     fallback,
+                                    spike,
                                 )
                             )
     return trials
@@ -309,6 +313,7 @@ def placebo_in_space(
             if not _clean(data, start - timedelta(days=FIT_DAYS), last):
                 continue
             pool = {a: s for a, s in donors.items() if a != appid}
+            spike = volume_spike(data, start, horizon)
             for method, estimate, lo, hi, p_value, fallback in _estimate(
                 data, pool, groups, patch_days, start, horizon, "share", sale_days
             ):
@@ -328,6 +333,7 @@ def placebo_in_space(
                         hi,
                         p_value,
                         fallback,
+                        spike,
                     )
                 )
     return trials
@@ -403,6 +409,62 @@ def _fmt(value: float | None, percent: bool = False) -> str:
     return f"{100 * value:.0f}%" if percent else f"{value:+.2f}"
 
 
+Pooled = tuple[int, float | None, float | None, float | None, float | None]
+
+
+def _pooled(trials: Sequence[Trial]) -> Pooled:
+    """(trials with an estimate, bias, RMSE, coverage of the non-zero effects, false alarms at 0),
+    every effect, shape, tier and horizon pooled."""
+    scored = [t for t in trials if t.estimate is not None]
+    errors = np.array([t.estimate - t.truth for t in scored if t.estimate is not None])
+    hits = [t for t in scored if t.effect_pts != 0]
+    nulls = [t for t in scored if t.effect_pts == 0]
+    return (
+        len(scored),
+        float(errors.mean()) if len(errors) else None,
+        float(np.sqrt((errors**2).mean())) if len(errors) else None,
+        float(np.mean([_covers(t, t.truth) for t in hits])) if hits else None,
+        float(np.mean([not _covers(t, 0.0) for t in nulls])) if nulls else None,
+    )
+
+
+def _spike_section(trials: Sequence[Trial]) -> list[str]:
+    share = float(np.mean([t.volume_spike for t in trials]))
+    lines = [
+        "## Windows with a volume spike",
+        "",
+        f"{100 * share:.0f}% of the trials ran on a window with a volume spike: the site's "
+        "`volume_spike` flag, a day in the horizon with reviews 3 SD above the 28 days before "
+        "(log scale). Quiet windows avoid patches and Steam's seasonal sales, so these are events "
+        "neither list holds: a game's own discount before 30 Sep 2026, an anniversary, an update "
+        "the classifier didn't mark as a patch. The rule above pools them, as the nightly "
+        "estimates meet them; the table shows how much less a flagged estimate can be trusted. "
+        "Bias and RMSE in points (positive share) or percent (volume).",
+        "",
+        "| Outcome | Method | Volume spike | Trials | Bias | RMSE | Coverage | False alarms at 0 |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for outcome in sorted({t.outcome for t in trials}):
+        for method in sorted({t.method for t in trials}):
+            for spike in (False, True):
+                group = [
+                    t
+                    for t in trials
+                    if (t.outcome, t.method, t.volume_spike) == (outcome, method, spike)
+                ]
+                if not group:
+                    continue
+                n, bias, rmse, coverage, fpr = _pooled(group)
+                lines.append(
+                    f"| {outcome.replace('_', ' ').capitalize()} | {method} | "
+                    f"{'yes' if spike else 'no'} | {n} | {_fmt(bias)} | "
+                    f"{'-' if rmse is None else f'{rmse:.2f}'} | {_fmt(coverage, True)} | "
+                    f"{_fmt(fpr, True)} |"
+                )
+    lines.append("")
+    return lines
+
+
 def render_benchmark_report(
     summary: Mapping[tuple[str, str, int, str, float, str], Metrics],
     choice: Choice,
@@ -455,6 +517,8 @@ def render_benchmark_report(
             "(too little quiet history to calibrate, or too few reviews).",
             "",
         ]
+    if trials:
+        lines += _spike_section(trials)
     for outcome in sorted({key[1] for key in summary}):
         unit = "points" if outcome == POSITIVE_SHARE else "percent"
         lines += [
@@ -495,7 +559,8 @@ def render_benchmark_report(
         "- Patch dates come from a rules classifier (rules-v1): a missed patch can leave a "
         '"quiet" window or a comparison game contaminated.',
         "- Game-specific discounts are known only since 30 Sep 2026; quiet windows avoid Steam's "
-        "seasonal sales but not earlier game discounts.",
+        "seasonal sales but not earlier game discounts (the volume-spike table shows their "
+        "weight).",
         "- Injected effects are level shifts or 7-day ramps; effects that fade are not tested.",
         "",
     ]

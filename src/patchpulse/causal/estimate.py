@@ -152,18 +152,24 @@ def flags_for(bundle: Bundle, horizon: int, inputs: EffectInputs) -> frozenset[s
     if bundle.start - timedelta(days=SALE_WINDOW_DAYS) < inputs.discounts_known_from:
         flags.add("discounts_unknown")
     series = inputs.series.get(bundle.appid)
-    if series is not None:
-        pre = _clipped(series, bundle.start - timedelta(days=FIT_DAYS), bundle.start - timedelta(1))
-        post = _clipped(series, bundle.start, bundle.start + timedelta(days=horizon - 1))
-        if pre is not None and post is not None and pre.observed.sum() >= 7:
-            before = np.log1p(pre.totals[pre.observed])
-            after = np.log1p(post.totals[post.observed])
-            # At least Poisson noise on the log scale: a perfectly steady volume still has a scale.
-            floor = 1.0 / np.sqrt(1.0 + float(pre.totals[pre.observed].mean()))
-            sd = max(float(before.std()), floor)
-            if (after > before.mean() + SPIKE_SDS * sd).any():
-                flags.add("volume_spike")
+    if series is not None and volume_spike(series, bundle.start, horizon):
+        flags.add("volume_spike")
     return frozenset(flags)
+
+
+def volume_spike(series: DailySeries, start: date, horizon: int) -> bool:
+    """A day in the horizon with reviews 3 SD above the 28 days before (log scale), given at least
+    7 days of data before. The benchmark splits its trials by this same test."""
+    pre = _clipped(series, start - timedelta(days=FIT_DAYS), start - timedelta(1))
+    post = _clipped(series, start, start + timedelta(days=horizon - 1))
+    if pre is None or post is None or pre.observed.sum() < 7:
+        return False
+    before = np.log1p(pre.totals[pre.observed])
+    after = np.log1p(post.totals[post.observed])
+    # At least Poisson noise on the log scale: a perfectly steady volume still has a scale.
+    floor = 1.0 / np.sqrt(1.0 + float(pre.totals[pre.observed].mean()))
+    sd = max(float(before.std()), floor)
+    return bool((after > before.mean() + SPIKE_SDS * sd).any())
 
 
 @dataclass(frozen=True)
