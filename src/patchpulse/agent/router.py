@@ -157,6 +157,7 @@ class ModelRouter:
         self.breaker = timedelta(minutes=breaker_minutes)
         self._failures: dict[str, int] = {}
         self._resting_until: dict[str, datetime] = {}  # a breaker or a daily quota
+        self._quota_until: dict[str, datetime] = {}  # a daily quota only
 
     def generate(
         self,
@@ -188,6 +189,7 @@ class ModelRouter:
                 data = parse_answer(response, schema)
             except QuotaExhaustedError:
                 self._resting_until[model] = next_pacific_midnight(now)
+                self._quota_until[model] = self._resting_until[model]
                 reasons[model] = "daily quota used up"
                 log.warning("%s: %s's daily quota is used up; resting it", step, model)
                 continue
@@ -205,6 +207,12 @@ class ModelRouter:
             return Routed(model, data, response.input_tokens, response.output_tokens, cached=False)
         summary = "; ".join(f"{m}: {r}" for m, r in reasons.items())
         raise AllModelsDownError(f"{step}: every model failed ({summary})")
+
+    def quota_spent(self) -> bool:
+        """Whether every model in the chain has used up its daily quota (it rests until a Pacific
+        midnight); a breaker's rest of a few minutes doesn't count."""
+        now = self.clock()
+        return all(now < self._quota_until.get(model, now) for model in self.chain)
 
     def _fail(self, model: str, now: datetime) -> None:
         self._failures[model] = self._failures.get(model, 0) + 1

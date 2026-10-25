@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any
+
+from pydantic import SecretStr
 
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.retrieval.search import Hit, QueryEmbedder, SearchFilters, search
@@ -37,6 +40,25 @@ class ReviewSearch:
     client: Any
     collection: str
     embedder: QueryEmbedder
+
+
+def open_pinned_search(
+    url: str, api_key: SecretStr | None, encoder_dir: Path, *, pin_path: Path | None = None
+) -> ReviewSearch:
+    """The collection config/retrieval.yaml pins, queried with the encoder in `encoder_dir`, which
+    must be the one the pin names (the index stage's check). The caller closes `client`."""
+    # Imported here: the encoder needs onnxruntime, which the agent's other users don't.
+    from patchpulse.models.artifact import sha256_file
+    from patchpulse.retrieval.embedders import MANIFEST_FILE, OnnxEmbedder
+    from patchpulse.retrieval.pin import PIN_PATH, read_pin
+    from patchpulse.retrieval.qdrant import make_client
+
+    path = pin_path or PIN_PATH
+    pin = read_pin(path)
+    if sha256_file(encoder_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
+        raise ValueError(f"the encoder in {encoder_dir} isn't the one {path} pins")
+    embedder = OnnxEmbedder(encoder_dir)
+    return ReviewSearch(make_client(url, api_key), pin.collection, embedder)
 
 
 def snippet(text: str) -> str:

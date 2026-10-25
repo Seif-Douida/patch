@@ -244,6 +244,25 @@ def test_daily_quota_retires_the_model_until_pacific_midnight(tmp_path: Path) ->
     assert models.generate("draft", "s", "u", SCHEMA).model_id == FIRST
 
 
+def test_quota_spent_only_when_every_model_rests_for_the_day(tmp_path: Path) -> None:
+    # Phase 5 Task 14: the past-patch command stops when the day's quota is used up, not when a
+    # model's breaker opens for a few minutes.
+    clock = FakeClock(START)
+    first = FakeClient(QuotaExhaustedError("daily quota"))
+    second = FakeClient(down(), QuotaExhaustedError("daily quota"))
+    models = router(tmp_path, {FIRST: first, SECOND: second}, clock=clock)
+    assert not models.quota_spent()
+
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+    assert not models.quota_spent()  # the second model is only failing
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+    assert models.quota_spent()
+    clock.now = datetime(2026, 10, 11, 7, 0, 1, tzinfo=UTC)  # past midnight in Los Angeles
+    assert not models.quota_spent()
+
+
 def test_breaker_skips_a_model_for_ten_minutes(tmp_path: Path) -> None:
     clock = FakeClock(START)
     first = FakeClient(down(), TeacherRequestError(400, "bad"), answer("nope"), answer(YES))

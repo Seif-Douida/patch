@@ -8,6 +8,7 @@ import json
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import date, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,10 +20,13 @@ from numpy.typing import NDArray
 from qdrant_client import QdrantClient, models
 from tiny_encoder import write_tiny_embedder
 
-from patchpulse.agent.search import MAX_HITS, SNIPPET_CHARS, ReviewSearch
+from patchpulse.agent.search import MAX_HITS, SNIPPET_CHARS, ReviewSearch, open_pinned_search
 from patchpulse.agent.tools import Tools, Trace
+from patchpulse.retrieval.embedders import CANDIDATES
+from patchpulse.retrieval.pin import pin_for, write_pin
 
 WINDOW = (PATCH_DAY, PATCH_DAY + timedelta(days=6))
+TINY = replace(CANDIDATES["e5-small"], name="tiny-index", dims=8, max_tokens=32)
 
 
 class FakeEmbedder:
@@ -226,3 +230,23 @@ def test_window_days_are_inclusive() -> None:
 
 def test_the_limits_are_the_plans() -> None:
     assert (SNIPPET_CHARS, MAX_HITS) == (400, 10)
+
+
+def test_pinned_search_opens_the_pinned_collection_with_the_pinned_encoder(tmp_path: Path) -> None:
+    # The nightly reports, the past-patch command and /ask search the collection
+    # config/retrieval.yaml pins, with the encoder it names, as the index stage checks.
+    encoder = tmp_path / "encoder"
+    write_tiny_embedder(encoder, TINY, dim=TINY.dims)
+    pin = tmp_path / "retrieval.yaml"
+    write_pin(pin_for(encoder, 1).model_copy(update={"collection": "reviews_v9"}), pin)
+
+    search = open_pinned_search("http://localhost:6333", None, encoder, pin_path=pin)
+    try:
+        assert search.collection == "reviews_v9"
+    finally:
+        search.client.close()
+
+    other = tmp_path / "other"
+    write_tiny_embedder(other, replace(TINY, name="other-index"), dim=TINY.dims)
+    with pytest.raises(ValueError, match="isn't the one"):
+        open_pinned_search("http://localhost:6333", None, other, pin_path=pin)

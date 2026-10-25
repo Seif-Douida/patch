@@ -52,6 +52,10 @@ param qdrantUrl string
 @secure()
 param qdrantApiKey string
 
+@description('Free-tier Gemini API key for the agent (Phase 5), from the secret PP_GEMINI_API_KEY. It reaches only pp-nightly, as a Container Apps secret. Billing stays off on its Google project.')
+@secure()
+param geminiApiKey string
+
 @description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
 @secure()
 param alertEmail string
@@ -117,6 +121,7 @@ module jobs 'modules/jobs.bicep' = {
     githubAppPrivateKey: githubAppPrivateKey
     qdrantUrl: qdrantUrl
     qdrantApiKey: qdrantApiKey
+    geminiApiKey: geminiApiKey
   }
 }
 

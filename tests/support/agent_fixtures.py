@@ -4,7 +4,8 @@ One tracked game with 71 days around a patch bundle (p1 and p2, three days apart
 post, plus a second game with a single day. Reviews turn more negative after the patch; the mix
 shifts towards new players; a discount runs over the patch days. Estimates for bundle p1 cover the
 positive share (both methods, synthetic control without a 14-day estimate), the established
-sample, volume and one aspect.
+sample, volume and one aspect. `sample_report` is an invented bundle report with a quote span,
+review ids and a withheld claim, as the store keeps it.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from patchpulse.agent.bundle import (
     GameData,
     PatchRow,
 )
+from patchpulse.agent.prompts import PROMPT_VERSION
+from patchpulse.agent.report import Report
 from patchpulse.causal.config import CausalConfig
 from patchpulse.causal.store import StoredEstimate
 from patchpulse.labeling.taxonomy import ASPECTS
@@ -166,4 +169,55 @@ def make_bundle(*games: GameData, default_method: str = "synth") -> Bundle:
         built_on=LAST + timedelta(days=1),
         causal=CausalConfig(default_method, "e2", "ab" * 32, validated=True),
         games=games or (game_data(), other_game()),
+    )
+
+
+SAMPLE_QUOTE = "the frame rate halves in every city map since the update"  # invented
+
+
+def sample_report(bundle_id: str = "p1", horizon: int = 7, *, basic: bool = False) -> Report:
+    end = PATCH_DAY + timedelta(days=horizon - 1)
+    return Report.model_validate(
+        {
+            "report_id": f"{bundle_id}-{horizon}d",
+            "appid": GAME,
+            "scope": "bundle",
+            "bundle_id": bundle_id,
+            "horizon": horizon,
+            "question": None,
+            "window": {"start": PATCH_DAY.isoformat(), "end": end.isoformat()},
+            "data_version": DATA_VERSION,
+            "model_ids": {} if basic else {"draft": "gemini-3.5-flash-lite"},
+            "prompt_version": PROMPT_VERSION,
+            "summary": "Negative reviews mentioning performance rose after the patch.",
+            "findings": [{"title": "Performance", "hypothesis": "H3", "claim_ids": ["c1"]}],
+            "hypotheses": [
+                {"code": "H3", "status": "supported", "rule": "H3.rise", "evidence": {"v": 1.0}}
+            ],
+            "claims": [
+                {
+                    "claim_id": "c1",
+                    "text": "Negative reviews mentioning performance rose from 12% to 31%.",
+                    "claim_type": "descriptive",
+                    "value": 19.0,
+                    "unit": "pp",
+                    "evidence": {"call_id": "r1.6", "json_path": "aspects.performance.change"},
+                    "review_ids": [7001, 7002],
+                    "quote_spans": [{"review_id": 7003, "text": SAMPLE_QUOTE}],
+                }
+            ],
+            "withheld_claims": [
+                {
+                    "claim": {
+                        "claim_id": "c2",
+                        "text": "The patch caused the drop.",
+                        "claim_type": "causal",
+                    },
+                    "rule": "V4",
+                }
+            ],
+            "confidence": "low" if basic else "medium",
+            "basic": basic,
+            "rule_pass_rates": {"V1": 1.0},
+        }
     )

@@ -29,7 +29,15 @@ from typing import Any, Protocol, TypedDict
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
-from patchpulse.agent.bundle import Bundle, PatchRow
+from patchpulse.agent.bundle import Bundle
+from patchpulse.agent.evidence import (
+    BASELINE_DAYS,
+    HORIZONS,
+    Scope,
+    bundle_scope,
+    core_evidence,
+    days_in,
+)
 from patchpulse.agent.prompts import PROMPT_VERSION, SCHEMAS, load_prompt
 from patchpulse.agent.report import DateWindow, Draft, Finding, Hypothesis, Report, confidence_for
 from patchpulse.agent.router import AllModelsDownError, ModelRouter
@@ -52,11 +60,7 @@ from patchpulse.ingest.http import SteamHttp
 log = logging.getLogger("patchpulse.agent")
 
 MAX_MODEL_TOOL_CALLS = 8  # spec §10.1
-HORIZONS = (7, 14)
-BASELINE_DAYS = 28  # the days before the window, as Phase 4's fit window
 MIN_BASELINE_DAYS = 7
-NEAR_START_DAYS = 3  # a sale or discount within 3 days of the start (Phase 4's flags)
-DAILY_UP_TO_DAYS = 14  # a window up to two weeks is shown by day, a longer one by week
 MAX_QUESTION_CHARS = 500
 MAX_WINDOW_DAYS = 92
 MAX_REFUSAL_CHARS = 300
@@ -96,17 +100,6 @@ class AgentDeps:
     tracer: Tracer = field(default_factory=NoTracer)
 
 
-@dataclass(frozen=True)
-class Scope:
-    appid: int
-    window: tuple[date, date]
-    baseline: tuple[date, date]
-    start: date  # the bundle's first day, or the window's
-    bundle_id: str | None
-    horizon: int | None
-    patch: PatchRow | None
-
-
 class _State(TypedDict, total=False):
     request: ReportRequest
     trace: Trace
@@ -123,10 +116,6 @@ class _State(TypedDict, total=False):
     summary: str
     summary_passed: bool | None
     report: Report
-
-
-def _days(window: tuple[date, date]) -> int:
-    return (window[1] - window[0]).days + 1
 
 
 def _hash(*parts: object) -> str:
@@ -153,24 +142,6 @@ class _Nodes:
         )
         state["model_ids"][step] = routed.model_id
         return routed.data
-
-    def _bundle_scope(self, request: ReportRequest) -> Scope:
-        for game in self.deps.bundle.games:
-            members = [p for p in game.patches if p.bundle_id == request.bundle_id]
-            if members:
-                first = min(members, key=lambda p: (p.day, p.patch_id))
-                horizon = int(request.horizon or HORIZONS[0])
-                start = first.day
-                return Scope(
-                    appid=game.appid,
-                    window=(start, start + timedelta(days=horizon - 1)),
-                    baseline=(start - timedelta(days=BASELINE_DAYS), start - timedelta(days=1)),
-                    start=start,
-                    bundle_id=request.bundle_id,
-                    horizon=horizon,
-                    patch=first,
-                )
-        raise ValueError(f"no bundle {request.bundle_id} in the data")
 
     def _scope_user(self, question: str) -> str:
         lines = [f"Today: {self.deps.bundle.built_on.isoformat()}", "", "Tracked games:"]
@@ -217,7 +188,7 @@ class _Nodes:
             return Refusal(
                 f"The dates asked about are outside the data for {game.name} ({first} to {last})."
             )
-        if _days(window) > MAX_WINDOW_DAYS:
+        if days_in(window) > MAX_WINDOW_DAYS:
             return Refusal(f"Ask about at most {MAX_WINDOW_DAYS} days at a time.")
         if (window[0] - first).days < MIN_BASELINE_DAYS:
             return Refusal(
@@ -237,7 +208,7 @@ class _Nodes:
             baseline=(baseline_start, start - timedelta(days=1)),
             start=start,
             bundle_id=None if patch is None else patch.bundle_id,
-            horizon=None if patch is None else (14 if _days(window) >= 14 else 7),
+            horizon=None if patch is None else (14 if days_in(window) >= 14 else 7),
             patch=patch,
         )
 
@@ -281,53 +252,15 @@ class _Nodes:
     def scope(self, state: _State) -> dict[str, Any]:
         request = state["request"]
         if request.question is None:
-            return {"scope": self._bundle_scope(request)}
+            bundle_id, horizon = str(request.bundle_id), int(request.horizon or HORIZONS[0])
+            return {"scope": bundle_scope(self.deps.bundle, bundle_id, horizon)}
         placed = self._question_scope(state, request.question)
         if isinstance(placed, Refusal):
             return {"refusal": placed}
         return {"scope": placed}
 
     def core_evidence(self, state: _State) -> dict[str, Any]:
-        tools, scope = state["tools"], state["scope"]
-        appid, window, baseline = scope.appid, scope.window, scope.baseline
-        ids: dict[str, str] = {}
-
-        def last(name: str) -> None:
-            ids[name] = tools.trace.calls[-1].call_id
-
-        tools.get_game_overview(appid)
-        tools.list_patches(appid, baseline[0], window[1])
-        by = "day" if _days(window) <= DAILY_UP_TO_DAYS else "week"
-        window_series = tools.sentiment_timeseries(appid, *window, by)
-        last("window")
-        baseline_series = tools.sentiment_timeseries(appid, *baseline, "week")
-        last("baseline")
-        near = (
-            scope.start - timedelta(days=NEAR_START_DAYS),
-            scope.start + timedelta(days=NEAR_START_DAYS),
-        )
-        near_series = tools.sentiment_timeseries(appid, *near, "week")
-        last("near_start")
-        aspects = tools.aspect_breakdown(appid, window, baseline)
-        last("aspects")
-        split = tools.decompose_change(appid, window, baseline)
-        last("decomposition")
-        row = None
-        if scope.bundle_id is not None:
-            tools.estimate_patch_effect(scope.bundle_id)
-            last("estimate")
-            served = tools.estimate_rows(tools.trace.calls[-1])
-            row = next((r for r in served if r.horizon == scope.horizon), None)
-        evidence = CoreEvidence(
-            estimate=row,
-            window=window_series["total"],
-            baseline=baseline_series["total"],
-            near_start=near_series["total"],
-            aspects=aspects,
-            decomposition=split,
-            call_ids=ids,
-        )
-        return {"evidence": evidence}
+        return {"evidence": core_evidence(state["tools"], state["scope"])}
 
     def rules(self, state: _State) -> dict[str, Any]:
         return {"hypotheses": decide(state["evidence"], self.deps.bundle.causal)}

@@ -29,8 +29,17 @@ publish.
    INFO line. Any failure is an `index_skipped` warning and an alert ("Qdrant unreachable" when
    Qdrant didn't answer); counts more than 0.5% apart are a `qdrant_mismatch` warning and an
    alert. A clean night closes all three alerts. The night goes on either way.
-10. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
-11. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
+10. Bundle (Phase 5, design D2): the agent's aggregates-only data, built from the marts. A
+    failure is a `bundle_skipped` warning; the reports wait a night and the API keeps yesterday's.
+11. Reports (Phase 5, design D10): write the due reports, newest first, within
+    PP_REPORTS_BUDGET_MINUTES (pipeline/reports.py), after the index so tonight's reviews are
+    searchable. No PP_GEMINI_API_KEY, or a budget of 0, is an INFO line; a failure is a
+    `reports_skipped` warning. Basic reports (no model answered) are a `report_basic` warning and
+    an alert, closed by a night that leaves no basic report shown.
+12. Publish the agent's data to the orphan `agent-data` branch for the API: the bundle and the
+    reports each bundle shows. A failure is an `agent_data_skipped` warning.
+13. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
+14. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
     success). A failure to report is logged and never changes the run's own result.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
@@ -44,14 +53,13 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
-from urllib.parse import urlsplit
 
 from sqlalchemy import Connection, Engine
 
-from patchpulse.config import Settings, SettingsError
+from patchpulse.config import Settings, SettingsError, scrub_secrets
 from patchpulse.export.site import AspectModel, build_site_export, read_aspect_model
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
 from patchpulse.ingest.day_counts import fetch_day_counts
@@ -79,8 +87,10 @@ from patchpulse.pipeline.dbt import DbtResult, run_dbt
 from patchpulse.pipeline.runs import finish_run, start_run
 
 if TYPE_CHECKING:
+    from patchpulse.agent.bundle import Bundle
     from patchpulse.pipeline.effects import EffectsOutcome
     from patchpulse.pipeline.indexing import IndexOutcome
+    from patchpulse.pipeline.reports import ReportsOutcome
 
 log = logging.getLogger("patchpulse.pipeline")
 
@@ -93,7 +103,9 @@ COUNT_DAYS_A_NIGHT = 4
 # budgeted stages (backfill, score, effects, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S,
 # whatever their own budgets, so a killed job never takes the night's export and publish with it.
 # The reserve covers what runs after them or between them, measured on 20 Oct (run 25): dbt 167 s,
-# export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled.
+# export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled. Phase 5
+# adds the bundle and its publish, and the last report the reports stage started (a stage that
+# straddles the night's end is the only one that overruns it).
 NIGHT_SECONDS = 2_700
 NIGHT_RESERVE_S = 600
 # The index stage's alerts (design D5): one GitHub issue per title.
@@ -101,6 +113,8 @@ OUT_OF_SYNC = "Qdrant out of sync"
 INDEX_SKIPPED = "index stage skipped"
 QDRANT_UNREACHABLE = "Qdrant unreachable"
 MISMATCH_LIMIT = 0.005
+# The reports stage's alert (Phase 5, design D8): reports written without a model.
+BASIC_REPORTS = "Basic reports published"
 
 
 class PipelineError(RuntimeError):
@@ -109,6 +123,10 @@ class PipelineError(RuntimeError):
 
 class Publisher(Protocol):
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None: ...
+
+    def publish_branch(
+        self, branch: str, files: Mapping[str, bytes], *, data_version: int
+    ) -> None: ...
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None: ...
 
@@ -122,6 +140,9 @@ class NoPublisher:
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
         log.info("publish skipped (local run): %d files, data_version %d", len(files), data_version)
+
+    def publish_branch(self, branch: str, files: Mapping[str, bytes], *, data_version: int) -> None:
+        log.info("publish to %s skipped (local run): %d files", branch, len(files))
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         log.info("run %d %s (not reported: local run)", run_id, status)
@@ -166,6 +187,28 @@ class EffectsStage(Protocol):
         clock: Callable[[], float],
         deadline: float,
     ) -> EffectsOutcome: ...
+
+
+class BundleBuilder(Protocol):
+    """Builds the agent's data bundle: agent.bundle.build_bundle, or a fake in tests."""
+
+    def __call__(self, connection: Connection, *, run_id: int, today: date) -> Bundle: ...
+
+
+class ReportsStage(Protocol):
+    """The reports stage's work: pipeline.reports.run_reports, or a fake in tests."""
+
+    def __call__(
+        self,
+        engine: Engine,
+        settings: Settings,
+        bundle: Bundle,
+        *,
+        run_id: int,
+        steam: SteamHttp,
+        clock: Callable[[], float],
+        deadline: float,
+    ) -> ReportsOutcome: ...
 
 
 class Exporter(Protocol):
@@ -262,9 +305,11 @@ def run_nightly(
     clock: Callable[[], float] = time.monotonic,
     index: IndexStage | None = None,
     effects: EffectsStage | None = None,
+    bundle: BundleBuilder | None = None,
+    reports: ReportsStage | None = None,
 ) -> RunResult:
-    """`index` and `effects` replace those stages' work in tests; by default each is imported when
-    needed."""
+    """`index`, `effects`, `bundle` and `reports` replace those stages' work in tests; by default
+    each is imported when needed."""
     if settings.author_hash_salt is None:
         raise SettingsError("missing or invalid settings: PP_AUTHOR_HASH_SALT")
     night_end = clock() + NIGHT_SECONDS - NIGHT_RESERVE_S
@@ -286,6 +331,8 @@ def run_nightly(
             clock,
             index,
             effects,
+            bundle,
+            reports,
         )
     except Exception as error:
         with engine.begin() as connection:
@@ -326,6 +373,8 @@ def _run_stages(
     clock: Callable[[], float],
     index: IndexStage | None,
     effects: EffectsStage | None,
+    bundle: BundleBuilder | None,
+    reports: ReportsStage | None,
 ) -> None:
     games = load_games(games_file, today=now.date())
     # Comparison games (Phase 4) get news and daily counts only: no reviews, prices or coverage.
@@ -415,6 +464,17 @@ def _run_stages(
     with run.stage("index"):
         health = (tracked or games)[0].appid
         run.stages["index"] = _index(run, settings, publisher, index, health, clock)
+
+    with run.stage("bundle"):
+        agent_bundle, dumped, run.stages["bundle"] = _bundle(run, bundle, now)
+
+    with run.stage("reports"):
+        run.stages["reports"] = _reports(
+            run, settings, publisher, reports, agent_bundle, steam, clock
+        )
+
+    with run.stage("agent_data"):
+        run.stages["agent_data"] = _agent_data(run, publisher, agent_bundle, dumped)
 
     with run.stage("export"):
         with run.engine.connect() as connection:
@@ -507,6 +567,144 @@ def _effects(
     return asdict(outcome)
 
 
+def _warn(run: _Run, check: str, detail: str) -> None:
+    log.warning("%s: %s", check, detail)
+    with run.engine.begin() as connection:
+        record_dq(
+            connection, run_id=run.run_id, check=check, appid=None, severity="warn", detail=detail
+        )
+
+
+def _bundle(
+    run: _Run, builder: BundleBuilder | None, now: datetime
+) -> tuple[Bundle | None, bytes, dict[str, Any]]:
+    """The agent's bundle, its gzip file and the stage's record; never raises."""
+    try:
+        # Imported here: the bundle needs the `causal` group, which an older image may lack.
+        from patchpulse.agent.bundle import build_bundle, dump_bundle
+
+        with run.engine.connect() as connection:
+            built = (builder or build_bundle)(connection, run_id=run.run_id, today=now.date())
+        dumped = dump_bundle(built)
+    except Exception as error:  # the reports wait a night; the API keeps yesterday's data
+        detail = f"{type(error).__name__}: {error}"
+        _warn(run, "bundle_skipped", detail)
+        return None, b"", {"skipped": detail[:500]}
+    record = {
+        "games": len(built.games),
+        "patches": sum(len(g.patches) for g in built.games),
+        "estimates": sum(len(g.estimates) for g in built.games),
+        "bytes": len(dumped),
+    }
+    return built, dumped, record
+
+
+def _basic_shown(run: _Run) -> int | None:
+    """How many of the reports the site shows are basic; None when they can't be read."""
+    try:
+        from patchpulse.agent.store import latest_reports, shown_reports
+
+        with run.engine.connect() as connection:
+            return sum(r.basic for r in shown_reports(latest_reports(connection)).values())
+    except Exception as error:
+        log.warning("could not read the stored reports: %s", error)
+        return None
+
+
+def _reports(
+    run: _Run,
+    settings: Settings,
+    publisher: Publisher,
+    reports: ReportsStage | None,
+    bundle: Bundle | None,
+    steam: SteamHttp,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The reports stage's record for ops.pipeline_run.stages; never raises."""
+    if bundle is None:
+        reason = "no bundle tonight"
+    elif settings.gemini_api_key is None:
+        reason = "no Gemini key (PP_GEMINI_API_KEY unset)"
+    elif settings.reports_budget_minutes <= 0:
+        reason = "turned off (PP_REPORTS_BUDGET_MINUTES is 0)"
+    else:
+        reason = ""
+    if reason or bundle is None:
+        log.info("reports stage skipped: %s", reason)
+        return {"skipped": reason}
+    try:
+        if reports is None:
+            # Imported here: the stage needs the `agent` group, which an older image may lack.
+            from patchpulse.pipeline.reports import run_reports
+
+            reports = run_reports
+        outcome = reports(
+            run.engine,
+            settings,
+            bundle,
+            run_id=run.run_id,
+            steam=steam,
+            clock=clock,
+            deadline=run.deadline(settings.reports_budget_minutes * 60, clock),
+        )
+    except Exception as error:  # the reports wait a night; the stored ones and the site go on
+        detail = scrub_secrets(f"{type(error).__name__}: {error}", settings)
+        _warn(run, "reports_skipped", detail)
+        return {"skipped": detail[:500]}
+    ran = outcome.due - outcome.remaining
+    if outcome.basic:
+        summary = f"{outcome.basic} of the {ran} reports run tonight are basic"
+        _warn(run, "report_basic", summary)
+        _alert(
+            publisher,
+            title=BASIC_REPORTS,
+            body=(
+                f"Nightly run {run.run_id}: {summary}: no model answered (the Gemini free tier's "
+                "daily quota, an outage, or a missing or wrong key), so they carry fixed claims "
+                "from the core evidence and a template summary. They are due again the next "
+                f"night. Details: `ops.data_quality_result` (report_basic, run {run.run_id}) and "
+                "the pp-nightly logs. A night that leaves no basic report on the site closes this "
+                "issue."
+            ),
+        )
+    elif _basic_shown(run) == 0:
+        _resolve(
+            publisher,
+            title=BASIC_REPORTS,
+            comment=f"Nightly run {run.run_id}: every report on the site was written by a model.",
+        )
+    return asdict(outcome)
+
+
+def _agent_data(
+    run: _Run, publisher: Publisher, bundle: Bundle | None, dumped: bytes
+) -> dict[str, Any]:
+    """Publish the bundle and the shown reports for the API; never raises."""
+    if bundle is None:
+        return {"skipped": "no bundle tonight"}
+    try:
+        from patchpulse.agent.store import latest_reports
+        from patchpulse.pipeline.reports import (
+            AGENT_BRANCH,
+            BUNDLE_FILE,
+            REPORTS_FILE,
+            reports_file,
+        )
+
+        with run.engine.connect() as connection:
+            stored = latest_reports(connection)
+        files = {
+            BUNDLE_FILE: dumped,
+            REPORTS_FILE: reports_file(bundle, stored, data_version=run.run_id),
+        }
+        publisher.publish_branch(AGENT_BRANCH, files, data_version=run.run_id)
+    except Exception as error:  # the API keeps yesterday's data
+        detail = f"{type(error).__name__}: {error}"
+        _warn(run, "agent_data_skipped", detail)
+        return {"skipped": detail[:500]}
+    return {"files": len(files), "bytes": sum(len(content) for content in files.values())}
+
+
 def _index(
     run: _Run,
     settings: Settings,
@@ -542,7 +740,7 @@ def _index(
             deadline=run.deadline(settings.index_budget_minutes * 60, clock),
         )
     except Exception as error:  # the index lags a night; the site goes on
-        detail = _scrub(f"{type(error).__name__}: {error}", settings)
+        detail = scrub_secrets(f"{type(error).__name__}: {error}", settings)
         log.warning("index stage skipped: %s", detail)
         with run.engine.begin() as connection:
             record_dq(
@@ -601,16 +799,6 @@ def _index(
                 comment=f"Nightly run {run.run_id}: the index is in sync ({summary}).",
             )
     return outcome.record()
-
-
-def _scrub(detail: str, settings: Settings) -> str:
-    """The detail without the cluster's URL, host or key: they're secrets."""
-    secrets = [settings.qdrant_url or "", urlsplit(settings.qdrant_url or "").hostname or ""]
-    if settings.qdrant_api_key is not None:
-        secrets.append(settings.qdrant_api_key.get_secret_value())
-    for secret in sorted(filter(None, secrets), key=len, reverse=True):
-        detail = detail.replace(secret, "<qdrant>")
-    return detail
 
 
 def _alert(publisher: Publisher, *, title: str, body: str) -> None:

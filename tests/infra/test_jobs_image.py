@@ -229,3 +229,24 @@ def test_jobs_image_syncs_the_retrieval_group_and_checks_the_encoder() -> None:
     assert runtime.index("COPY build/encoder ") < runtime.index("embed_queries")
     ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert ignored.index("build/*") < ignored.index("!build/encoder")
+
+
+def test_the_reports_stage_imports_with_only_the_jobs_image_groups() -> None:
+    # Phase 5: the reports stage runs the agent's graph (the `agent` group: LangGraph).
+    installed = jobs_image_groups()
+    assert "agent" in installed
+
+    result = run_with_only(
+        installed,
+        "from patchpulse.pipeline.reports import run_reports\n"
+        "import patchpulse.agent.graph\n"
+        "print('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"
+
+
+def test_jobs_image_checks_the_agent_imports_at_build() -> None:
+    runtime = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8").split("\nFROM ", 2)[2]
+    assert "import patchpulse.agent.graph, patchpulse.pipeline.reports" in runtime

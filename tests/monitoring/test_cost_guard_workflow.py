@@ -166,6 +166,7 @@ def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
         "PP_GITHUB_APP_PRIVATE_KEY",
         "PP_QDRANT_URL",
         "PP_QDRANT_API_KEY",
+        "PP_GEMINI_API_KEY",
     ):
         assert f"secrets.{secret}" in check
         assert f'missing="$missing {secret}"' in check
@@ -276,3 +277,10 @@ def test_publish_site_uploads_the_prebuilt_site_only() -> None:
     assert "app_location: web/out" in deploy
     assert "skip_app_build: true" in deploy
     assert "skip_api_build: true" in deploy
+
+
+def test_infra_passes_the_gemini_key_to_what_if_and_deploy() -> None:
+    # Phase 5 (design D8): pp-nightly's reports stage; a free-tier key, kept as a GitHub secret.
+    text = read("infra.yml")
+    assert text.count("PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}") == 3
+    assert "vars.PP_GEMINI" not in text

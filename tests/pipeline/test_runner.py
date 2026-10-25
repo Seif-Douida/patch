@@ -14,13 +14,19 @@ from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
+from agent_fixtures import SAMPLE_QUOTE, make_bundle, sample_report
 from fake_steam import FakeSteam
+from pydantic import SecretStr
 from qdrant_client import QdrantClient
 from review_index import create_index_tables, index_row, write_target, write_texts
 from sqlalchemy import Connection, Engine, text
 from tiny_encoder import write_tiny_embedder
 from toy_reviews import toy_reviews
 
+from patchpulse.agent.bundle import Bundle, load_bundle
+from patchpulse.agent.graph import ReportRequest
+from patchpulse.agent.report import Report
+from patchpulse.agent.store import latest_reports, write_report
 from patchpulse.config import Settings
 from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import upgrade_to_head
@@ -31,7 +37,9 @@ from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline.dbt import DbtResult
 from patchpulse.pipeline.effects import EffectsOutcome
 from patchpulse.pipeline.indexing import IndexOutcome, run_index
+from patchpulse.pipeline.reports import ReportsOutcome, run_reports
 from patchpulse.pipeline.runner import (
+    BASIC_REPORTS,
     NIGHT_RESERVE_S,
     NIGHT_SECONDS,
     PipelineError,
@@ -53,6 +61,7 @@ BACKFILL_START = (NOW - timedelta(days=20)).date()
 @dataclass
 class RecordingPublisher:
     calls: list[tuple[dict[str, bytes], int]] = field(default_factory=list)
+    branches: list[tuple[str, dict[str, bytes], int]] = field(default_factory=list)
     reports: list[tuple[int, str, str | None]] = field(default_factory=list)
     alerts: list[tuple[str, str]] = field(default_factory=list)
     resolved: list[tuple[str, str]] = field(default_factory=list)
@@ -60,6 +69,9 @@ class RecordingPublisher:
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
         self.calls.append((dict(files), data_version))
+
+    def publish_branch(self, branch: str, files: Mapping[str, bytes], *, data_version: int) -> None:
+        self.branches.append((branch, dict(files), data_version))
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         if self.report_fails:
@@ -889,3 +901,283 @@ def test_effects_stage_is_off_at_a_budget_of_0(env: Env) -> None:
     assert result.status == "succeeded"
     assert result.stages["effects"] == {"skipped": "turned off (PP_EFFECTS_BUDGET_MINUTES is 0)"}
     assert effects.deadlines == []
+
+
+# Phase 5 (plan Task 12, design D10): the agent's data bundle and the nightly reports.
+
+
+def fixture_bundle(connection: Connection, *, run_id: int, today: date) -> Bundle:
+    """The agent tests' bundle, as if built from tonight's marts (the stubbed dbt builds none)."""
+    return replace(make_bundle(), data_version=run_id, built_on=today)
+
+
+def failing_bundle(connection: Connection, *, run_id: int, today: date) -> Bundle:
+    raise RuntimeError("Invalid object name 'mart.daily_aspect_share'")
+
+
+def with_gemini(settings: Settings, **changes: Any) -> Settings:
+    return settings.model_copy(update={"gemini_api_key": SecretStr("test-gemini-key"), **changes})
+
+
+def tonight(**counts: int) -> ReportsOutcome:
+    values = {"due": 0, "written": 0, "basic": 0, "failed": 0, "remaining": 0}
+    values.update(counts)
+    return ReportsOutcome(**values)
+
+
+@dataclass
+class FakeReports:
+    """The reports stage's work, replaced: each call returns (or raises) the next outcome, after
+    storing that night's reports from `stores`, if any."""
+
+    outcomes: list[ReportsOutcome | Exception]
+    stores: list[list[Report]] = field(default_factory=list)
+    bundles: list[Bundle] = field(default_factory=list)
+    deadlines: list[float] = field(default_factory=list)
+
+    def __call__(
+        self,
+        engine: Engine,
+        settings: Settings,
+        bundle: Bundle,
+        *,
+        run_id: int,
+        steam: Any,
+        clock: Callable[[], float],
+        deadline: float,
+    ) -> ReportsOutcome:
+        self.bundles.append(bundle)
+        self.deadlines.append(deadline)
+        for report in self.stores.pop(0) if self.stores else []:
+            with engine.begin() as connection:
+                write_report(connection, report, fingerprint="0" * 64, run_id=run_id)
+        next_outcome = self.outcomes.pop(0)
+        if isinstance(next_outcome, Exception):
+            raise next_outcome
+        return next_outcome
+
+
+def test_bundle_and_reports_run_after_effects(env: Env) -> None:
+    effects = FakeEffects(
+        [EffectsOutcome(estimated=1, written=8, unchanged=0, remaining=0, failed=0)]
+    )
+    reports = FakeReports([tonight(due=2, written=2)])
+
+    result = env.run(
+        settings=with_gemini(env.settings),
+        dbt=ok_dbt,
+        export=stub_export,
+        effects=effects,
+        bundle=fixture_bundle,
+        reports=reports,
+    )
+
+    assert result.status == "succeeded"
+    order = list(result.stages["durations_s"])
+    stages = ["effects", "index", "bundle", "reports", "agent_data", "export", "publish"]
+    assert [order.index(name) for name in stages] == sorted(order.index(name) for name in stages)
+    (bundle,) = reports.bundles
+    assert bundle.data_version == result.run_id
+    built = result.stages["bundle"]
+    assert (built["games"], built["patches"], built["estimates"]) == (2, 4, 8)
+    assert result.stages["reports"] == {
+        "due": 2,
+        "written": 2,
+        "basic": 0,
+        "failed": 0,
+        "remaining": 0,
+    }
+    # The API's data: tonight's bundle and the reports with the patch-to-bundle map.
+    ((branch, files, version),) = env.publisher.branches
+    assert (branch, version) == ("agent-data", result.run_id)
+    assert built["bytes"] == len(files["bundle.json.gz"])
+    assert load_bundle(files["bundle.json.gz"]) == bundle
+    assert json.loads(files["reports.json"]) == {
+        "data_version": result.run_id,
+        "reports": {},
+        "patches": {"p0": "p0", "p1": "p1", "p2": "p1"},
+    }
+    assert len(env.publisher.calls) == 1
+
+
+def test_a_failing_report_is_a_warning_and_the_night_publishes(env: Env) -> None:
+    def agent(request: ReportRequest) -> Report:
+        if request.horizon == 14:
+            raise RuntimeError("the draft step failed")
+        return sample_report(str(request.bundle_id), int(request.horizon or 0))
+
+    result = env.run(
+        settings=with_gemini(env.settings),
+        dbt=ok_dbt,
+        export=stub_export,
+        bundle=fixture_bundle,
+        reports=functools.partial(run_reports, agent=agent),
+    )
+
+    assert result.status == "succeeded"
+    assert len(env.publisher.calls) == 1
+    assert result.stages["reports"] == {
+        "due": 2,
+        "written": 1,
+        "basic": 0,
+        "failed": 1,
+        "remaining": 0,
+    }
+    (finding,) = env.rows(
+        "SELECT appid, severity, detail FROM ops.data_quality_result "
+        "WHERE check_name = 'report_failed'"
+    )
+    assert (finding.appid, finding.severity) == (553850, "warn")
+    assert finding.detail == "p1-14d: RuntimeError: the draft step failed"
+    with env.engine.connect() as connection:
+        assert set(latest_reports(connection)) == {("p1", 7)}
+    ((_, files, _),) = env.publisher.branches
+    shown = json.loads(files["reports.json"])["reports"]
+    assert list(shown) == ["p1"]
+    assert shown["p1"]["horizon"] == 7
+    assert SAMPLE_QUOTE not in files["reports.json"].decode("utf-8")
+
+
+def test_basic_reports_raise_and_resolve_the_alert(env: Env) -> None:
+    # Design D8: a basic report is written without a model. The alert stays open while the site
+    # shows one: a night whose budget doesn't reach it leaves the alert open.
+    reports = FakeReports(
+        [
+            tonight(due=3, written=3, basic=2),
+            tonight(due=2, written=1, remaining=1),
+            tonight(due=1, written=1),
+        ],
+        stores=[
+            [sample_report("p0", 7, basic=True), sample_report("p1", 7, basic=True)],
+            [sample_report("p0", 7)],  # p1's report waits for the next night
+            [sample_report("p1", 7)],
+        ],
+    )
+    settings = with_gemini(env.settings)
+
+    def night() -> Any:
+        return env.run(
+            settings=settings,
+            dbt=ok_dbt,
+            export=stub_export,
+            bundle=fixture_bundle,
+            reports=reports,
+        )
+
+    first = night()
+
+    ((title, body),) = env.publisher.alerts
+    assert title == BASIC_REPORTS
+    assert f"run {first.run_id}" in body
+    assert "2 of the 3 reports" in body
+    (finding,) = env.rows(
+        "SELECT severity FROM ops.data_quality_result WHERE check_name = 'report_basic'"
+    )
+    assert finding.severity == "warn"
+
+    night()
+    assert env.publisher.resolved == []
+
+    third = night()
+    ((resolved, comment),) = env.publisher.resolved
+    assert resolved == BASIC_REPORTS
+    assert f"run {third.run_id}" in comment
+    assert len(env.publisher.alerts) == 1
+
+
+@pytest.mark.parametrize(
+    ("later", "deadline"),
+    [(0.0, 3 * 60), (NIGHT_END - 60, NIGHT_END)],
+    ids=["early: its own 3 minutes", "late: the night's end"],
+)
+def test_reports_stage_gets_its_budget_within_the_night(
+    env: Env, later: float, deadline: float
+) -> None:
+    reports = FakeReports([tonight()])
+
+    env.run(
+        settings=with_gemini(env.settings),
+        dbt=ok_dbt,
+        export=stub_export,
+        bundle=fixture_bundle,
+        reports=reports,
+        clock=LateClock(later),
+    )
+
+    assert reports.deadlines == [deadline]
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"gemini_api_key": None}, "no Gemini key (PP_GEMINI_API_KEY unset)"),
+        ({"reports_budget_minutes": 0}, "turned off (PP_REPORTS_BUDGET_MINUTES is 0)"),
+    ],
+    ids=["no key", "budget 0"],
+)
+def test_reports_are_skipped_without_a_key_or_a_budget(
+    env: Env, changes: dict[str, Any], reason: str
+) -> None:
+    reports = FakeReports([])
+
+    result = env.run(
+        settings=with_gemini(env.settings, **changes),
+        dbt=ok_dbt,
+        export=stub_export,
+        bundle=fixture_bundle,
+        reports=reports,
+    )
+
+    assert result.status == "succeeded"
+    assert result.stages["reports"] == {"skipped": reason}
+    assert reports.bundles == []
+    ((branch, _, _),) = env.publisher.branches  # the API still gets tonight's bundle
+    assert branch == "agent-data"
+    assert (env.publisher.alerts, env.publisher.resolved) == ([], [])
+
+
+def test_a_failing_bundle_is_a_warning_and_the_night_publishes(env: Env) -> None:
+    reports = FakeReports([])
+
+    result = env.run(
+        settings=with_gemini(env.settings),
+        dbt=ok_dbt,
+        export=stub_export,
+        bundle=failing_bundle,
+        reports=reports,
+    )
+
+    assert result.status == "succeeded"
+    assert result.stages["bundle"]["skipped"].startswith("RuntimeError: Invalid object name")
+    assert result.stages["reports"] == {"skipped": "no bundle tonight"}
+    assert reports.bundles == []
+    assert env.publisher.branches == []  # the API keeps yesterday's data
+    assert len(env.publisher.calls) == 1
+    (finding,) = env.rows(
+        "SELECT severity FROM ops.data_quality_result WHERE check_name = 'bundle_skipped'"
+    )
+    assert finding.severity == "warn"
+
+
+def test_a_failing_reports_stage_is_a_warning_without_secrets(env: Env) -> None:
+    settings = with_gemini(env.settings, qdrant_url="https://qdrant.invalid:6333")
+    reports = FakeReports(
+        [RuntimeError("search failed at https://qdrant.invalid:6333 with key test-gemini-key")]
+    )
+
+    result = env.run(
+        settings=settings, dbt=ok_dbt, export=stub_export, bundle=fixture_bundle, reports=reports
+    )
+
+    assert result.status == "succeeded"
+    skipped = result.stages["reports"]["skipped"]
+    assert skipped.startswith("RuntimeError: search failed")
+    assert "qdrant.invalid" not in skipped
+    assert "test-gemini-key" not in skipped
+    (finding,) = env.rows(
+        "SELECT severity, detail FROM ops.data_quality_result WHERE check_name = 'reports_skipped'"
+    )
+    assert finding.severity == "warn"
+    assert "qdrant.invalid" not in finding.detail
+    assert len(env.publisher.branches) == 1  # the bundle and the stored reports still go out
+    assert (env.publisher.alerts, env.publisher.resolved) == ([], [])

@@ -2,9 +2,11 @@
 
 The nightly job writes the site JSON to the orphan `site-data` branch as a single commit, then
 sends a `repository_dispatch` that starts publish-site.yml: a commit on a branch without workflow
-files can't trigger a workflow by itself. A failed run opens (or comments on) one issue labelled
-`alert`; the next successful run closes it. The index stage's alerts (Phase 3) work the same way,
-one issue per title, closed by a night that syncs and reconciles cleanly.
+files can't trigger a workflow by itself. The agent's data (Phase 5) goes to the orphan
+`agent-data` branch the same way, without a dispatch: the API reads it. A failed run opens (or
+comments on) one issue labelled `alert`; the next successful run closes it. The index stage's
+alerts (Phase 3) work the same way, one issue per title, closed by a night that syncs and
+reconciles cleanly.
 
 The app is installed on this repo only, with Contents and Issues write, and a ruleset keeps it off
 `main`. Each installation token is narrowed further to this repo and those two permissions. The
@@ -280,6 +282,14 @@ class GitHubPublisher:
             self._http,
         )
         log.info("published %d files to %s (%s) and dispatched", len(files), SITE_BRANCH, commit)
+
+    def publish_branch(self, branch: str, files: Mapping[str, bytes], *, data_version: int) -> None:
+        """Replace an orphan branch's files without starting a workflow (Phase 5: the API's
+        `agent-data`)."""
+        commit = replace_branch(
+            self._token(), self.repo, branch, files, f"{branch} v{data_version}", self._http
+        )
+        log.info("published %d files to %s (%s)", len(files), branch, commit)
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         token = self._token()

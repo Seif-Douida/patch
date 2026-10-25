@@ -5,11 +5,11 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import type { GameData, Header, SiteIndex } from "./types";
+import type { GameData, Header, ReportFile, SiteIndex } from "./types";
 
-// Schema 3 only adds fields (the patch estimates), so this site reads 2 and 3: the live data may
-// still be at 2 for a night after a deploy. Schema 1 (before the aspects) is no longer read.
-export const SUPPORTED_SCHEMAS: readonly number[] = [2, 3];
+// Schema 4 only adds fields (the reports), so this site reads 3 and 4: the live data may still be
+// at 3 for a night after a deploy. Schema 2 (before the patch estimates) is no longer read.
+export const SUPPORTED_SCHEMAS: readonly number[] = [3, 4];
 
 const DATA_DIR = path.resolve(process.cwd(), process.env.SITE_DATA_DIR ?? "fixtures");
 
@@ -30,4 +30,8 @@ export function loadIndex(dataDir: string = DATA_DIR): SiteIndex {
 
 export function loadGame(appid: number, dataDir: string = DATA_DIR): GameData {
   return read<GameData>(dataDir, `games/${appid}.json`);
+}
+
+export function loadReport(bundleId: string, dataDir: string = DATA_DIR): ReportFile {
+  return read<ReportFile>(dataDir, `reports/${bundleId}.json`);
 }

@@ -24,7 +24,7 @@ def test_web_fixtures_match_the_exporter() -> None:
     assert committed == expected
     # Schema 2: the sample carries aspect counts and the model that made them.
     index = json.loads(expected["index.json"])
-    assert index["schema_version"] == 3
+    assert index["schema_version"] == 4
     assert index["aspect_model"] is not None
     assert set(index["aspect_model"]["aspect_f1"]) == set(ASPECTS)
     for game in index["games"]:
@@ -61,3 +61,35 @@ def test_sample_shows_each_kind_of_estimate() -> None:
         for h in horizons
     )
     assert any(h["reason"] == "window_not_complete" for h in horizons)
+
+
+def test_sample_shows_each_kind_of_report() -> None:
+    # Schema 4: the report page has a case for each of these (Phase 5, design D11).
+    files = sample_files()
+    reports = {
+        name: json.loads(content)["report"]
+        for name, content in files.items()
+        if name.startswith("reports/")
+    }
+    assert json.loads(files["index.json"])["reports"] == len(reports) == 3
+    verified = [
+        r
+        for r in reports.values()
+        if not r["basic"] and any(c["claim_type"] == "causal" and not c["reworded"]
+                                  for c in r["claims"])
+    ]  # fmt: skip
+    assert verified
+    assert any(any(c["reworded"] for c in r["claims"]) and r["withheld"] for r in reports.values())
+    assert any(r["basic"] and r["model_ids"] == {} for r in reports.values())
+    linked = {
+        p["report"]
+        for name, content in files.items()
+        if name.startswith("games/")
+        for p in json.loads(content)["patches"]
+        if p["report"]
+    }
+    assert {f"reports/{bundle}.json" for bundle in linked} == set(reports)
+    # Invented quote spans and review ids stay out, as the real ones do.
+    for content in (files[name] for name in reports):
+        assert b"progression grind" not in content
+        assert b"910006" not in content

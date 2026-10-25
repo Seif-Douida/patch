@@ -1,4 +1,4 @@
-"""Build the static JSON the dashboard reads (schema version 3).
+"""Build the static JSON the dashboard reads (schema version 4).
 
 Files (paths relative to the site's data folder):
 
@@ -12,12 +12,18 @@ Files (paths relative to the site's data folder):
   off-topic and aspects with an F1 under MIN_ASPECT_F1 don't count; null without any), and
   `causal` (Phase 4): `default_method` (its or synth, from config/causal.yaml), `effects_version`,
   `benchmark_report` (the report's path in the repository; null until the benchmark has run) and
-  `validated` (a method met ADR-007's rule; false until then).
+  `validated` (a method met ADR-007's rule; false until then), and `reports` (Phase 5): how many
+  report files there are.
 * `games/{appid}.json`: the same header fields plus `appid`, `name`, `genres`, `series` (one
   point per day: `date`, `n`, `pos`, `share`, `lo`, `hi`, `sale`, `discount`), `patches`
-  (`date`, `title`, `url`, `type`, `treatment`, `effect`) and `aspects`: `codes` (the taxonomy,
-  in order) and `days`, one per day with scored reviews: `date`, `scored` ([negative, positive]
-  reviews scored), `neg` and `pos` (per aspect, in `codes` order, how many of them mention it).
+  (`date`, `title`, `url`, `type`, `treatment`, `effect`, `report`) and `aspects`: `codes` (the
+  taxonomy, in order) and `days`, one per day with scored reviews: `date`, `scored` ([negative,
+  positive] reviews scored), `neg` and `pos` (per aspect, in `codes` order, how many of them
+  mention it).
+* `reports/{bundle_id}.json` (schema 4): the same header fields plus `report`, the public copy of
+  the bundle's report (agent/report.py `public_copy`: no quote spans, no review ids, withheld
+  claims as counts per rule): the 14-day report once it exists, the 7-day one until then. Only
+  reports a patch links to are written.
 
 A patch's `effect` (schema 3) is null unless it's a treatment candidate. Otherwise it's its
 bundle's (patches within 7 days of the first are estimated together): `start`, the bundle's first
@@ -27,6 +33,8 @@ estimated effect on the positive share in percentage points (`effect`, `lo90`, `
 the default's reason where the default has none), and `reason` when there's no estimate:
 `window_not_complete`, `another_patch_within_14_days` (14 days only), `not_estimated_yet` (the
 effects stage hasn't reached it), or the estimator's own words.
+
+A patch's `report` (schema 4) is its bundle's id when that bundle has a report, else null.
 
 Without a model (no `PP_MODEL_DIR`), `aspect_model`, `top_complaint_30d` and `aspects` are null.
 Each schema only adds fields, so a site that reads two versions treats the new ones as optional.
@@ -48,6 +56,7 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from patchpulse.agent.report import Report, public_copy
 from patchpulse.causal.bundles import LONG_HORIZON, Patch, bundle_patches, window_complete
 from patchpulse.causal.config import CAUSAL_CONFIG_PATH, read_causal_config
 from patchpulse.causal.estimate import EFFECTS_VERSION, HORIZONS, Method, Sample
@@ -57,7 +66,7 @@ from patchpulse.labeling.taxonomy import ASPECTS
 
 log = logging.getLogger("patchpulse.export")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ATTRIBUTION = "Data from Steam"
 LATEST_DAYS = 30
 _PLACES = 4
@@ -255,6 +264,20 @@ def _horizon(days: int, ends: date, reason: str, row: EffectRow | None) -> dict[
     }
 
 
+def _bundle_ids(patches: Sequence[PatchRow]) -> dict[str, str]:
+    """Each treatment candidate's bundle id (its bundle's first patch), by patch id."""
+    candidates = [
+        Patch(p.patch_id, p.appid, p.published_at.astimezone(UTC).date())
+        for p in patches
+        if p.is_treatment_candidate
+    ]
+    return {
+        patch_id: bundle.bundle_id
+        for bundle in bundle_patches(candidates)
+        for patch_id in bundle.patch_ids
+    }
+
+
 def _effect_blocks(
     patches: Sequence[PatchRow], effects: Effects, last_complete_day: date
 ) -> dict[str, dict[str, Any]]:
@@ -293,9 +316,11 @@ def shape_site_export(
     generated_at: datetime,
     aspects: Aspects | None = None,
     effects: Effects | None = None,
+    reports: Mapping[str, Report] | None = None,
 ) -> dict[str, bytes]:
     """Turn mart rows into site files: {relative path: file bytes}. Without `effects` (no
-    estimates read), the index's `causal` and every patch's `effect` are null."""
+    estimates read), the index's `causal` and every patch's `effect` are null. `reports` are the
+    stored reports each bundle shows, by bundle id; only their public copies are written."""
     header = {
         "schema_version": SCHEMA_VERSION,
         "data_version": data_version,
@@ -313,6 +338,7 @@ def shape_site_export(
         aspects_by_game[aspect_day.appid].append(aspect_day)
 
     last_complete_day = generated_at.astimezone(UTC).date() - timedelta(days=1)
+    available = reports or {}
 
     files: dict[str, bytes] = {}
     listing: list[dict[str, Any]] = []
@@ -322,6 +348,15 @@ def shape_site_export(
         aspect_days = aspects_by_game.get(game.appid, [])
         game_patches = patches_by_game.get(game.appid, [])
         blocks = _effect_blocks(game_patches, effects, last_complete_day) if effects else {}
+        linked = {
+            patch_id: bundle_id
+            for patch_id, bundle_id in _bundle_ids(game_patches).items()
+            if bundle_id in available
+        }
+        for bundle_id in sorted(set(linked.values())):
+            files[f"reports/{bundle_id}.json"] = _dump(
+                {**header, "report": public_copy(available[bundle_id])}
+            )
         genres = [genre.strip() for genre in game.genres.split(",") if genre.strip()]
         latest = _latest(series)
         listing.append(
@@ -366,6 +401,7 @@ def shape_site_export(
                         "type": p.patch_type,
                         "treatment": p.is_treatment_candidate,
                         "effect": blocks.get(p.patch_id),
+                        "report": linked.get(p.patch_id),
                     }
                     for p in game_patches
                 ],
@@ -388,8 +424,15 @@ def shape_site_export(
             "benchmark_report": effects.benchmark_report,
             "validated": effects.validated,
         }
+    shown_reports = sum(1 for name in files if name.startswith("reports/"))
     files["index.json"] = _dump(
-        {**header, "aspect_model": model, "causal": causal, "games": listing}
+        {
+            **header,
+            "aspect_model": model,
+            "causal": causal,
+            "games": listing,
+            "reports": shown_reports,
+        }
     )
     return files
 
@@ -457,7 +500,11 @@ def build_site_export(
     aspect_model: AspectModel | None = None,
     causal_config_path: Path = CAUSAL_CONFIG_PATH,
 ) -> dict[str, bytes]:
-    """Read the marts and app.patch_effect and shape the site files; aspects only with a model."""
+    """Read the marts, app.patch_effect and app.report and shape the site files; aspects only
+    with a model."""
+    # Imported here: the report store fingerprints with the agent's tools.
+    from patchpulse.agent.store import latest_reports, shown_reports
+
     games = [
         GameRow(r.appid, r.name, r.genres, r.role)
         for r in connection.execute(text("SELECT appid, name, genres, role FROM core.dim_game"))
@@ -507,4 +554,5 @@ def build_site_export(
         generated_at=generated_at,
         aspects=aspects,
         effects=_effects(connection, causal_config_path),
+        reports={b: row.report for b, row in shown_reports(latest_reports(connection)).items()},
     )

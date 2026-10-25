@@ -7,6 +7,10 @@ with a patch that drops sentiment and a Steam sale that lifts volume. Aspect cou
 too: the first two weeks aren't scored yet (as during a backlog), and the bad patch brings a wave
 of gameplay-balance complaints. So are the patch estimates (schema 3), one of each kind the site
 explains: an effect, an effect during a sale, too few comparison games, a window not yet over.
+And the reports (schema 4), one of each kind the report page explains: a verified report with a
+causal claim, one whose causal claim the verifier reworded and some withheld, and a basic report
+written without a model. Their quote spans and review ids are invented too, and the exporter drops
+them as it drops the real ones.
 
 Regenerate after changing the exporter: `uv run python tests/support/site_sample.py web/fixtures`
 """
@@ -19,6 +23,7 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from patchpulse.agent.report import Report
 from patchpulse.export.site import (
     AspectDayRow,
     AspectModel,
@@ -194,6 +199,7 @@ def sample_files() -> dict[str, bytes]:
         generated_at=GENERATED_AT,
         aspects=Aspects(MODEL, aspect_days),
         effects=EFFECTS,
+        reports=REPORTS,
     )
 
 
@@ -216,6 +222,193 @@ EFFECTS = Effects(
         EffectRow("5012", 14, None, None, None, "synth", frozenset(), TOO_FEW),
     ],
 )
+
+
+MODELS = {s: "gemini-3.5-flash-lite" for s in ("gather", "draft", "summary")}
+ALL_PASSED = {f"V{n}": 1.0 for n in range(1, 8)}
+
+
+def _hypotheses(**statuses: str) -> list[dict[str, object]]:
+    return [
+        {"code": code, "status": status, "rule": f"{code}.sample", "evidence": {}}
+        for code, status in sorted(statuses.items())
+    ]
+
+
+def _claim(
+    claim_id: str, text: str, claim_type: str, value: float, **extra: object
+) -> dict[str, object]:
+    return {
+        "claim_id": claim_id,
+        "text": text,
+        "claim_type": claim_type,
+        "value": value,
+        "unit": "pp",
+        "evidence": {"call_id": "s1.3", "json_path": "total.share"},
+        **extra,
+    }
+
+
+def _report(bundle_id: str, start: date, appid: int, **fields: object) -> Report:
+    return Report.model_validate(
+        {
+            "report_id": f"{bundle_id}-14d",
+            "appid": appid,
+            "scope": "bundle",
+            "bundle_id": bundle_id,
+            "horizon": 14,
+            "question": None,
+            "window": {
+                "start": start.isoformat(),
+                "end": (start + timedelta(days=13)).isoformat(),
+            },
+            "data_version": 42,
+            "prompt_version": "5a3c9e1f0b72",
+            "withheld_claims": [],
+            **fields,
+        }
+    )
+
+
+# Invented reports for three bundles; Patch 2.1's window isn't over, so it has none.
+REPORTS = {
+    "5001": _report(
+        "5001",
+        date(2026, 8, 10),
+        900001,
+        model_ids=MODELS,
+        summary=(
+            "Positive reviews fell by about 14 points in the two weeks after Update 2.0, and the "
+            "drop holds against comparison games. Complaints about gameplay balance rose the most. "
+            "(sample data)"
+        ),
+        findings=[
+            {"title": "The patch", "hypothesis": "H1", "claim_ids": ["c1", "c2"]},
+            {"title": "Gameplay balance complaints", "hypothesis": "H1", "claim_ids": ["c3"]},
+        ],
+        hypotheses=_hypotheses(
+            H1="supported", H2="rejected", H3="rejected", H4="rejected", H5="rejected"
+        ),
+        claims=[
+            _claim(
+                "c1",
+                "The positive share fell from 78.2% to 64.4% in the 14 days after the update.",
+                "comparative",
+                -13.8,
+                review_ids=[910001, 910002, 910003],
+            ),
+            _claim(
+                "c2",
+                "Update 2.0 lowered the positive share by about 9.8 points (90% range 6.4 to "
+                "13.1).",
+                "causal",
+                -9.8,
+                review_ids=[910004, 910005],
+                quote_spans=[{"review_id": 910006, "text": "the new progression grind is endless"}],
+            ),
+            _claim(
+                "c3",
+                "Negative reviews mentioning gameplay balance rose from 18% to 41%.",
+                "comparative",
+                23.0,
+                quote_spans=[{"review_id": 910007, "text": "every match ends the same way now"}],
+            ),
+        ],
+        confidence="high",
+        basic=False,
+        rule_pass_rates=ALL_PASSED,
+    ),
+    "5011": _report(
+        "5011",
+        date(2026, 7, 2),
+        900002,
+        model_ids=MODELS,
+        summary=(
+            "Reviews stayed about as positive after Patch 0.9.4. A Steam sale ran over the same "
+            "days, so the patch's own effect can't be told apart from the sale's. (sample data)"
+        ),
+        findings=[
+            {"title": "The patch", "hypothesis": "H1", "claim_ids": ["c2"]},
+            {"title": "A price change or sale", "hypothesis": "H2", "claim_ids": ["c1"]},
+        ],
+        hypotheses=_hypotheses(
+            H1="inconclusive", H2="supported", H3="rejected", H4="rejected", H5="inconclusive"
+        ),
+        claims=[
+            _claim(
+                "c1",
+                "Reviews per day doubled during the sale, from 45 to 92.",
+                "comparative",
+                47.0,
+                unit="reviews",
+                review_ids=[920001],
+            ),
+            _claim(
+                "c2",
+                "The data are consistent with Patch 0.9.4 moving the positive share by about -0.6 "
+                "points, but a sale ran over the same days, so this is not established.",
+                "causal",
+                -0.6,
+                reworded=True,
+            ),
+        ],
+        withheld_claims=[
+            {
+                "claim": {
+                    "claim_id": "c3",
+                    "text": "Players loved the new colony map.",
+                    "claim_type": "descriptive",
+                },
+                "rule": "V1",
+            },
+            {
+                "claim": {
+                    "claim_id": "c4",
+                    "text": "The share rose by 6 points.",
+                    "claim_type": "comparative",
+                },
+                "rule": "V2",
+            },
+            {
+                "claim": {
+                    "claim_id": "c5",
+                    "text": "The sale caused the rise.",
+                    "claim_type": "causal",
+                },
+                "rule": "V4",
+            },
+        ],
+        confidence="medium",
+        basic=False,
+        rule_pass_rates={**ALL_PASSED, "V1": 0.75, "V2": 0.8},
+    ),
+    "5012": _report(
+        "5012",
+        date(2026, 8, 20),
+        900002,
+        model_ids={},
+        summary=(
+            "Inconclusive: the patch, noise or seasonality. Ruled out: a price change or sale, "
+            "off-topic reviews or a review bomb, a change in who reviewed. The claims below passed "
+            "the verifier. (sample data)"
+        ),
+        findings=[{"title": "The patch", "hypothesis": "H1", "claim_ids": ["c1"]}],
+        hypotheses=_hypotheses(
+            H1="inconclusive", H2="rejected", H3="rejected", H4="rejected", H5="inconclusive"
+        ),
+        claims=[
+            _claim(
+                "c1",
+                "The positive share went from 61.8% in the baseline to 60.9% in the window.",
+                "comparative",
+                -0.9,
+            )
+        ],
+        confidence="medium",
+        basic=True,
+        rule_pass_rates={"V1": 1.0, "V2": 1.0, "V3": 1.0},
+    ),
+}
 
 
 def write(directory: Path) -> None:

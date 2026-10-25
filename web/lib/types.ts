@@ -1,6 +1,7 @@
-// The site data (schema versions 2 and 3), as written by src/patchpulse/export/site.py.
-// Schema 2 added the aspect fields (null on a night without a model); schema 3 adds the patch
-// estimates (`causal` in the index, `effect` on each patch), absent in schema 2, so they are
+// The site data (schema versions 3 and 4), as written by src/patchpulse/export/site.py.
+// Schema 2 added the aspect fields (null on a night without a model); schema 3 the patch estimates
+// (`causal` in the index, `effect` on each patch); schema 4 adds the reports (`reports` in the
+// index, `report` on each patch, and reports/{bundle_id}.json), absent in schema 3, so they are
 // optional.
 
 export type Header = {
@@ -57,6 +58,7 @@ export type SiteIndex = Header & {
   games: GameSummary[];
   aspect_model?: AspectModel | null; // schema 2
   causal?: CausalInfo | null; // schema 3
+  reports?: number; // schema 4: how many report files there are
 };
 
 export type DayPoint = {
@@ -105,6 +107,7 @@ export type Patch = {
   type: PatchType;
   treatment: boolean; // a major update or a patch: the posts the analysis tests
   effect?: PatchEffect | null; // schema 3: null unless a treatment candidate
+  report?: string | null; // schema 4: its bundle's report (the bundle id), null without one
 };
 
 // One day with scored reviews; days without any are absent.
@@ -127,4 +130,59 @@ export type GameData = Header & {
   series: DayPoint[];
   patches: Patch[];
   aspects?: AspectSeries | null; // schema 2
+};
+
+// Schema 4: a patch bundle's report, as its public copy (src/patchpulse/agent/report.py
+// `public_copy`): the verified claims with how many reviews support each, never the reviews
+// themselves; withheld claims only as counts per verifier rule.
+export type HypothesisCode = "H1" | "H2" | "H3" | "H4" | "H5";
+
+export type Hypothesis = {
+  code: HypothesisCode;
+  status: "supported" | "rejected" | "inconclusive"; // set by fixed rules, not the model
+  rule: string; // which branch of the rule set decided, "H1.placebo"
+  evidence: Record<string, number | boolean | null>;
+};
+
+export type Finding = {
+  title: string;
+  hypothesis: HypothesisCode;
+  claim_ids: string[];
+};
+
+export type ClaimType = "descriptive" | "comparative" | "causal";
+
+export type ReportClaim = {
+  claim_id: string;
+  text: string;
+  claim_type: ClaimType;
+  value: number | null;
+  unit: string | null;
+  reworded: boolean; // a causal claim the verifier rewrote with a hedge
+  supported_by: number; // reviews behind it
+};
+
+export type PublicReport = {
+  report_id: string;
+  appid: number;
+  scope: "bundle" | "question";
+  bundle_id: string | null;
+  horizon: number | null; // 7 or 14 days
+  question: string | null;
+  window: { start: string; end: string };
+  data_version: number;
+  model_ids: Record<string, string>; // step -> model; empty for a basic report
+  prompt_version: string;
+  summary: string;
+  confidence: "low" | "medium" | "high";
+  basic: boolean; // written without a model: fixed claims and a template summary
+  hypotheses: Hypothesis[];
+  findings: Finding[];
+  claims: ReportClaim[]; // verified only
+  withheld: Record<string, number>; // verifier rule -> claims it withheld
+  rule_pass_rates: Record<string, number>;
+};
+
+export type ReportFile = Header & {
+  report: PublicReport;
 };

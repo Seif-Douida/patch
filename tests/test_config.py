@@ -87,3 +87,22 @@ def test_missing_required_setting_names_the_env_var(clean_env: pytest.MonkeyPatc
     assert "PP_DB_HOST" in str(error.value)
     assert "PP_DB_PASSWORD" in str(error.value)
     assert "PP_DB_NAME" not in str(error.value)
+
+
+def test_settings_read_the_agent_variables(clean_env: pytest.MonkeyPatch) -> None:
+    # Phase 5 (design D10): no key means the reports stage is skipped; 0 minutes turns it off.
+    for name, value in REQUIRED.items():
+        clean_env.setenv(name, value)
+
+    defaults = get_settings(env_file=None)
+    assert defaults.gemini_api_key is None
+    assert defaults.reports_budget_minutes == 3
+    clean_env.setenv("PP_GEMINI_API_KEY", "hunter2-gemini")
+    clean_env.setenv("PP_REPORTS_BUDGET_MINUTES", "0")
+
+    settings = get_settings(env_file=None)
+
+    assert settings.gemini_api_key is not None
+    assert settings.gemini_api_key.get_secret_value() == "hunter2-gemini"
+    assert settings.reports_budget_minutes == 0
+    assert "hunter2" not in repr(settings)

@@ -33,6 +33,10 @@ param qdrantUrl string
 @secure()
 param qdrantApiKey string
 
+@description('The free-tier Gemini key the reports stage answers with (Phase 5, design D8).')
+@secure()
+param geminiApiKey string
+
 resource nightly 'Microsoft.App/jobs@2025-07-01' = {
   name: 'pp-nightly'
   location: location
@@ -69,6 +73,10 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
         {
           name: 'qdrant-api-key'
           value: qdrantApiKey
+        }
+        {
+          name: 'gemini-api-key'
+          value: geminiApiKey
         }
       ]
     }
@@ -115,11 +123,12 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               secretRef: 'github-app-key'
             }
             {
-              // Of the 45 min: 25 backfill, 5 scoring, 5 indexing and 2 effects leave 8 for the
-              // incremental stages, dbt, the reconciliation and the export; the runner stops the
-              // budgeted stages 10 min before the timeout whatever their budgets (NIGHT_RESERVE_S).
+              // Of the 45 min: 20 backfill, 5 scoring, 5 indexing, 2 effects and 3 reports leave
+              // 10 for the incremental stages, dbt, the reconciliation and the export; the runner
+              // stops the budgeted stages 10 min before the timeout whatever their budgets
+              // (NIGHT_RESERVE_S). Backfill had 25 until the refill was over (Phase 5).
               name: 'PP_BACKFILL_BUDGET_MINUTES'
-              value: '25'
+              value: '20'
             }
             {
               // Aspect scoring with the champion baked into the image (design D8).
@@ -137,6 +146,16 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               // or whose inputs changed; what's left waits a night. 0 turns it off.
               name: 'PP_EFFECTS_BUDGET_MINUTES'
               value: '2'
+            }
+            {
+              // Phase 5 (design D10): the reports stage writes the due reports, newest first;
+              // what's left waits a night. 0 turns it off.
+              name: 'PP_REPORTS_BUDGET_MINUTES'
+              value: '3'
+            }
+            {
+              name: 'PP_GEMINI_API_KEY'
+              secretRef: 'gemini-api-key'
             }
             {
               name: 'PP_QDRANT_URL'

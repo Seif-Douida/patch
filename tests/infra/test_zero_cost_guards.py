@@ -236,7 +236,7 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     for job in of_type(resources, "microsoft.app/jobs"):
         for container in job["properties"]["template"]["containers"]:
             for variable in container.get("env", []):
-                if re.search(r"PASSWORD|SALT|PRIVATE_KEY|QDRANT", variable["name"]):
+                if re.search(r"PASSWORD|SALT|PRIVATE_KEY|QDRANT|GEMINI", variable["name"]):
                     assert "secretRef" in variable, f"{job['name']}: {variable['name']}"
                     assert "value" not in variable, f"{job['name']}: {variable['name']}"
     # Phase 3 (design D5): the free cluster's URL is a secret too; with the key, it's the
@@ -246,6 +246,8 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     env = {variable["name"]: variable for variable in container["env"]}
     assert env["PP_QDRANT_URL"]["secretRef"] == "qdrant-url"
     assert env["PP_QDRANT_API_KEY"]["secretRef"] == "qdrant-api-key"
+    # Phase 5 (design D8): the free-tier Gemini key for the nightly reports.
+    assert env["PP_GEMINI_API_KEY"]["secretRef"] == "gemini-api-key"
 
 
 def test_nightly_job_publishes_with_the_github_app(resources: list[dict[str, Any]]) -> None:
@@ -298,8 +300,8 @@ def test_the_runner_ends_the_night_before_the_job_timeout(resources: list[dict[s
 
 
 def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) -> None:
-    # Design D9: backfill, scoring, indexing and the effects leave at least 8 of the job's minutes
-    # for the incremental stages, dbt, the reconciliation and the export.
+    # Design D9: backfill, scoring, indexing, the effects and the reports leave at least 8 of the
+    # job's minutes for the incremental stages, dbt, the reconciliation and the export.
     nightly, env = nightly_env(resources)
     budgets = sum(
         int(env[name])
@@ -308,6 +310,7 @@ def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) 
             "PP_SCORE_BUDGET_MINUTES",
             "PP_INDEX_BUDGET_MINUTES",
             "PP_EFFECTS_BUDGET_MINUTES",
+            "PP_REPORTS_BUDGET_MINUTES",
         )
     )
     timeout_minutes = literal_number(nightly["properties"]["configuration"]["replicaTimeout"]) / 60
@@ -383,3 +386,11 @@ def test_missing_compiler_fails_in_ci_and_skips_locally() -> None:
         require_compiler(None, ci=True)
     with pytest.raises(pytest.skip.Exception):
         require_compiler(None, ci=False)
+
+
+def test_nightly_job_has_the_reports_budget(resources: list[dict[str, Any]]) -> None:
+    # Phase 5 design D10: the reports stage writes the due reports within 3 minutes, newest first;
+    # what's left waits a night. The refill is over, so backfill gives up 5 of its 25 minutes.
+    _, env = nightly_env(resources)
+    assert env["PP_REPORTS_BUDGET_MINUTES"] == "3"
+    assert env["PP_BACKFILL_BUDGET_MINUTES"] == "20"
