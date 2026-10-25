@@ -99,6 +99,7 @@ def trial(method: str, effect: float, estimate: float, lo: float, hi: float, **k
         "p_value": None,
         "fallback": False,
         "volume_spike": False,
+        "pair": 0,
     }
     values.update(kw)
     return Trial(**values)  # type: ignore[arg-type]
@@ -132,9 +133,9 @@ def calibrated(method: str, *, miss: int, alarms: int, error: float) -> list[Tri
     trials = []
     for i in range(20):
         lo, hi = (-10.0, -9.0) if i < miss else (-8.0, -2.0)
-        trials.append(trial(method, -5.0, -5.0 + error, lo, hi))
+        trials.append(trial(method, -5.0, -5.0 + error, lo, hi, pair=2 * i))
         zlo, zhi = (0.5, 1.0) if i < alarms else (-1.0, 1.0)
-        trials.append(trial(method, 0.0, error, zlo, zhi))
+        trials.append(trial(method, 0.0, error, zlo, zhi, pair=2 * i + 1))
     return trials
 
 
@@ -188,6 +189,11 @@ def test_trials_cover_each_cell_and_method() -> None:
     cells = {(t.method, t.effect_pts) for t in trials}
     assert cells == {("its", 0.0), ("its", -5.0), ("synth", 0.0), ("synth", -5.0)}
     assert len(trials) == 12
+    # Each injected series and horizon: one row per method, sharing a pair id.
+    pairs: dict[int, list[str]] = {}
+    for t in trials:
+        pairs.setdefault(t.pair, []).append(t.method)
+    assert sorted(sorted(methods) for methods in pairs.values()) == [["its", "synth"]] * 6
     assert all(t.estimate is None or np.isfinite(t.estimate) for t in trials)
     assert all(t.estimate is not None for t in trials if t.method == "its")  # 11-12 quiet weeks
     assert {t.truth for t in trials if t.effect_pts == -5.0} == {-5.0}
@@ -379,3 +385,23 @@ def test_synth_without_a_range_is_scored_as_served(monkeypatch: pytest.MonkeyPat
     its, synth = sorted(trials, key=lambda t: t.method)
     assert (synth.estimate, synth.lo90, synth.hi90) == (its.estimate, its.lo90, its.hi90)
     assert synth.fallback
+
+
+def test_report_compares_the_methods_on_the_same_trials() -> None:
+    # The rule uses each method's own trials with an estimate; interrupted time series has none
+    # where the quiet history is too short, so the two are also compared on the shared trials.
+    no_history = {0, 2, 4, 6}  # four of the -5 trials, two of them synthetic control's misses
+    its = [
+        replace(t, estimate=None, lo90=None, hi90=None) if t.pair in no_history else t
+        for t in calibrated("its", miss=2, alarms=1, error=1.0)
+    ]
+    trials = its + calibrated("synth", miss=2, alarms=1, error=0.5)
+
+    report = render_benchmark_report(
+        summarise(trials), choose_default(trials), trials, [], {"seed": 7}
+    )
+
+    assert "## Both methods on the same trials" in report
+    assert "36 positive-share trials where both methods had an estimate" in report
+    assert "| its | 36 | 100% | 5% | 1.00 |" in report
+    assert "| synth | 36 | 100% | 5% | 0.50 |" in report  # 90% coverage on its own 40

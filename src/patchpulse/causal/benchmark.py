@@ -69,6 +69,7 @@ class Trial:
     p_value: float | None
     fallback: bool  # synthetic control fell back to interrupted time series
     volume_spike: bool  # the site's flag on the (injected) window: a real event the calendar missed
+    pair: int  # shared by both methods' rows on the same injected series and horizon
 
 
 @dataclass(frozen=True)
@@ -270,6 +271,7 @@ def run_trials(
                             hit, pool, groups, patch_days, window.start, horizon, kind, sale_days
                         )
                         spike = volume_spike(hit, window.start, horizon)
+                        pair = len(trials)
                         for method, estimate, lo, hi, p_value, fallback in rows:
                             trials.append(
                                 Trial(
@@ -288,6 +290,7 @@ def run_trials(
                                     p_value,
                                     fallback,
                                     spike,
+                                    pair,
                                 )
                             )
     return trials
@@ -318,6 +321,7 @@ def placebo_in_space(
                 continue
             pool = {a: s for a, s in donors.items() if a != appid}
             spike = volume_spike(data, start, horizon)
+            pair = len(trials)
             for method, estimate, lo, hi, p_value, fallback in _estimate(
                 data, pool, groups, patch_days, start, horizon, "share", sale_days
             ):
@@ -338,6 +342,7 @@ def placebo_in_space(
                         p_value,
                         fallback,
                         spike,
+                        pair,
                     )
                 )
     return trials
@@ -432,6 +437,39 @@ def _pooled(trials: Sequence[Trial]) -> Pooled:
     )
 
 
+def _shared_section(trials: Sequence[Trial]) -> list[str]:
+    """Both methods on the positive-share trials where each has an estimate: the rule uses each
+    method's own, and interrupted time series has none where the quiet history is too short."""
+    share = [t for t in trials if t.outcome == POSITIVE_SHARE]
+    estimated: dict[int, set[str]] = defaultdict(set)
+    for t in share:
+        if t.estimate is not None:
+            estimated[t.pair].add(t.method)
+    methods = sorted({t.method for t in share})
+    both = {pair for pair, have in estimated.items() if have == set(methods)}
+    if len(methods) < 2 or not both:
+        return []
+    lines = [
+        "## Both methods on the same trials",
+        "",
+        f"The {len(both)} positive-share trials where both methods had an estimate (the rule "
+        "above counts each method's own).",
+        "",
+        "| Method | Trials | Coverage | False alarms at 0 | RMSE (points) |",
+        "|---|---|---|---|---|",
+    ]
+    for method in methods:
+        n, _, rmse, coverage, fpr = _pooled(
+            [t for t in share if t.method == method and t.pair in both]
+        )
+        lines.append(
+            f"| {method} | {n} | {_fmt(coverage, True)} | {_fmt(fpr, True)} | "
+            f"{'-' if rmse is None else f'{rmse:.2f}'} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _spike_section(trials: Sequence[Trial]) -> list[str]:
     share = float(np.mean([t.volume_spike for t in trials]))
     lines = [
@@ -503,6 +541,7 @@ def render_benchmark_report(
         f"Default method: {choice.method} ({choice.reason}).",
         "",
     ]
+    lines += _shared_section(trials)
     fallbacks = [t for t in trials if t.method == "synth"]
     if fallbacks:
         rate = np.mean([t.fallback for t in fallbacks])
