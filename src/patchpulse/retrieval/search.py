@@ -29,8 +29,8 @@ class QueryEmbedder(Protocol):
 @dataclass(frozen=True)
 class SearchFilters:
     """Optional filters beside the game: a window of days (yyyymmdd, inclusive), the thumbs, an
-    aspect, the reviews' language (Steam's code), and the data version (reviews first seen up to
-    a pipeline run)."""
+    aspect, the reviews' language (Steam's code), the data version (reviews first seen up to a
+    pipeline run) and playtime buckets at review (any of them)."""
 
     start_day: int | None = None
     end_day: int | None = None
@@ -38,6 +38,7 @@ class SearchFilters:
     aspect: str | None = None
     review_language: str | None = None
     as_of_run_id: int | None = None
+    playtime_buckets: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,12 @@ def query_filter(appid: int, filters: SearchFilters) -> models.Filter:
         must.append(
             models.FieldCondition(
                 key="first_seen_run_id", range=models.Range(lte=filters.as_of_run_id)
+            )
+        )
+    if filters.playtime_buckets is not None:
+        must.append(
+            models.FieldCondition(
+                key="playtime_bucket", match=models.MatchAny(any=list(filters.playtime_buckets))
             )
         )
     return models.Filter(must=must)
