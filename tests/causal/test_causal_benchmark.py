@@ -20,6 +20,7 @@ from patchpulse.causal.benchmark import (
     quiet_windows,
     render_benchmark_report,
     run_trials,
+    spike_verdict,
     summarise,
 )
 from patchpulse.causal.its import ItsResult, NoEstimate, calibrated_its_effect
@@ -358,6 +359,13 @@ def test_report_splits_the_metrics_by_volume_spike() -> None:
     assert "50% of the trials" in report
     assert "| Positive share | its | no | 40 | +1.00 | 1.00 | 90% | 5% |" in report
     assert "| Positive share | its | yes | 40 | +3.00 | 3.00 | 50% | 50% |" in report
+    # Phase 5's V4 reads this verdict (Seif's option C, 25 Oct): 10 of 20 spike trials at 0
+    # raised an alarm, so causal wording stays blocked on spike windows.
+    assert (
+        "Causal wording on volume-spike windows (Phase 5): blocked. The default method raised "
+        "false alarms on 50% of 20 spike-window trials at an injected 0 (allowed: at most 10% "
+        "over at least 20 trials)." in report
+    )
 
 
 def test_synth_without_a_range_is_scored_as_served(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -405,3 +413,42 @@ def test_report_compares_the_methods_on_the_same_trials() -> None:
     assert "36 positive-share trials where both methods had an estimate" in report
     assert "| its | 36 | 100% | 5% | 1.00 |" in report
     assert "| synth | 36 | 100% | 5% | 0.50 |" in report  # 90% coverage on its own 40
+
+
+def test_spike_verdict_needs_twenty_trials_and_ten_percent() -> None:
+    def at_zero(
+        n: int,
+        alarms: int,
+        *,
+        method: str = "synth",
+        outcome: str = "positive_share",
+        spike: bool = True,
+    ) -> list[Trial]:
+        bounds = [(0.2, 0.9) if i < alarms else (-1.0, 1.0) for i in range(n)]
+        return [
+            trial(method, 0.0, 0.5, lo, hi, outcome=outcome, volume_spike=spike)
+            for lo, hi in bounds
+        ]
+
+    unscored = replace(trial("synth", 0.0, 0.5, -1.0, 1.0), estimate=None, lo90=None, hi90=None)
+    noise = [
+        *at_zero(5, 5, spike=False),  # no spike: not counted
+        *[trial("synth", -5.0, -4.0, -6.0, -2.0, volume_spike=True) for _ in range(5)],  # not 0
+        *at_zero(5, 5, method="its"),  # another method
+        *at_zero(5, 5, outcome="volume"),  # another outcome
+        replace(unscored, volume_spike=True),  # no estimate
+    ]
+
+    few = spike_verdict(at_zero(19, 0) + noise, "synth")
+    ok = spike_verdict(at_zero(20, 2) + noise, "synth")
+    high = spike_verdict(at_zero(20, 3) + noise, "synth")
+    none = spike_verdict(noise, "synth")
+
+    assert (few.trials, few.false_alarms, few.allowed) == (19, 0.0, False)
+    assert ok.trials == 20
+    assert ok.false_alarms == pytest.approx(0.10)
+    assert ok.allowed
+    assert high.trials == 20
+    assert high.false_alarms == pytest.approx(0.15)
+    assert not high.allowed
+    assert (none.trials, none.false_alarms, none.allowed) == (0, None, False)

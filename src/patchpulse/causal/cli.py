@@ -31,6 +31,7 @@ from patchpulse.causal.benchmark import (
     quiet_windows,
     render_benchmark_report,
     run_trials,
+    spike_verdict,
     summarise,
 )
 from patchpulse.causal.config import CAUSAL_CONFIG_PATH, CausalConfig, write_causal_config
@@ -179,7 +180,13 @@ def run_benchmark(paths: BenchmarkPaths, *, per_cell: int, seed: int, dry_run: b
         )
         mlflow.log_artifact(str(target))
     write_causal_config(
-        CausalConfig(choice.method, EFFECTS_VERSION, digest, validated=choice.validated),
+        CausalConfig(
+            choice.method,
+            EFFECTS_VERSION,
+            digest,
+            validated=choice.validated,
+            spike_causal_ok=spike_verdict(trials, choice.method).allowed,
+        ),
         paths.config,
     )
     return 0

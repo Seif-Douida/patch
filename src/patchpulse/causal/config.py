@@ -20,6 +20,8 @@ class CausalConfig:
     effects_version: str
     report_sha256: str | None
     validated: bool  # a method met ADR-007's rule; False until the benchmark has run
+    # Phase 5's V4: causal wording on volume-spike windows (the benchmark's spike verdict).
+    spike_causal_ok: bool = False
 
     @property
     def benchmarked(self) -> bool:
@@ -37,6 +39,7 @@ def read_causal_config(path: Path = CAUSAL_CONFIG_PATH) -> CausalConfig:
         str(data["effects_version"]),
         str(sha) if sha else None,
         validated=bool(data.get("validated", False)),
+        spike_causal_ok=bool(data.get("spike_causal_ok", False)),
     )
 
 
@@ -50,6 +53,7 @@ def write_causal_config(config: CausalConfig, path: Path = CAUSAL_CONFIG_PATH) -
                 "effects_version": config.effects_version,
                 "report_sha256": config.report_sha256,
                 "validated": config.validated,
+                "spike_causal_ok": config.spike_causal_ok,
             },
             sort_keys=False,
         ),

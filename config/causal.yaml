@@ -4,3 +4,4 @@ default_method: its
 effects_version: e1
 report_sha256: null
 validated: false
+spike_causal_ok: false

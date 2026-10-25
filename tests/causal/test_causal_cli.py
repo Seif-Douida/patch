@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from patchpulse.causal import cli as causal_cli
-from patchpulse.causal.benchmark import Choice
+from patchpulse.causal.benchmark import Choice, SpikeVerdict
 from patchpulse.causal.cli import (
     BenchmarkPaths,
     run_benchmark,
@@ -85,10 +85,12 @@ def test_the_config_round_trips(tmp_path: Path) -> None:
     )
 
     unset = read_causal_config(path)
-    write_causal_config(CausalConfig("synth", "e1", "ab" * 32, validated=True), path)
+    written = CausalConfig("synth", "e1", "ab" * 32, validated=True, spike_causal_ok=True)
+    write_causal_config(written, path)
 
     assert (unset.default_method, unset.benchmarked, unset.validated) == ("its", False, False)
-    assert read_causal_config(path) == CausalConfig("synth", "e1", "ab" * 32, validated=True)
+    assert unset.spike_causal_ok is False  # blocked until the real run says otherwise
+    assert read_causal_config(path) == written
     assert read_causal_config(path).benchmarked
 
 
@@ -185,3 +187,28 @@ def test_the_real_run_records_an_unvalidated_default(
 
     config = read_causal_config(paths.config)
     assert (config.default_method, config.benchmarked, config.validated) == ("its", True, False)
+
+
+def test_the_real_run_records_the_spike_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Phase 5's V4 (Seif's option C): causal wording on spike windows follows the benchmark.
+    paths = toy_data(tmp_path)
+    asked: list[str] = []
+
+    def verdict(trials: object, method: str) -> SpikeVerdict:
+        asked.append(method)
+        return SpikeVerdict(trials=24, false_alarms=0.0833, allowed=True)
+
+    monkeypatch.setattr(
+        causal_cli, "choose_default", lambda trials: Choice("synth", True, "eligible: synth", {})
+    )
+    monkeypatch.setattr(causal_cli, "spike_verdict", verdict)
+    monkeypatch.setattr(causal_cli, "tracking_run", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("mlflow.log_metrics", lambda *args, **kwargs: None)
+    monkeypatch.setattr("mlflow.log_artifact", lambda *args, **kwargs: None)
+
+    assert run_benchmark(paths, per_cell=1, seed=3, dry_run=False) == 0
+
+    assert asked == ["synth"]
+    assert read_causal_config(paths.config).spike_causal_ok is True

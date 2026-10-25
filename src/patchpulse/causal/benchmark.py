@@ -44,6 +44,10 @@ VOLUME_EFFECTS = (0.0, -10.0, -25.0)  # percent
 SHAPES = ("step", "ramp")
 COVERAGE_RANGE = (0.85, 0.95)
 MAX_FPR = 0.10
+# Phase 5's causal gate (V4, Seif's option C, 25 Oct): causal wording on volume-spike windows is
+# allowed only if the default method's false alarms there stay within ADR-007's own bar.
+SPIKE_MIN_TRIALS = 20
+SPIKE_MAX_FPR = 0.10
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,32 @@ class Choice:
     validated: bool
     reason: str
     table: dict[str, dict[str, float]]
+
+
+@dataclass(frozen=True)
+class SpikeVerdict:
+    trials: int
+    false_alarms: float | None
+    allowed: bool
+
+
+def spike_verdict(trials: Sequence[Trial], method: str) -> SpikeVerdict:
+    """`method`'s positive-share trials at an injected 0 on volume-spike windows, as served, both
+    horizons pooled: allowed when there are at least SPIKE_MIN_TRIALS with an estimate and at most
+    SPIKE_MAX_FPR of them excluded 0."""
+    mine = [
+        t
+        for t in trials
+        if t.method == method
+        and t.outcome == POSITIVE_SHARE
+        and t.effect_pts == 0
+        and t.volume_spike
+        and t.estimate is not None
+    ]
+    if not mine:
+        return SpikeVerdict(0, None, False)
+    rate = float(np.mean([not _covers(t, 0.0) for t in mine]))
+    return SpikeVerdict(len(mine), rate, len(mine) >= SPIKE_MIN_TRIALS and rate <= SPIKE_MAX_FPR)
 
 
 def _clean(series: DailySeries, first: date, last: date) -> bool:
@@ -470,7 +500,7 @@ def _shared_section(trials: Sequence[Trial]) -> list[str]:
     return lines
 
 
-def _spike_section(trials: Sequence[Trial]) -> list[str]:
+def _spike_section(trials: Sequence[Trial], method: str) -> list[str]:
     share = float(np.mean([t.volume_spike for t in trials]))
     lines = [
         "## Windows with a volume spike",
@@ -503,7 +533,20 @@ def _spike_section(trials: Sequence[Trial]) -> list[str]:
                     f"{'-' if rmse is None else f'{rmse:.2f}'} | {_fmt(coverage, True)} | "
                     f"{_fmt(fpr, True)} |"
                 )
-    lines.append("")
+    verdict = spike_verdict(trials, method)
+    measured = (
+        "no spike-window trials at an injected 0"
+        if verdict.false_alarms is None
+        else f"false alarms on {_fmt(verdict.false_alarms, True)} of {verdict.trials} "
+        "spike-window trials at an injected 0"
+    )
+    lines += [
+        "",
+        f"Causal wording on volume-spike windows (Phase 5): "
+        f"{'allowed' if verdict.allowed else 'blocked'}. The default method raised {measured} "
+        f"(allowed: at most {100 * SPIKE_MAX_FPR:.0f}% over at least {SPIKE_MIN_TRIALS} trials).",
+        "",
+    ]
     return lines
 
 
@@ -561,7 +604,7 @@ def render_benchmark_report(
             "",
         ]
     if trials:
-        lines += _spike_section(trials)
+        lines += _spike_section(trials, choice.method)
     for outcome in sorted({key[1] for key in summary}):
         unit = "points" if outcome == POSITIVE_SHARE else "percent"
         lines += [
