@@ -61,17 +61,35 @@ class ModelConfig(BaseModel):
         return max(1, math.floor(limit * self.use_fraction))
 
 
+class AgentModels(BaseModel):
+    """The Phase 5 agent's model chain (design D8): tried in order, each a Gemini candidate."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    chain: list[str] = Field(min_length=1)
+
+
 class TeacherModels(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     candidates: dict[str, ModelConfig] = Field(min_length=1)
     # The bake-off winner (plan Task 9); None until then.
     teacher: str | None = None
+    agent: AgentModels | None = None
 
     @model_validator(mode="after")
     def _teacher_is_a_candidate(self) -> TeacherModels:
         if self.teacher is not None and self.teacher not in self.candidates:
             raise ValueError(f"teacher {self.teacher!r} is not one of the candidates")
+        return self
+
+    @model_validator(mode="after")
+    def _agent_chain_is_gemini(self) -> TeacherModels:
+        for name in self.agent.chain if self.agent else []:
+            if name not in self.candidates:
+                raise ValueError(f"agent model {name!r} is not a candidate")
+            if self.candidates[name].provider != "gemini":
+                raise ValueError(f"agent model {name!r} must be a Gemini model (free tier)")
         return self
 
 

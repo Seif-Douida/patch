@@ -58,8 +58,16 @@ def test_model_config_rejects_bad_values(
 def test_repo_models_config_is_valid() -> None:
     config = load_model_config(REPO / MODELS_FILE)
 
-    assert {"gemma-4-31b", "gemma-4-26b-a4b", "gemini-3.5-flash-lite"} <= set(config.candidates)
-    assert all(model.use_fraction == 0.5 for model in config.candidates.values())
+    lite = {"gemini-3.5-flash-lite", "gemini-3.1-flash-lite"}
+    assert {"gemma-4-31b", "gemma-4-26b-a4b"} | lite <= set(config.candidates)
+    # Phase 5: the agent's Flash Lite models use their whole quota; Gemma keeps half.
+    for name, model in config.candidates.items():
+        if model.provider == "gemini":
+            assert model.use_fraction == (1.0 if name in lite else 0.5), name
+    assert config.agent is not None
+    assert config.agent.chain == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+    flash_lite = config.candidates["gemini-3.1-flash-lite"]
+    assert (flash_lite.rpm, flash_lite.tpm, flash_lite.rpd) == (15, 250_000, 500)
 
 
 SERVER = """

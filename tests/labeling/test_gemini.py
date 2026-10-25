@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -82,15 +83,21 @@ def quota_429(quota_id: str, retry_delay: str | None) -> httpx2.Response:
 
 def client(
     tmp_path: Path,
-    responses: list[httpx2.Response],
+    responses: Sequence[httpx2.Response | Exception],
     *,
     config: ModelConfig | None = None,
+    max_attempts: int = MAX_ATTEMPTS,
+    retry_errors: bool = True,
 ) -> tuple[GeminiClient, list[httpx2.Request], FakeClock]:
     seen: list[httpx2.Request] = []
+    queue = list(responses)
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return responses.pop(0)
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     clock = FakeClock(START)
     config = config or model(json_mode=True, system_instruction=True)
@@ -103,6 +110,8 @@ def client(
         limiter,
         config,
         sleep=clock.sleep,
+        max_attempts=max_attempts,
+        retry_errors=retry_errors,
     )
     return gemini, seen, clock
 
@@ -215,6 +224,36 @@ def test_rate_limits_that_never_clear_are_an_outage(tmp_path: Path) -> None:
         gemini.generate("system", "user", json_schema=SCHEMA)
 
     assert raised.value.status == 429
+
+
+def test_max_attempts_two_retries_only_a_per_minute_429(tmp_path: Path) -> None:
+    # The agent's router: one wait for a per-minute limit, then the next model; never a wait for
+    # an outage or a timeout.
+    per_minute = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+
+    def agent(path: Path, answers: list[httpx2.Response | Exception]) -> Any:
+        return client(path, answers, max_attempts=2, retry_errors=False)
+
+    gemini, seen, clock = agent(tmp_path, [quota_429(per_minute, "3s"), ok()])
+    assert gemini.generate("system", "user", json_schema=SCHEMA).text == '{"labels": []}'
+    assert (len(seen), clock.slept) == (2, [3.0])
+
+    gemini, seen, clock = agent(
+        tmp_path / "b", [quota_429(per_minute, "3s"), quota_429(per_minute, "3s")]
+    )
+    with pytest.raises(GeminiUnavailableError) as limited:
+        gemini.generate("system", "user", json_schema=SCHEMA)
+    assert (limited.value.status, len(seen), clock.slept) == (429, 2, [3.0])
+
+    gemini, seen, clock = agent(tmp_path / "c", [overloaded()])
+    with pytest.raises(GeminiUnavailableError, match="503"):
+        gemini.generate("system", "user", json_schema=SCHEMA)
+    assert (len(seen), clock.slept) == (1, [])
+
+    gemini, seen, clock = agent(tmp_path / "d", [httpx2.ReadTimeout("slow")])
+    with pytest.raises(GeminiUnavailableError, match="ReadTimeout"):
+        gemini.generate("system", "user", json_schema=SCHEMA)
+    assert (len(seen), clock.slept) == (1, [])
 
 
 def test_api_key_never_appears_in_errors_logs_or_repr(

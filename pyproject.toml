@@ -88,6 +88,7 @@ dev = [
     { include-group = "scoring" },
     { include-group = "retrieval" },
     { include-group = "causal" },
+    { include-group = "agent" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
     # Tests build tiny ONNX graphs as fake encoders; the jobs image doesn't need it.
@@ -153,4 +154,9 @@ pipeline = [
 # image's nightly index stage (design D5).
 retrieval = [
     "qdrant-client>=1.19.1",
+]
+# Phase 5: the agent's workflow graph (ADR-005), used by the nightly reports and the API. Model
+# calls go through our router, not LangChain; LangSmith tracing stays off (no LANGSMITH_* set).
+agent = [
+    "langgraph>=1.2.17",
 ]
