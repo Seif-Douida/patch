@@ -394,3 +394,41 @@ def test_nightly_job_has_the_reports_budget(resources: list[dict[str, Any]]) -> 
     _, env = nightly_env(resources)
     assert env["PP_REPORTS_BUDGET_MINUTES"] == "3"
     assert env["PP_BACKFILL_BUDGET_MINUTES"] == "20"
+
+
+def api_app(resources: list[dict[str, Any]]) -> dict[str, Any]:
+    (api,) = [a for a in of_type(resources, "microsoft.app/containerapps") if a["name"] == "pp-api"]
+    return api
+
+
+def test_api_scales_down_after_a_minute(resources: list[dict[str, Any]]) -> None:
+    # Phase 5 design D9: a question that wakes pp-api keeps it up for the scale-down wait plus the
+    # answer; a minute instead of the default five makes an isolated question about 2
+    # replica-minutes instead of 6 (and the uptime pings cheaper). Size and replicas unchanged.
+    scale = api_app(resources)["properties"]["template"]["scale"]
+    assert literal_number(scale["cooldownPeriod"]) == 60
+    assert literal_number(scale["minReplicas"]) == 0
+    assert literal_number(scale["maxReplicas"]) == 1
+
+
+def test_api_credentials_come_from_container_app_secrets(resources: list[dict[str, Any]]) -> None:
+    # Phase 5: Ask's Gemini key and the Qdrant cluster (search and the limits' counters).
+    api = api_app(resources)
+    (container,) = api["properties"]["template"]["containers"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    for name, secret in (
+        ("PP_GEMINI_API_KEY", "gemini-api-key"),
+        ("PP_QDRANT_URL", "qdrant-url"),
+        ("PP_QDRANT_API_KEY", "qdrant-api-key"),
+    ):
+        assert env[name] == {"name": name, "secretRef": secret}
+    for name, variable in env.items():
+        if re.search(r"KEY|QDRANT|PASSWORD|SECRET", name):
+            assert "value" not in variable, name
+    assert env["PP_ASK_DAILY_CAP"]["value"] == "15"  # until the compute per wake is measured
+    assert "PP_SITE_ORIGIN" in env
+    # Browsers may call it from the site only; Ask posts JSON.
+    cors = api["properties"]["configuration"]["ingress"]["corsPolicy"]
+    assert cors["allowedMethods"] == ["GET", "POST"]
+    assert cors["allowedHeaders"] == ["Content-Type"]
+    assert len(cors["allowedOrigins"]) == 1

@@ -44,15 +44,15 @@ param githubAppId string
 @secure()
 param githubAppPrivateKey string
 
-@description('URL of the free Qdrant cluster (Phase 3), from the secret PP_QDRANT_URL. Secret too: with the key, it is the only door to the cluster. It reaches only pp-nightly, as a Container Apps secret.')
+@description('URL of the free Qdrant cluster (Phase 3), from the secret PP_QDRANT_URL. Secret too: with the key, it is the only door to the cluster. It reaches pp-nightly and pp-api (Phase 5), as a Container Apps secret.')
 @secure()
 param qdrantUrl string
 
-@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches only pp-nightly, as a Container Apps secret.')
+@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches pp-nightly and pp-api (Phase 5), as a Container Apps secret.')
 @secure()
 param qdrantApiKey string
 
-@description('Free-tier Gemini API key for the agent (Phase 5), from the secret PP_GEMINI_API_KEY. It reaches only pp-nightly, as a Container Apps secret. Billing stays off on its Google project.')
+@description('Free-tier Gemini API key for the agent (Phase 5), from the secret PP_GEMINI_API_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret. Billing stays off on its Google project.')
 @secure()
 param geminiApiKey string
 
@@ -89,6 +89,9 @@ module containerApps 'modules/containerapps.bicep' = {
     logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
     apiImage: apiImage
     allowedOrigin: 'https://${web.outputs.defaultHostname}'
+    geminiApiKey: geminiApiKey
+    qdrantUrl: qdrantUrl
+    qdrantApiKey: qdrantApiKey
   }
 }
 

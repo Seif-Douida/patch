@@ -2569,6 +2569,15 @@ dependencies = [
 agent = [
     { name = "langgraph" },
 ]
+api = [
+    { name = "httpx2" },
+    { name = "onnxruntime" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "sqlalchemy" },
+    { name = "tokenizers" },
+    { name = "tzdata" },
+]
 causal = [
     { name = "numpy" },
     { name = "scipy" },
@@ -2657,6 +2666,15 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 agent = [{ name = "langgraph", specifier = ">=1.2.17" }]
+api = [
+    { name = "httpx2", specifier = ">=2.13.1" },
+    { name = "onnxruntime", specifier = ">=1.30.0" },
+    { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "sqlalchemy", specifier = ">=2.1.1" },
+    { name = "tokenizers", specifier = ">=0.23.2" },
+    { name = "tzdata", specifier = ">=2026.4" },
+]
 causal = [
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "scipy", specifier = ">=1.18.1" },

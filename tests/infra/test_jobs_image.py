@@ -9,15 +9,13 @@ reaches its step through its environment.
 
 from __future__ import annotations
 
-import importlib.metadata
 import re
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+from image_groups import hidden_modules, image_groups, run_with_only
 
 ROOT = Path(__file__).resolve().parents[2]
 DOWNLOAD = "Download the champion model"
@@ -88,53 +86,6 @@ def test_jobs_image_copies_the_model_and_sets_pp_model_dir() -> None:
     assert ignored.index("build/*") < ignored.index("!build/champion")
 
 
-def _canonical(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def hidden_modules(installed: set[str]) -> set[str]:
-    """The top-level modules a `uv sync --no-dev` of these groups wouldn't install: `uv export`
-    lists every distribution they lock, transitive ones included, and each installed module is
-    traced to its distributions (an import name isn't a distribution name: `mlflow` comes from
-    `mlflow-skinny`, `yaml` from `pyyaml`)."""
-    exported = subprocess.run(
-        ["uv", "export", "--frozen", "--no-dev", "--no-hashes", "--no-emit-project"]
-        + [f"--group={group}" for group in sorted(installed)],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=ROOT,
-    ).stdout
-    image = {
-        _canonical(line.split("==", 1)[0])
-        for line in exported.splitlines()
-        if "==" in line and not line.startswith(("#", " "))
-    }
-    return {
-        module
-        for module, distributions in importlib.metadata.packages_distributions().items()
-        if module != "patchpulse" and not any(_canonical(d) in image for d in distributions)
-    }
-
-
-def run_with_only(installed: set[str], code: str) -> subprocess.CompletedProcess[str]:
-    """Run `code` in a Python where only what these groups install can be imported: an import hook
-    makes every other module look absent, not merely None in sys.modules."""
-    hidden = hidden_modules(installed)
-    script = (
-        "import importlib.abc, sys\n"
-        f"HIDDEN = {set(hidden)!r}\n"
-        "class Absent(importlib.abc.MetaPathFinder):\n"
-        "    def find_spec(self, name, path, target=None):\n"
-        "        if name.split('.')[0] in HIDDEN:\n"
-        "            raise ModuleNotFoundError(f'No module named {name!r}', name=name)\n"
-        "sys.meta_path.insert(0, Absent())\n" + code
-    )
-    return subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, check=False
-    )
-
-
 @pytest.mark.parametrize(
     ("step", "command"),
     [
@@ -160,13 +111,7 @@ def test_downloads_run_with_only_the_steps_groups(step: str, command: list[str])
 
 
 def jobs_image_groups() -> set[str]:
-    """The groups Dockerfile.jobs syncs (both of its `uv sync` commands name the same ones)."""
-    dockerfile = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8")
-    (installed,) = {
-        frozenset(re.findall(r"--group (\w+)", sync))
-        for sync in re.findall(r"uv sync [^\n]*", dockerfile)
-    }
-    return set(installed)
+    return image_groups("Dockerfile.jobs")
 
 
 def test_the_index_stage_imports_with_only_the_jobs_image_groups() -> None:
@@ -206,7 +151,9 @@ def test_deploy_downloads_the_pinned_encoder() -> None:
     assert "config/**" in workflow[True]["push"]["paths"]  # config/retrieval.yaml, the pin
     steps = build_steps()
     download = steps[index_of(steps, name=ENCODER)]
-    assert download["if"] == "matrix.image == 'patchpulse-jobs'"
+    # Both images: the jobs image embeds new reviews with it, the API (Phase 5) the queries.
+    assert "if" not in download
+    assert "if" not in steps[index_of(steps, uses="astral-sh/setup-uv")]
     assert "patchpulse-ml retrieval encoder download --to build/encoder" in download["run"]
     # Token-less, like the champion: DagsHub serves the public repo's registered models.
     assert download["env"] == {"MLFLOW_TRACKING_URI": "${{ vars.MLFLOW_TRACKING_URI }}"}

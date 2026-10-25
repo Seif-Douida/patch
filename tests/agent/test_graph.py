@@ -15,7 +15,7 @@ from typing import Any
 import httpx2
 import numpy as np
 import pytest
-from agent_fixtures import GAME, PATCH_DAY, make_bundle
+from agent_fixtures import GAME, OTHER_GAME, PATCH_DAY, make_bundle
 from fake_clock import FakeClock
 from numpy.typing import NDArray
 
@@ -256,6 +256,51 @@ def test_an_empty_or_long_question_is_refused_without_a_model_call(tmp_path: Pat
 
     for question in ("", "   ", "x" * 1000):
         assert isinstance(world.run(ReportRequest.for_question(question)), Refusal)
+    assert model.steps == []
+
+
+def test_a_picked_game_is_the_only_one_the_scope_sees(tmp_path: Path) -> None:
+    # The Ask page's game picker: the scope call lists that game and its patches only.
+    seen: list[str] = []
+
+    def scope(user: str) -> dict[str, Any]:
+        seen.append(user)
+        return scope_answer(user)
+
+    model = Scripted({**ANSWERS, "scope": scope})
+
+    report = report_of(
+        World(tmp_path, model).run(
+            ReportRequest.for_question("Why did reviews drop after 1.1.0?", appid=GAME)
+        )
+    )
+
+    assert report.appid == GAME
+    (user,) = seen
+    assert "Helldivers 2" in user
+    assert "Cities: Skylines II" not in user
+
+
+def test_a_scope_on_another_game_than_the_picked_one_is_refused(tmp_path: Path) -> None:
+    other = {"appid": OTHER_GAME, "start": "2026-10-01", "end": "2026-10-01"}
+    model = Scripted({**ANSWERS, "scope": lambda _: other})
+
+    result = World(tmp_path, model).run(
+        ReportRequest.for_question("How is Cities: Skylines II doing?", appid=GAME)
+    )
+
+    assert isinstance(result, Refusal)
+    assert "picked" in result.reason
+    assert model.steps == ["scope"]
+
+
+def test_an_untracked_picked_game_is_refused_without_a_model_call(tmp_path: Path) -> None:
+    model = Scripted()
+
+    result = World(tmp_path, model).run(ReportRequest.for_question("Why?", appid=1086940))
+
+    assert isinstance(result, Refusal)
+    assert "isn't one of the games" in result.reason
     assert model.steps == []
 
 

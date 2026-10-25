@@ -52,10 +52,6 @@ from patchpulse.labeling.teachers import load_model_config
 
 log = logging.getLogger("patchpulse.pipeline.reports")
 
-AGENT_BRANCH = "agent-data"
-BUNDLE_FILE = "bundle.json.gz"
-REPORTS_FILE = "reports.json"
-
 Agent = Callable[[ReportRequest], Report | Refusal]
 
 

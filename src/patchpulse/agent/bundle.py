@@ -26,6 +26,10 @@ from patchpulse.causal.config import CAUSAL_CONFIG_PATH, CausalConfig, read_caus
 from patchpulse.causal.store import StoredEstimate, all_latest_estimates
 
 BUNDLE_SCHEMA = 1
+# The orphan branch the nightly job publishes the bundle and reports.json to, for the API.
+AGENT_BRANCH = "agent-data"
+BUNDLE_FILE = "bundle.json.gz"
+REPORTS_FILE = "reports.json"
 
 
 @dataclass(frozen=True)

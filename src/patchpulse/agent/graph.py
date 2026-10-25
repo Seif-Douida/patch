@@ -69,11 +69,13 @@ UNAVAILABLE = "The analyst is unavailable right now; please try again in a few m
 
 @dataclass(frozen=True)
 class ReportRequest:
-    """A nightly report (a bundle and a horizon) or a visitor's question."""
+    """A nightly report (a bundle and a horizon) or a visitor's question, with the game the
+    visitor picked when there is one."""
 
     bundle_id: str | None = None
     horizon: int | None = None
     question: str | None = None
+    appid: int | None = None
 
     @classmethod
     def for_bundle(cls, bundle_id: str, horizon: int) -> ReportRequest:
@@ -82,8 +84,8 @@ class ReportRequest:
         return cls(bundle_id=bundle_id, horizon=horizon)
 
     @classmethod
-    def for_question(cls, question: str) -> ReportRequest:
-        return cls(question=question)
+    def for_question(cls, question: str, *, appid: int | None = None) -> ReportRequest:
+        return cls(question=question, appid=appid)
 
 
 @dataclass(frozen=True)
@@ -126,6 +128,19 @@ def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
+def question_precheck(bundle: Bundle, question: str, appid: int | None) -> Refusal | None:
+    """The refusals a question gets without a model call: empty, too long, or a picked game that
+    isn't tracked (the API answers these without counting them against Ask's limits)."""
+    text = question.strip()
+    if not text:
+        return Refusal("Ask a question about the reviews of one of the tracked games.")
+    if len(text) > MAX_QUESTION_CHARS:
+        return Refusal(f"Questions are limited to {MAX_QUESTION_CHARS} characters.")
+    if appid is not None and not any(g.appid == appid and g.days for g in bundle.games):
+        return Refusal(f"Game {appid} isn't one of the games PatchPulse tracks.")
+    return None
+
+
 class _Nodes:
     def __init__(self, deps: AgentDeps) -> None:
         self.deps = deps
@@ -143,15 +158,16 @@ class _Nodes:
         state["model_ids"][step] = routed.model_id
         return routed.data
 
-    def _scope_user(self, question: str) -> str:
+    def _scope_user(self, question: str, appid: int | None) -> str:
+        games = [g for g in self.deps.bundle.games if appid is None or g.appid == appid]
         lines = [f"Today: {self.deps.bundle.built_on.isoformat()}", "", "Tracked games:"]
-        for g in self.deps.bundle.games:
+        for g in games:
             if g.days:
                 lines.append(
                     f"- {g.name}: appid {g.appid}, data from {g.days[0].date} to {g.days[-1].date}"
                 )
         lines += ["", "Patches:"]
-        for g in self.deps.bundle.games:
+        for g in games:
             for p in g.patches:
                 if p.bundle_id is not None:
                     lines.append(f'- {p.patch_id}: {g.name}, {p.day}, "{p.title}"')
@@ -160,16 +176,21 @@ class _Nodes:
 
     def _question_scope(self, state: _State, question: str) -> Scope | Refusal:
         text = question.strip()
-        if not text:
-            return Refusal("Ask a question about the reviews of one of the tracked games.")
-        if len(text) > MAX_QUESTION_CHARS:
-            return Refusal(f"Questions are limited to {MAX_QUESTION_CHARS} characters.")
+        picked = state["request"].appid
+        early = question_precheck(self.deps.bundle, text, picked)
+        if early is not None:
+            return early
         try:
-            data = self._ask(state, "scope", self._scope_user(text))
+            data = self._ask(state, "scope", self._scope_user(text, picked))
         except AllModelsDownError:
             return Refusal(UNAVAILABLE)
         if data.get("refusal"):
             return Refusal(" ".join(str(data["refusal"]).split())[:MAX_REFUSAL_CHARS])
+        if picked is not None and data.get("appid") != picked:
+            return Refusal(
+                f"The question seems to be about another game than {self.games[picked].name}, "
+                "the one picked."
+            )
         game = self.games.get(data.get("appid", -1))
         if game is None or not game.days:
             return Refusal(
@@ -342,7 +363,8 @@ class _Nodes:
         if request.question is None:
             report_id = f"{request.bundle_id}-{request.horizon}d"
         else:
-            report_id = "q-" + _hash(" ".join(request.question.casefold().split()))[:12]
+            normalised = " ".join(request.question.casefold().split())
+            report_id = "q-" + _hash(request.appid, normalised)[:12]
         report = Report(
             report_id=report_id,
             appid=scope.appid,
@@ -454,7 +476,13 @@ def _traced(tracer: Tracer, name: str, step: _Step) -> _Step:
 
 def run_report(request: ReportRequest, deps: AgentDeps) -> Report | Refusal:
     """One report, on the deps' bundle for every call."""
-    run = _hash(request.bundle_id, request.horizon, request.question, deps.bundle.data_version)
+    run = _hash(
+        request.bundle_id,
+        request.horizon,
+        request.question,
+        request.appid,
+        deps.bundle.data_version,
+    )
     trace = Trace(run=run[:6])
     tools = Tools(deps.bundle, trace, search=deps.search, steam=deps.steam)
     state: _State = {"request": request, "trace": trace, "tools": tools, "model_ids": {}}

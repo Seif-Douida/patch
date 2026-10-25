@@ -683,13 +683,9 @@ def _agent_data(
     if bundle is None:
         return {"skipped": "no bundle tonight"}
     try:
+        from patchpulse.agent.bundle import AGENT_BRANCH, BUNDLE_FILE, REPORTS_FILE
         from patchpulse.agent.store import latest_reports
-        from patchpulse.pipeline.reports import (
-            AGENT_BRANCH,
-            BUNDLE_FILE,
-            REPORTS_FILE,
-            reports_file,
-        )
+        from patchpulse.pipeline.reports import reports_file
 
         with run.engine.connect() as connection:
             stored = latest_reports(connection)

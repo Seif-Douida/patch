@@ -81,9 +81,11 @@ markers = [
 ]
 
 [dependency-groups]
-# The API image syncs without groups; the jobs image syncs `pipeline`; dev gets everything but the
-# local-only Phase 2 groups (`lab`, `gpu`).
+# The API image syncs `api`, `retrieval`, `causal` and `agent`; the jobs image `pipeline`, `scoring`,
+# `retrieval`, `causal` and `agent`; dev gets everything but the local-only Phase 2 groups (`lab`,
+# `gpu`).
 dev = [
+    { include-group = "api" },
     { include-group = "pipeline" },
     { include-group = "ml" },
     { include-group = "scoring" },
@@ -160,4 +162,17 @@ retrieval = [
 # calls go through our router, not LangChain; LangSmith tracing stays off (no LANGSMITH_* set).
 agent = [
     "langgraph>=1.2.17",
+]
+# Phase 5: what pp-api needs beside FastAPI for /reports and /ask: its settings, HTTP (the agent's
+# data, Gemini, Steam), the models config, the bundle's types (the estimate store imports
+# SQLAlchemy; the API never connects to SQL) and the query encoder (ONNX Runtime, tokenizers).
+api = [
+    "httpx2>=2.13.1",
+    "onnxruntime>=1.30.0",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6",
+    "sqlalchemy>=2.1.1",
+    "tokenizers>=0.23.2",
+    # The free tier's daily quota resets at midnight in Los Angeles (zoneinfo needs the IANA data).
+    "tzdata>=2026.4",
 ]
