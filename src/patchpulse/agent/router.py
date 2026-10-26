@@ -198,6 +198,12 @@ class ModelRouter:
                 self._fail(model, now)
                 log.warning("%s: %s failed (%s); trying the next model", step, model, error)
                 continue
+            except Exception as error:  # anything else a client raises is that model failing
+                failure = type(error).__name__  # the type only: a message could carry the key
+                reasons[model] = failure
+                self._fail(model, now)
+                log.warning("%s: %s failed (%s); trying the next model", step, model, failure)
+                continue
             self._failures[model] = 0
             self.cache.put(
                 model,

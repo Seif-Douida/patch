@@ -250,3 +250,17 @@ def test_pinned_search_opens_the_pinned_collection_with_the_pinned_encoder(tmp_p
     write_tiny_embedder(other, replace(TINY, name="other-index"), dim=TINY.dims)
     with pytest.raises(ValueError, match="isn't the one"):
         open_pinned_search("http://localhost:6333", None, other, pin_path=pin)
+
+
+def test_tied_hits_come_back_in_one_order() -> None:
+    """Rank fusion gives ties, and the cluster returns them in any order (the rehearsal, 26 Oct):
+    the tool orders hits by score, then review id, so a run's prompt is the same every time."""
+    shuffled = ([(3, 0.5, "third"), (1, 0.9, "first"), (2, 0.5, "second")],
+                [(2, 0.5, "second"), (1, 0.9, "first"), (3, 0.5, "third")])  # fmt: skip
+
+    results = [
+        tools_with(FakeQdrant(hits)).search_reviews(GAME, "crashes", WINDOW) for hits in shuffled
+    ]
+    orders = [[h["review_id"] for h in result["hits"]] for result in results]
+
+    assert orders == [[1, 2, 3], [1, 2, 3]]

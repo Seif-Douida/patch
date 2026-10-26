@@ -23,7 +23,8 @@ from typing import Any, Literal
 
 CacheMode = Literal["live", "record", "replay"]
 MODES: tuple[CacheMode, ...] = ("live", "record", "replay")
-AGENT_CACHE_FILE = "agent_answers.sqlite"
+# Under data/local, which git ignores: recorded answers can quote reviews.
+AGENT_CACHE_FILE = "data/local/agent_answers.sqlite"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS answers (

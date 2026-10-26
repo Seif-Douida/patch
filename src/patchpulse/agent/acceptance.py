@@ -3,9 +3,9 @@
 Ten patch bundles from the night's published bundle, by a fixed rule: the 5 largest and then the
 5 smallest |effect| among the served estimates of the positive share of all reviews, each at its
 longest horizon with an effect (ties by bundle id). Each gets a templated question naming its
-first patch, asked on its game as a visitor would, every run traced; nothing claims a true cause
-(Claude never invents incident facts). Then the first pick's nightly report with the router's
-chain emptied: the basic-report path.
+first patch and that horizon's span, asked on its game as a visitor would, every run traced;
+nothing claims a true cause (Claude never invents incident facts). Then the first pick's
+nightly report with the router's chain emptied: the basic-report path.
 
 The coverage table counts each explanation's statuses and the rules that set them, the verifier
 rules that fired, V4's rewordings and blocks by cause and the basic report, and lists the paths no
@@ -38,7 +38,9 @@ from patchpulse.causal.store import StoredEstimate, serve
 log = logging.getLogger("patchpulse.agent")
 
 PICK_EACH = 5
-QUESTION = 'What changed after "{title}" ({day})?'
+QUESTION = 'What changed {span} "{title}" ({day})?'
+# The span of the estimate a pick was ranked by, so the question's window matches it.
+SPANS = {7: "in the week after", 14: "in the two weeks after"}
 BASIC = "basic"
 STATUSES = {"supported": "supported", "rejected": "ruled out", "inconclusive": "inconclusive"}
 RULES = ("V1", "V2", "V3", "V4", "V5", "V6", "V7")
@@ -68,7 +70,8 @@ class Pick:
 
     @property
     def question(self) -> str:
-        return QUESTION.format(title=self.title, day=f"{self.day.day} {self.day:%b %Y}")
+        span = SPANS.get(self.horizon or 0, "after")
+        return QUESTION.format(span=span, title=self.title, day=f"{self.day.day} {self.day:%b %Y}")
 
 
 @dataclass(frozen=True)

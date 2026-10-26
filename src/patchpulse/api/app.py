@@ -15,6 +15,7 @@ site's origin only (PP_SITE_ORIGIN; none set, none allowed).
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -49,6 +50,8 @@ from patchpulse.api.ask import (
 from patchpulse.api.bundle_source import BundleSource, http_fetch
 from patchpulse.api.limits import AskLimits, Refused
 from patchpulse.api.settings import ApiSettings
+
+log = logging.getLogger("patchpulse.api")
 
 NOT_LOADED = "data not available yet"
 PATCH_ID = r"^[0-9A-Za-z_-]{1,40}$"
@@ -124,7 +127,12 @@ def create_app(
         cached = answers.get(key)
         if cached is not None:
             return cached
-        verdict = counters.check(visitor_address(request))
+        address = visitor_address(request)
+        try:
+            verdict = counters.check(address)
+        except Exception as error:  # the limits can't be read: no question goes uncounted
+            log.warning("ask: limits unavailable (%s)", type(error).__name__)
+            raise HTTPException(503, UNAVAILABLE) from error
         if isinstance(verdict, Refused):
             headers = {"Retry-After": str(verdict.retry_after)}
             raise HTTPException(429, verdict.reason, headers=headers)
@@ -138,7 +146,15 @@ def create_app(
             if cached is not None:
                 return {**cached, **left}
             question = ReportRequest.for_question(body.question, appid=body.appid)
-            result = run_report(question, agent(loaded.bundle))
+            try:
+                result = run_report(question, agent(loaded.bundle))
+            except Exception as error:  # a run that fails gives the question back
+                log.warning("ask: the run failed (%s)", type(error).__name__)
+                try:
+                    counters.refund(address)
+                except Exception as refund_error:
+                    log.warning("ask: no refund (%s)", type(refund_error).__name__)
+                raise HTTPException(503, UNAVAILABLE) from error
         if isinstance(result, Refusal):
             answer: dict[str, Any] = {"data_version": version, "refusal": result.reason}
             if result.reason != MODELS_DOWN:

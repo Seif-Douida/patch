@@ -5,7 +5,9 @@ The counters live in a small Qdrant collection (`ask_limits`: free, already reac
 survives the replica scaling to zero), one point per key with its counts as the payload. A visitor
 is an HMAC of their address with a key derived from a server secret and the day: never stored
 raw, and not linkable from one day to the next. The previous days' points are deleted on the first
-check of a new day; points without a day (the month's Langfuse units, agent/tracing.py) stay. Only
+check of a new day, best-effort (a failure is logged and tried again the next day); points without
+a day (the month's Langfuse units, agent/tracing.py) stay. The cluster runs in strict mode, which
+refuses filters on fields without an index, so the store indexes `day`. Only
 questions that will run the agent are counted (the API checks the limits after its free answers:
 refusals it can make without a model, and cached answers).
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import math
 import threading
 import uuid
@@ -23,6 +26,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from qdrant_client import QdrantClient, models
+
+log = logging.getLogger("patchpulse.api")
 
 COLLECTION = "ask_limits"
 HOUR_S = 3_600
@@ -73,8 +78,17 @@ class QdrantLimitStore:
         self._ready = False
 
     def _ensure(self) -> None:
-        if not self._ready and not self.client.collection_exists(self.collection):
+        if self._ready:
+            return
+        if not self.client.collection_exists(self.collection):
             self.client.create_collection(self.collection, vectors_config={})
+        if "day" not in (self.client.get_collection(self.collection).payload_schema or {}):
+            try:  # strict mode filters only on indexed fields; a key may not be allowed to index
+                self.client.create_payload_index(
+                    self.collection, "day", field_schema=models.PayloadSchemaType.KEYWORD, wait=True
+                )
+            except Exception as error:
+                log.warning("ask_limits: `day` not indexed (%s)", type(error).__name__)
         self._ready = True
 
     @staticmethod
@@ -139,7 +153,11 @@ class AskLimits:
             now = self.clock().astimezone(UTC)
             day = now.date().isoformat()
             if day != self._current_day:
-                self.store.forget_other_days(day)
+                try:
+                    self.store.forget_other_days(day)
+                except Exception as error:  # old counts linger a day; Ask goes on
+                    log.warning("Ask's daily cleanup failed (%s); tried again tomorrow",
+                                type(error).__name__)  # fmt: skip
                 self._current_day = day
             total = self.store.get(f"day|{day}") or {"day": day, "count": 0}
             if total["count"] >= self.daily_cap:
@@ -162,3 +180,15 @@ class AskLimits:
             self.store.put(key, {"day": day, "visitor": visitor, "asked": [*asked, stamp]})
             self.store.put(f"day|{day}", {"day": day, "count": total["count"] + 1})
             return Allowed(left=self.per_visitor_hour - len(asked) - 1)
+
+    def refund(self, address: str) -> None:
+        """Give back the last question counted for `address` today: its run failed."""
+        with self._lock:
+            day = self.clock().astimezone(UTC).date().isoformat()
+            key = f"visitor|{day}|{visitor_hash(self.secret, day, address)}"
+            point = self.store.get(key)
+            if point and point.get("asked"):
+                self.store.put(key, {**point, "asked": point["asked"][:-1]})
+            total = self.store.get(f"day|{day}")
+            if total and total.get("count", 0) > 0:
+                self.store.put(f"day|{day}", {**total, "count": total["count"] - 1})

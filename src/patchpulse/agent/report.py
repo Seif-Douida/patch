@@ -103,6 +103,33 @@ class Draft(_Model):
     claims: list[Claim]
 
 
+def renumbered(draft: Draft) -> Draft:
+    """The draft with claim ids written by the code, c1, c2, ... in order, and the findings'
+    references remapped (a repeated id maps to its first claim; an unknown one is dropped). A
+    claim's id is shown with it, and the model could fill one with review text."""
+    ids: dict[str, str] = {}
+    claims = []
+    for n, claim in enumerate(draft.claims, start=1):
+        ids.setdefault(claim.claim_id, f"c{n}")
+        claims.append(claim.model_copy(update={"claim_id": f"c{n}"}))
+    findings = [
+        f.model_copy(update={"claim_ids": [ids[i] for i in f.claim_ids if i in ids]})
+        for f in draft.findings
+    ]
+    return Draft(findings=findings, claims=claims)
+
+
+class ModelUse(_Model):
+    """One model call: its step, model and tokens (design D13: in the stored report, never in
+    the public copy)."""
+
+    step: str
+    model_id: str
+    input_tokens: int
+    output_tokens: int
+    cached: bool
+
+
 class Report(_Model):
     report_id: str
     appid: int
@@ -122,19 +149,20 @@ class Report(_Model):
     confidence: Confidence
     basic: bool  # written without a model (design D8)
     rule_pass_rates: dict[str, float]
+    usage: list[ModelUse] = []  # every model call, in order (stored only)
+    seconds: float | None = None  # the run's wall time (stored only)
 
 
 def confidence_for(report: Report) -> Confidence:
     """Spec §10.5: high with a verified causal claim (one that passed the gate, so not reworded)
-    and at least 3 supporting reviews across the verified claims; medium when only non-causal
-    claims are verified; low otherwise."""
+    and at least 3 supporting reviews across the verified claims; medium with any other verified
+    claim, a causal one with fewer reviews included (Seif, 26 Oct: stronger evidence never reads
+    lower than descriptive claims alone); low with none."""
     causal = [c for c in report.claims if c.claim_type == "causal" and not c.reworded]
     reviews = frozenset().union(*(c.supporting_reviews for c in report.claims))
     if causal and len(reviews) >= HIGH_CONFIDENCE_REVIEWS:
         return "high"
-    if report.claims and not causal:
-        return "medium"
-    return "low"
+    return "medium" if report.claims else "low"
 
 
 def public_copy(report: Report) -> dict[str, Any]:

@@ -166,6 +166,7 @@ def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
         "PP_GITHUB_APP_PRIVATE_KEY",
         "PP_QDRANT_URL",
         "PP_QDRANT_API_KEY",
+        "PP_QDRANT_ASK_API_KEY",
         "PP_GEMINI_API_KEY",
         "PP_LANGFUSE_PUBLIC_KEY",
         "PP_LANGFUSE_SECRET_KEY",
@@ -194,6 +195,8 @@ def test_infra_passes_the_qdrant_secrets_to_what_if_and_deploy() -> None:
     text = read("infra.yml")
     assert text.count("PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}") == 3
     assert text.count("PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}") == 3
+    # pp-api's restricted key (the review's I4).
+    assert text.count("PP_QDRANT_ASK_API_KEY: ${{ secrets.PP_QDRANT_ASK_API_KEY }}") == 3
     assert "vars.PP_QDRANT" not in text
 
 

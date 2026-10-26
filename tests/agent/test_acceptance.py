@@ -63,7 +63,7 @@ def acceptance_bundle() -> Bundle:
 
 def scope_answer(user: str) -> dict[str, Any]:
     """The patch the question names, and the 14 days from its day."""
-    (title,) = re.findall(r'What changed after "([^"]+)"', user)
+    (title,) = re.findall(r'after "([^"]+)"', user)
     found = re.search(rf'- (\S+): Helldivers 2, (\S+), "{title}"', user)
     assert found, f"{title} isn't in the scope prompt"
     start = date.fromisoformat(found.group(2))
@@ -141,7 +141,8 @@ def test_acceptance_picks_bundles_by_the_rule_and_prints_coverage(tmp_path: Path
         "q1", "q7", "q2", "q8", "q11", "q12", "q6", "q3", "q9", "q5",
     ]  # fmt: skip
     assert (picks[0].horizon, picks[0].effect) == (14, -15.0)
-    assert picks[0].question == 'What changed after "Update 1" (10 Aug 2026)?'
+    # The question names the span of the estimate the pick was ranked by.
+    assert picks[0].question == 'What changed in the two weeks after "Update 1" (10 Aug 2026)?'
     # Each pick asked as a visitor would, on its game; then the first pick's nightly report with
     # the chain emptied, which the models never see.
     assert traces.started[:10] == [
@@ -157,7 +158,8 @@ def test_acceptance_picks_bundles_by_the_rule_and_prints_coverage(tmp_path: Path
     rows = table(text, "Runs")
     assert len(rows) == 11
     assert rows[0].startswith(
-        '| 1 | Helldivers 2 | q1 | -15.0 | What changed after "Update 1" (10 Aug 2026)? | q-'
+        '| 1 | Helldivers 2 | q1 | -15.0 | What changed in the two weeks after "Update 1" '
+        "(10 Aug 2026)? | q-"
     )
     assert rows[0].endswith("| 1 | 1 (V2) | t1 |")
     assert rows[10].startswith("| basic | Helldivers 2 | q1 | -15.0 | the nightly report, ")
@@ -244,4 +246,23 @@ def test_acceptance_adds_bundles_chosen_to_hit_a_missing_path() -> None:
     picks = pick_bundles(acceptance_bundle(), extra=["q10", "q4", "q1"])
 
     assert [p.bundle_id for p in picks][10:] == ["q10", "q4"]  # q1 is already picked
-    assert picks[10].question == 'What changed after "Update 10" (6 Sep 2026)?'
+    assert picks[10].question == 'What changed in the two weeks after "Update 10" (6 Sep 2026)?'
+
+
+def test_the_question_names_the_span_it_was_picked_by() -> None:
+    week, unestimated = pick_bundles(seven_day_bundle(), extra=["q13"])[0], None
+    for p in pick_bundles(seven_day_bundle(), extra=["q13"]):
+        if p.bundle_id == "q13":
+            unestimated = p
+
+    assert week.horizon == 7
+    assert week.question.startswith("What changed in the week after ")
+    assert unestimated is not None
+    assert unestimated.question.startswith("What changed after ")
+
+
+def seven_day_bundle() -> Bundle:
+    bundle = acceptance_bundle()
+    (game,) = bundle.games
+    sevens = tuple(e for e in game.estimates if e.horizon == 7)
+    return replace(bundle, games=(replace(game, estimates=sevens),))

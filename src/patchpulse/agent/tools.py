@@ -281,6 +281,9 @@ class Tools:
             )
         except ValueError as error:  # a filter the index can't apply
             raise ToolError(str(error)) from error
+        except Exception as error:  # the cluster unreachable or refusing: the run goes on
+            # The error's type only: a message can carry the cluster's URL, a secret.
+            raise ToolError(f"review search failed ({type(error).__name__})") from error
         for hit in hits:
             self.trace.retrieved[hit.review_id] = hit.text
         return {

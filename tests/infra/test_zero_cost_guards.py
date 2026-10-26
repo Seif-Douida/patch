@@ -440,3 +440,20 @@ def test_api_credentials_come_from_container_app_secrets(resources: list[dict[st
     assert cors["allowedMethods"] == ["GET", "POST"]
     assert cors["allowedHeaders"] == ["Content-Type"]
     assert len(cors["allowedOrigins"]) == 1
+
+
+def test_api_holds_only_the_ask_key_of_the_cluster(resources: list[dict[str, Any]]) -> None:
+    # The review's I4: pp-api is public, so its Qdrant key reads the review index and writes Ask's
+    # counters only (Seif's restricted key, checked on the cluster 26 Oct); pp-nightly keeps the
+    # read-write key its index stage needs.
+    nightly, _ = nightly_env(resources)
+    secrets = {
+        "pp-api": api_app(resources)["properties"]["configuration"]["secrets"],
+        "pp-nightly": nightly["properties"]["configuration"]["secrets"],
+    }
+    keys = {app: next(s["value"] for s in found if s["name"] == "qdrant-api-key")
+            for app, found in secrets.items()}  # fmt: skip
+    assert keys == {
+        "pp-api": "[parameters('qdrantAskApiKey')]",
+        "pp-nightly": "[parameters('qdrantApiKey')]",
+    }

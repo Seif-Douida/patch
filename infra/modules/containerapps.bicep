@@ -14,8 +14,9 @@ param geminiApiKey string
 @secure()
 param qdrantUrl string
 
+@description('The restricted key: reads the review collection, reads and writes ask_limits; nothing else.')
 @secure()
-param qdrantApiKey string
+param qdrantAskApiKey string
 
 @description('Langfuse keys: Ask is traced at a sample (Phase 5 Task 18).')
 @secure()
@@ -89,7 +90,7 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
         }
         {
           name: 'qdrant-api-key'
-          value: qdrantApiKey
+          value: qdrantAskApiKey
         }
         {
           name: 'langfuse-public-key'

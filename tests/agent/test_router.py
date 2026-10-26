@@ -5,6 +5,7 @@ ten minutes."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ import httpx2
 import pytest
 from fake_clock import FakeClock
 
-from patchpulse.agent.llm_cache import ReplayCache, ReplayMissError
+from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache, ReplayMissError
 from patchpulse.agent.router import AllModelsDownError, ModelRouter, Routed, make_agent_clients
 from patchpulse.labeling.limits import QuotaExhaustedError
 from patchpulse.labeling.llm import LLMResponse, TeacherRequestError, TeacherUnavailableError
@@ -359,3 +360,32 @@ def test_the_agent_chain_must_name_gemini_candidates() -> None:
         TeacherModels.model_validate(
             {"candidates": {"server": server.model_dump()}, "agent": {"chain": ["server"]}}
         )
+
+
+def test_the_replay_cache_lives_where_git_ignores_it() -> None:
+    """Recorded answers can quote reviews (the rehearsal found the file defaulting to the repo's
+    root, which git doesn't ignore)."""
+    path = Path(AGENT_CACHE_FILE)
+    ignored = Path(".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert path.parent == Path("data/local")
+    assert "data/local/" in ignored
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        json.JSONDecodeError("Expecting value", "<html>", 0),  # a 200 whose body isn't JSON
+        AttributeError("'list' object has no attribute 'get'"),  # a body that isn't an object
+        RuntimeError("an error no one expected"),
+    ],
+)
+def test_any_client_error_fails_over(tmp_path: Path, error: Exception) -> None:
+    """Review focus 1, never a crash: whatever a client raises (a quota aside) is that model
+    failing, and the next one answers (the review's minor 9)."""
+    first, second = FakeClient(error), FakeClient(answer(YES))
+
+    routed = router(tmp_path, {FIRST: first, SECOND: second}).generate("draft", "s", "u", SCHEMA)
+
+    assert routed.model_id == SECOND
+    assert routed.data["verdict"] == "yes"

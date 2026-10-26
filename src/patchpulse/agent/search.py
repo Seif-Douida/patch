@@ -88,8 +88,9 @@ def find_reviews(
     min_playtime: float | None = None,
     k: int = DEFAULT_HITS,
 ) -> list[Hit]:
-    """The best `k` reviews (capped at MAX_HITS) for `query`; ValueError names a filter the index
-    can't apply."""
+    """The best `k` reviews (capped at MAX_HITS) for `query`, by score then review id (rank
+    fusion gives ties, which the cluster returns in any order); ValueError names a filter the
+    index can't apply."""
     if aspect is not None and aspect not in ASPECTS:
         raise ValueError(f"unknown aspect {aspect!r}")
     buckets = None
@@ -110,7 +111,7 @@ def find_reviews(
         as_of_run_id=as_of_run_id,
         playtime_buckets=buckets,
     )
-    return search(
+    hits = search(
         source.client,
         source.collection,
         source.embedder,
@@ -120,3 +121,4 @@ def find_reviews(
         filters=filters,
         k=max(1, min(k, MAX_HITS)),
     )
+    return sorted(hits, key=lambda hit: (-hit.score, hit.review_id))

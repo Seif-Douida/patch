@@ -14,8 +14,9 @@ Each claim states one fact in one plain English sentence:
 - `claim_type`: `descriptive` (what the data show), `comparative` (window against baseline) or `causal` (that the patch caused it).
 - `value` and `unit`: the claim's number exactly as the tool result gives it, with its unit: `pp` for a change in percentage points, `%` for a share, `reviews` for a count. Leave both out for a claim without a number.
 - `evidence`: where the number comes from: `call_id` (the tool call) and `json_path` (the dotted path to the number in its result, for example `aspects.performance.negative.change` or `horizons.7.effect`). Every claim with a number needs it.
+- Every number in `text` must be the claim's `value` or a number from that tool's results in this run (rounding is fine), and a claim without a `value` states no number. Words like "rose" or "fell" must match the sign of the change.
 - `review_ids`: the ids of reviews the claim rests on, only from the snippets above.
-- `quote_spans`: short quotes that support the claim, each with its `review_id` and `text` copied exactly from that review's snippet.
+- `quote_spans`: short quotes that support the claim, each with its `review_id` and `text` copied exactly from that review's snippet. A claim resting on reviews alone (no `evidence`) needs at least one.
 
 ## Causal wording
 

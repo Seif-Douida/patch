@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, SecretStr
 from patchpulse.agent.bundle import Bundle
 from patchpulse.agent.graph import AgentDeps
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
+from patchpulse.agent.patch_notes import agent_steam
 from patchpulse.agent.router import ModelRouter, make_agent_clients
 from patchpulse.agent.search import ReviewSearch, open_pinned_search
 from patchpulse.agent.tracing import Tracer, make_tracer
@@ -131,7 +132,7 @@ class LiveDeps:
             store=store,
             ask_sample=settings.ask_trace_sample,
         )
-        return router, search, SteamHttp(httpx2.Client(), limiter=RateLimiter()), tracer
+        return router, search, agent_steam(httpx2.Client(), RateLimiter()), tracer
 
     def __call__(self, bundle: Bundle) -> AgentDeps:
         with self._lock:

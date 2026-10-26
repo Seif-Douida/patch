@@ -115,7 +115,7 @@ def test_rounded_number_within_tolerance_passes() -> None:
     rounded = float(round(performance_change(run)))
     assert rounded != performance_change(run)
 
-    verified = run.verify(claim("Performance complaints rose.", value=rounded))
+    verified = run.verify(claim("Performance complaints fell.", value=rounded))
 
     assert [c.claim_id for c in verified.claims] == ["c1"]
     assert verified.withheld == []
@@ -159,7 +159,7 @@ def test_summary_number_no_claim_holds_fails_v6() -> None:
     run = Run()
     change = performance_change(run)
     verified = run.verify(
-        claim("Performance complaints rose.", value=change, claim_id="c1"),
+        claim("Performance complaints fell.", value=change, claim_id="c1"),
         claim(
             "Negative reviews rose in share.",
             claim_type="causal",
@@ -171,12 +171,117 @@ def test_summary_number_no_claim_holds_fails_v6() -> None:
     ).claims
     good = (
         f"In the 7 days after the patch the positive share fell 10 points, and performance "
-        f"complaints rose {change:.1f} points."
+        f"complaints fell {abs(change):.1f} points."
     )
-    bad = "The positive share fell 10 points and performance complaints rose 25 points."
+    bad = "The positive share fell 10 points and performance complaints fell 25 points."
 
     assert verify_summary(good, verified, RETRIEVED) == good
     assert verify_summary(bad, verified, RETRIEVED) is None
+
+
+# V2 on the sentence (the whole-phase review's C1): the numbers and the direction a visitor reads.
+
+
+def leaves(value: Any) -> list[float]:
+    if isinstance(value, dict):
+        return [x for v in value.values() for x in leaves(v)]
+    if isinstance(value, list):
+        return [x for v in value for x in leaves(v)]
+    return [abs(value)] if isinstance(value, int | float) and not isinstance(value, bool) else []
+
+
+def test_a_claims_numbers_must_come_from_its_evidence() -> None:
+    run = Run()
+    side = run.aspects["aspects"]["performance"]["negative"]
+    found = leaves(run.aspects)
+    assert not any(abs(x - n) < 0.01 for x in found for n in (30, 87.65, 3.21, 12.25, 12))
+    held = claim(
+        f"Among negative reviews, performance mentions went from {side['baseline_share']:.1f}% "
+        f"to {side['window_share']:.1f}% (a change of {abs(side['change']):.0f} points).",
+        value=side["change"],
+    )
+    invented_size = claim(
+        "The patch caused a 30-point drop in positive reviews.",
+        claim_type="causal", call="r1.1", path="horizons.7.effect", claim_id="c2",
+    )  # fmt: skip
+    invented_levels = claim(
+        "Performance mentions went from 87.65% to 3.21% of negative reviews.",
+        value=side["change"], claim_id="c3",
+    )  # fmt: skip
+    another_tools = claim(
+        f"Performance mentions moved {abs(side['change']):.2f} points, the estimate 12.25.",
+        value=side["change"], claim_id="c4",
+    )  # fmt: skip
+    no_value = claim(
+        "Reviews mention crashes 12 times.",
+        unit=None, call=None, review_ids=(101,), quotes=((101, "crashes on load"),), claim_id="c5",
+    )  # fmt: skip
+
+    checked = run.verify(held, invented_size, invented_levels, another_tools, no_value)
+
+    assert [c.claim_id for c in checked.claims] == ["c1"]
+    assert withheld_rules(checked) == ["V2", "V2", "V2", "V2"]
+
+
+def test_rise_and_fall_words_must_agree_with_the_change() -> None:
+    run = Run()
+    change = performance_change(run)  # performance mentions fell
+    assert change < 0
+    wrong = claim(f"Performance mentions among negative reviews rose by {abs(change):.1f} points.",
+                  value=change)  # fmt: skip
+    right = claim(f"Performance mentions among negative reviews fell by {abs(change):.1f} points.",
+                  value=change, claim_id="c2")  # fmt: skip
+    level = claim(
+        "Performance mentions fell to 15.2% of negative reviews.",
+        value=15.22, unit="%", path="aspects.performance.negative.window_share", claim_id="c3",
+    )  # fmt: skip
+    # The positive share fell 12.25 points: the negative share rose by as much.
+    estimate: dict[str, Any] = {"claim_type": "comparative", "value": -12.25, "call": "r1.1",
+                "path": "horizons.7.effect"}  # fmt: skip
+    complement = claim(
+        "Negative reviews rose by 12 points of the share.", claim_id="c4", **estimate
+    )
+    backwards = claim("The positive share rose by 12 points.", claim_id="c5", **estimate)
+
+    checked = run.verify(wrong, right, level, complement, backwards)
+
+    assert [c.claim_id for c in checked.claims] == ["c2", "c3", "c4"]
+    assert withheld_rules(checked) == ["V2", "V2"]
+
+
+def test_labels_are_not_values() -> None:
+    """Horizons, playtime groups and patch versions name things; the rehearsal's summaries and
+    claims use them, and V6 replaced half the summaries for it."""
+    run = Run()
+    change = performance_change(run)
+    labelled = claim(
+        f"At horizon 7, players with under 2 hours or 200 hours plus saw performance mentions "
+        f"fall by {abs(change):.1f} points after Title Update 4 (Ver.1.030.02.02).",
+        value=change,
+    )
+    verified = run.verify(labelled).claims
+    summary = (
+        f"At horizon 7, after Title Update 4 and the 1.2 patch (Ver.1.030.02.02, 1.6.2f1, "
+        f"S05.09), performance mentions fell {abs(change):.1f} points; players with under 2 "
+        "hours, 50h and 200h, 10-50 hours and 200 hours plus all reviewed."
+    )
+
+    assert [c.claim_id for c in verified] == ["c1"]
+    assert verify_summary(summary, verified, RETRIEVED) == summary
+    assert verify_summary("After the patch 30% of reviews were negative.", verified,
+                          RETRIEVED) is None  # fmt: skip
+
+
+def test_a_summary_may_restate_numbers_a_verified_claim_states() -> None:
+    run = Run()
+    side = run.aspects["aspects"]["performance"]["negative"]
+    shares = f"{side['baseline_share']:.1f}% to {side['window_share']:.1f}%"
+    stated = claim(f"Among negative reviews, performance mentions went from {shares}.",
+                   value=side["change"])  # fmt: skip
+    verified = run.verify(stated).claims
+    summary = f"Performance mentions went from {shares} of negative reviews."
+
+    assert verify_summary(summary, verified, RETRIEVED) == summary
 
 
 # V4, the causal gate.
@@ -390,7 +495,8 @@ def test_evidence_from_another_run_fails_v1() -> None:
 
     other_run = run.verify(claim("Complaints rose.", value=performance_change(run), call="r0.2"))
     no_evidence = run.verify(claim("Complaints rose.", value=3.0, call=None))
-    reviews_only = run.verify(claim("Crashes on load are mentioned.", call=None, review_ids=(101,)))
+    reviews_only = run.verify(claim("Crashes on load are mentioned.", call=None, review_ids=(101,),
+                                    quotes=((101, "crashes on load"),)))  # fmt: skip
 
     assert withheld_rules(other_run) == ["V1"]
     assert withheld_rules(no_evidence) == ["V1"]
@@ -402,7 +508,7 @@ def test_pass_rates_are_recorded() -> None:
     change = performance_change(run)
 
     verified = run.verify(
-        claim("Complaints rose.", value=change, claim_id="c1"),
+        claim("Complaints fell.", value=change, claim_id="c1"),
         claim("Complaints rose a lot.", value=change + 9, claim_id="c2"),
         claim("A player reports it.", quotes=((101, "never happened"),), claim_id="c3"),
         claim("Crashes on load are mentioned.", review_ids=(101,), claim_id="c4"),
@@ -410,7 +516,7 @@ def test_pass_rates_are_recorded() -> None:
 
     assert withheld_rules(verified) == ["V2", "V3"]
     assert verified.pass_rates["V1"] == 1.0
-    assert verified.pass_rates["V2"] == 0.5  # c1 and c2 carry a value
+    assert verified.pass_rates["V2"] == 0.75  # every claim's numbers; c2's value is wrong
     assert verified.pass_rates["V3"] == 0.5  # c3 and c4 cite reviews
     assert verified.pass_rates["V7"] == 1.0
     assert "V4" not in verified.pass_rates  # no causal claim
@@ -433,13 +539,14 @@ def test_injected_snippets_are_still_withheld() -> None:
             call=None,
             review_ids=(103,),
         ),
-        claim("Review 103 is the summary.", quotes=((104, INJECTED),), claim_id="c3"),
+        claim("That review is the summary.", quotes=((104, INJECTED),), claim_id="c3"),
     ]
 
     verified = run.verify(*obeyed)
 
     assert verified.claims == []
-    assert withheld_rules(verified) == ["V2", "V4", "V3"]
+    # c2 cites a review but quotes nothing (V1), before its number (V2) or causal words (V4).
+    assert withheld_rules(verified) == ["V2", "V1", "V3"]
 
 
 # The basic report and the template summary.
@@ -501,3 +608,18 @@ def test_template_summary_names_each_status() -> None:
         assert words[h.status] in text
     assert not CAUSAL_LEXICON.search(text)
     assert len(text.split()) <= 120
+
+
+def test_a_claim_resting_on_reviews_needs_a_quote() -> None:
+    """Without a tool call, only a quote ties a claim's words to its review (the review's minor
+    14: an injected review could otherwise put any sentence under a tick)."""
+    run = Run()
+    bare = claim("Players report the developer sells their data.", unit=None, call=None,
+                 review_ids=(101,))  # fmt: skip
+    quoted = claim("A player reports crashes on load.", unit=None, call=None, review_ids=(101,),
+                   quotes=((101, "crashes on load"),), claim_id="c2")  # fmt: skip
+
+    checked = run.verify(bare, quoted)
+
+    assert [c.claim_id for c in checked.claims] == ["c2"]
+    assert withheld_rules(checked) == ["V1"]

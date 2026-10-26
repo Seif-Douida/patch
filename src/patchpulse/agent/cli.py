@@ -39,6 +39,7 @@ from patchpulse.agent.acceptance import pick_bundles, run_acceptance, write_acce
 from patchpulse.agent.bundle import BUNDLE_FILE, Bundle, build_bundle, load_bundle
 from patchpulse.agent.graph import AgentDeps, ReportRequest, run_report
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
+from patchpulse.agent.patch_notes import agent_steam
 from patchpulse.agent.report import Report
 from patchpulse.agent.router import ModelRouter, make_agent_clients
 from patchpulse.agent.search import ReviewSearch, open_pinned_search
@@ -55,7 +56,7 @@ from patchpulse.api.limits import LimitStore, MemoryLimitStore, QdrantLimitStore
 from patchpulse.api.settings import AGENT_DATA_URL
 from patchpulse.config import LabSettings, get_lab_settings
 from patchpulse.db.engine import connect_with_resume_retry, make_entra_engine
-from patchpulse.ingest.http import RateLimiter, SteamHttp
+from patchpulse.ingest.http import RateLimiter
 from patchpulse.labeling.limits import USAGE_FILE
 from patchpulse.labeling.teachers import load_model_config
 from patchpulse.pipeline.runs import finish_run, start_run
@@ -114,7 +115,8 @@ def backfill_reports(
         try:
             result = run_report(ReportRequest.for_bundle(bundle_id, horizon), deps)
         except Exception as error:
-            log.warning("%s-%dd failed: %s: %s", bundle_id, horizon, type(error).__name__, error)
+            # The type only: a message can carry the cluster's URL, a secret.
+            log.warning("%s-%dd failed: %s", bundle_id, horizon, type(error).__name__)
             skipped += 1
             result = None
         if isinstance(result, Report) and result.basic:
@@ -185,7 +187,7 @@ def _live_deps(
     else:
         log.warning("no review search (PP_QDRANT_URL or %s missing): reports cite no reviews",
                     encoder_dir)  # fmt: skip
-    steam = SteamHttp(stack.enter_context(httpx2.Client()), limiter=RateLimiter())
+    steam = agent_steam(stack.enter_context(httpx2.Client()), RateLimiter())
     store: LimitStore = MemoryLimitStore() if search is None else QdrantLimitStore(search.client)
     tracer = make_tracer(
         settings.langfuse_public_key,

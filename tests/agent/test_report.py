@@ -161,7 +161,9 @@ def test_confidence_rule() -> None:
     quoted = claim("c2", review_ids=(3,), quotes=((2, "runs badly"),))
 
     assert confidence_for(report([causal, quoted])) == "high"  # reviews 1, 2 and 3
-    assert confidence_for(report([causal])) == "low"  # a causal claim, 2 reviews
+    # A causal claim the gate allowed, with 2 reviews: medium, never below a report without one
+    # (Seif, 26 Oct, reversing the Task 6 ruling the review disputed).
+    assert confidence_for(report([causal])) == "medium"
     assert confidence_for(report([quoted, claim("c3", "comparative")])) == "medium"
     reworded = claim("c1", "causal", review_ids=(1, 2, 3), reworded=True)
     assert confidence_for(report([reworded])) == "medium"  # a hedged claim isn't causal

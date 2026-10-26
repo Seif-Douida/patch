@@ -25,9 +25,11 @@ from patchpulse.agent.llm_cache import ReplayCache
 from patchpulse.agent.prompts import PROMPT_NAMES, load_prompt
 from patchpulse.agent.router import ModelRouter
 from patchpulse.agent.search import ReviewSearch
+from patchpulse.api import app as app_module
 from patchpulse.api.app import create_app
+from patchpulse.api.ask import UNAVAILABLE
 from patchpulse.api.bundle_source import BundleSource
-from patchpulse.api.limits import RESTING, AskLimits, MemoryLimitStore
+from patchpulse.api.limits import RESTING, AskLimits, LimitStore, MemoryLimitStore
 from patchpulse.api.settings import ApiSettings
 from patchpulse.labeling.llm import LLMResponse, TeacherUnavailableError
 
@@ -97,7 +99,15 @@ class FakeQdrant:
 class Ask:
     """The API with scripted models, a fake review search and in-memory limits."""
 
-    def __init__(self, tmp_path: Path, model: Scripted, *, daily_cap: int = 15) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        model: Scripted,
+        *,
+        daily_cap: int = 15,
+        qdrant: Any = None,
+        store: LimitStore | None = None,
+    ) -> None:
         self.model = model
         self.published, self.clock = Published(), Seconds()
         self.published.publish(make_bundle(), sample_report("p1", 7))
@@ -109,11 +119,11 @@ class Ask:
                 ReplayCache(tmp_path / "unused.sqlite", "live"),
                 clock=FakeClock(NOW),
             )
-            search = ReviewSearch(FakeQdrant(), "reviews", FakeEmbedder())
+            search = ReviewSearch(qdrant or FakeQdrant(), "reviews", FakeEmbedder())
             return AgentDeps(bundle=bundle, router=router, search=search)
 
         limits = AskLimits(
-            MemoryLimitStore(),
+            store or MemoryLimitStore(),
             secret=b"test",
             per_visitor_hour=3,
             daily_cap=daily_cap,
@@ -270,3 +280,48 @@ def test_an_answer_the_models_couldnt_give_is_not_cached(
 
     assert "report" in second
     assert second["report"]["basic"] is False
+
+
+class DownQdrant:
+    """The free cluster not answering."""
+
+    def query_points(self, collection: str, **kwargs: Any) -> Any:
+        raise TimeoutError("timed out")
+
+
+class Unreachable(MemoryLimitStore):
+    def get(self, key: str) -> dict[str, Any] | None:
+        raise ConnectionError("unreachable")
+
+
+def test_a_search_failure_still_answers(tmp_path: Path) -> None:
+    # The review's I2: a cluster timeout is a tool error the report goes on without.
+    response = Ask(tmp_path, Scripted(), qdrant=DownQdrant()).ask("Why did reviews drop?")
+
+    assert response.status_code == 200
+    assert "report" in response.json()
+
+
+def test_a_failed_run_is_unavailable_and_gives_the_question_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ask = Ask(tmp_path, Scripted())
+
+    def broken(*args: object, **kwargs: object) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_module, "run_report", broken)
+    failed = ask.ask("Why did reviews drop, take 0?")
+    monkeypatch.undo()
+    answered = ask.ask("Why did reviews drop, take 1?").json()
+
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == UNAVAILABLE
+    assert answered["questions_left"] == 2  # the failed question wasn't counted
+
+
+def test_limits_that_cant_be_read_are_unavailable(tmp_path: Path) -> None:
+    response = Ask(tmp_path, Scripted(), store=Unreachable()).ask("Why did reviews drop?")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == UNAVAILABLE

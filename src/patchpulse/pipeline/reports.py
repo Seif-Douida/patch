@@ -32,6 +32,7 @@ from sqlalchemy import Engine
 from patchpulse.agent.bundle import Bundle
 from patchpulse.agent.graph import AgentDeps, Refusal, ReportRequest, run_report
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
+from patchpulse.agent.patch_notes import agent_steam
 from patchpulse.agent.report import Report, public_copy
 from patchpulse.agent.router import ModelRouter, make_agent_clients
 from patchpulse.agent.search import ReviewSearch, open_pinned_search
@@ -134,7 +135,7 @@ def _live_agent(stack: ExitStack, settings: Settings, bundle: Bundle, steam: Ste
         bundle=bundle,
         router=router,
         search=search,
-        steam=steam,
+        steam=None if steam is None else agent_steam(steam.client, steam.limiter),
         tracer=_tracer(stack, settings, search),
     )
     return functools.partial(run_report, deps=deps)

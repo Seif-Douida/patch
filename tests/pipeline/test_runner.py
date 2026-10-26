@@ -66,11 +66,14 @@ class RecordingPublisher:
     alerts: list[tuple[str, str]] = field(default_factory=list)
     resolved: list[tuple[str, str]] = field(default_factory=list)
     report_fails: bool = False
+    branch_error: str | None = None
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
         self.calls.append((dict(files), data_version))
 
     def publish_branch(self, branch: str, files: Mapping[str, bytes], *, data_version: int) -> None:
+        if self.branch_error is not None:
+            raise RuntimeError(self.branch_error)
         self.branches.append((branch, dict(files), data_version))
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
@@ -1181,3 +1184,28 @@ def test_a_failing_reports_stage_is_a_warning_without_secrets(env: Env) -> None:
     assert "qdrant.invalid" not in finding.detail
     assert len(env.publisher.branches) == 1  # the bundle and the stored reports still go out
     assert (env.publisher.alerts, env.publisher.resolved) == ([], [])
+
+
+SECRET_DETAIL = "failed at https://qdrant.invalid:6333 with key test-gemini-key"
+
+
+def leaky_bundle(connection: Connection, *, run_id: int, today: date) -> Bundle:
+    raise RuntimeError(f"bundle read {SECRET_DETAIL}")
+
+
+def test_bundle_and_agent_data_failures_keep_secrets_out(env: Env) -> None:
+    # The review's minor 8: a stage's error can carry the cluster's URL or a key.
+    settings = with_gemini(env.settings, qdrant_url="https://qdrant.invalid:6333")
+    first = env.run(settings=settings, dbt=ok_dbt, export=stub_export, bundle=leaky_bundle,
+                    reports=FakeReports([]))  # fmt: skip
+    env.publisher.branch_error = f"push {SECRET_DETAIL}"
+    second = env.run(settings=settings, dbt=ok_dbt, export=stub_export, bundle=fixture_bundle,
+                     reports=FakeReports([]))  # fmt: skip
+
+    details = [first.stages["bundle"]["skipped"], second.stages["agent_data"]["skipped"]]
+    details += [r.detail for r in env.rows(
+        "SELECT detail FROM ops.data_quality_result "
+        "WHERE check_name IN ('bundle_skipped', 'agent_data_skipped')"
+    )]  # fmt: skip
+    assert len(details) == 4
+    assert all("qdrant.invalid" not in d and "test-gemini-key" not in d for d in details)

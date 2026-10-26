@@ -2,10 +2,14 @@
 anyone sees it. The first rule a claim fails withholds it, except V4, which rewords a causal claim
 it can't allow when there's an estimate to state.
 
-- V1 evidence exists: the cited call is in this run's trace (a claim citing only reviews needs
-  no call, but one with a value does).
-- V2 the value matches: the cited call re-executed on the same bundle (the model's network tools
-  are read from the trace) gives a number at the JSON path within the claim's tolerance.
+- V1 evidence exists: the cited call is in this run's trace; a claim without a call has no value
+  and quotes its reviews (V3 then checks the quotes), so its words are tied to them.
+- V2 the numbers match: the cited call re-executed on the same bundle (the model's network tools
+  are read from the trace) gives a number at the JSON path within the claim's tolerance; every
+  other number the sentence states is the value or a number in this run's results of the cited
+  tool, as rounded (a claim without a value states none); rise or fall words agree with the
+  sign of a change. Labels (dates, durations, horizons, playtime groups, patch versions) aren't
+  numbers.
 - V3 quotes hold: every cited review was returned by search_reviews in this run, and every quote
   is part of its text once whitespace is normalised.
 - V4 the causal gate: a claim typed causal, or using causal words, needs an estimate_patch_effect
@@ -97,6 +101,20 @@ HEDGE_REASONS = {
 }
 
 _ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+# Labels that name things rather than state values: a horizon, a patch version, a playtime
+# group (the rehearsal's summaries and claims use all three).
+_LABELS = re.compile(
+    r"\bhorizons?\s+\d+\b"
+    r"|\b(?:v|ver\.?|version)\s*\d+(?:\.\d+)*[a-z0-9]*"
+    r"|\b\d+(?:\.\d+){2,}[a-z0-9]*"
+    r"|\bs\d+\.\d+\b"
+    r"|\b(?:patch|update|hotfix|season)\s+\d+(?:\.\d+)?\b"
+    r"(?!\s*(?:%|percent|points?|pp\b|reviews?))"
+    r"|\b\d+(?:\.\d+)?(?=\s*(?:patch|update|hotfix)\b)"
+    r"|\b\d+\s*(?:-|to|and)\s*\d+\s*\+?\s*(?:h|hrs?|hours?)\b"
+    r"|\b\d+\s*\+?\s*(?:h|hrs?|hours?)\b(?:\s*plus)?",
+    re.IGNORECASE,
+)
 _NUMBER = re.compile(r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 _EXEMPT_AFTER = re.compile(
     r"\s*-?\s*(?:days?\b|weeks?\b|% (?:range|interval)\b|"
@@ -104,6 +122,21 @@ _EXEMPT_AFTER = re.compile(
     re.IGNORECASE,
 )
 
+
+# V2's direction check: words for a rise or a fall, read against the sign of a change.
+_FALL = re.compile(
+    r"\b(?:fell|fall(?:s|ing)?|drop(?:s|ped|ping)?|declin(?:e|ed|es|ing)|"
+    r"decreas(?:e|ed|es|ing)|lower(?:ed)?|shr(?:ank|unk|inks?)|dip(?:s|ped)?|"
+    r"slip(?:s|ped)?|reduc(?:e|ed|es|ing)|cut)\b",
+    re.IGNORECASE,
+)
+_RISE = re.compile(
+    r"\b(?:r(?:ose|ise|ises|ising|isen)|increas(?:e|ed|es|ing)|higher|"
+    r"gr(?:ew|ow|ows|owing|own)|gain(?:s|ed)?|climb(?:s|ed)?|jump(?:s|ed)?)\b",
+    re.IGNORECASE,
+)
+# Result fields holding a signed change; the rest are levels, which a fall can't make negative.
+CHANGE_FIELDS = frozenset({"change", "effect", "total", "composition", "within", "interaction"})
 
 NO_ESTIMATE_CITED = "no_estimate_cited"  # V4's cause when a causal claim cites no estimate row
 
@@ -238,6 +271,55 @@ def _value_matches(claim: Claim, call: ToolCall | None, tools: Tools) -> bool:
     return claim.tolerance.accepts(claim.value, float(actual))
 
 
+def _leaves(value: Any) -> list[float]:
+    if isinstance(value, Mapping):
+        return [x for v in value.values() for x in _leaves(v)]
+    if isinstance(value, list | tuple):
+        return [x for v in value for x in _leaves(v)]
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return [float(value)]
+    return []
+
+
+def _numbers_hold(claim: Claim, call: ToolCall | None, trace: Trace) -> bool:
+    """Every number the sentence states is the claim's value (within its tolerance) or, as
+    rounded, a number in this run's results of the cited tool (the window's and the baseline's
+    series are two calls of one tool); a claim without a value states no number."""
+    stated = _stated(claim.text)
+    if not stated:
+        return True
+    if claim.value is None:
+        return False
+    value = claim.value
+    pool = [value]
+    if call is not None:
+        pool += [x for c in trace.calls if c.tool == call.tool for x in _leaves(c.result)]
+    return all(
+        claim.tolerance.accepts(number, abs(value))
+        or any(_as_rounded(number, decimals, x) for x in pool)
+        for number, decimals in stated
+    )
+
+
+def _direction_holds(claim: Claim, call: ToolCall | None) -> bool:
+    """Rise or fall words agree with the sign of a change the claim states. Speaking of
+    negative reviews flips the direction of a positive-share quantity (the patch's estimate
+    of the positive share, the decomposition): their share moves the other way."""
+    if claim.value is None or claim.value == 0 or claim.evidence is None or call is None:
+        return True
+    if _segments(claim.evidence.json_path)[-1] not in CHANGE_FIELDS:
+        return True
+    falls, rises = bool(_FALL.search(claim.text)), bool(_RISE.search(claim.text))
+    if falls == rises:  # no direction stated, or both
+        return True
+    positive_share = call.tool == "decompose_change" or (
+        call.tool == "estimate_patch_effect"
+        and call.args.get("outcome", POSITIVE_SHARE) == POSITIVE_SHARE
+    )
+    upward = rises != (positive_share and re.search(r"\bnegative\b", claim.text, re.I) is not None)
+    return upward == (claim.value > 0)
+
+
 def _quotes_hold(claim: Claim, retrieved: Mapping[int, str]) -> bool:
     if any(rid not in retrieved for rid in claim.review_ids):
         return False
@@ -275,11 +357,16 @@ def _verify(
 ) -> tuple[Claim | None, str | None]:
     call = None if claim.evidence is None else trace.find(claim.evidence.call_id)
     v1 = call is not None if claim.evidence is not None else (
-        claim.value is None and bool(claim.supporting_reviews)
+        claim.value is None and bool(claim.quote_spans)
     )  # fmt: skip
     if not tally.check("V1", v1):
         return None, "V1"
-    if claim.value is not None and not tally.check("V2", _value_matches(claim, call, tools)):
+    v2 = (
+        (claim.value is None or _value_matches(claim, call, tools))
+        and _numbers_hold(claim, call, trace)
+        and _direction_holds(claim, call)
+    )
+    if not tally.check("V2", v2):
         return None, "V2"
     if claim.supporting_reviews and not tally.check("V3", _quotes_hold(claim, trace.retrieved)):
         return None, "V3"
@@ -346,9 +433,11 @@ def safe_findings(
     return safe
 
 
-def _numbers(summary: str) -> list[float]:
-    """The numbers a summary states as values: not dates, years, durations or the 90% range."""
-    text = _ISO_DATE.sub(" ", summary)
+def _stated(text: str) -> list[tuple[float, int]]:
+    """The numbers a sentence states as values, unsigned (the sign is in the words), each with
+    its decimal places: not dates, years, durations, the 90% range, horizons, playtime groups
+    or patch versions."""
+    text = _LABELS.sub(" ", _ISO_DATE.sub(" ", text))
     values = []
     for match in _NUMBER.finditer(text):
         token = match.group()
@@ -357,8 +446,17 @@ def _numbers(summary: str) -> list[float]:
         value = float(token.replace(",", ""))
         if "." not in token and 1990 <= value <= 2100:  # a year
             continue
-        values.append(value)
+        values.append((value, len(token.partition(".")[2])))
     return values
+
+
+def _numbers(summary: str) -> list[float]:
+    return [value for value, _ in _stated(summary)]
+
+
+def _as_rounded(stated: float, decimals: int, actual: float) -> bool:
+    """`stated` is `actual` (unsigned) rounded to the places it shows."""
+    return abs(stated - abs(actual)) <= 0.5 * 10.0**-decimals + 1e-9
 
 
 def verify_summary(
@@ -376,8 +474,11 @@ def verify_summary(
     ):
         return None
     valued = [c for c in verified if c.value is not None]
-    for number in _numbers(summary):
-        if not any(c.tolerance.accepts(number, abs(c.value or 0.0)) for c in valued):
+    claimed = [value for c in verified for value, _ in _stated(c.text)]
+    for number, decimals in _stated(summary):
+        if any(c.tolerance.accepts(number, abs(c.value or 0.0)) for c in valued):
+            continue
+        if not any(_as_rounded(number, decimals, x) for x in claimed):
             return None
     return summary
 

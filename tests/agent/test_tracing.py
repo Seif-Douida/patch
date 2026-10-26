@@ -243,7 +243,9 @@ def test_a_failing_trace_never_fails_the_report(tmp_path: Path, capture: Capture
 
     for traced in (broken, no_counts):
         world = World(tmp_path, Scripted(), tracer=traced)
-        assert report_of(world.run(ReportRequest.for_bundle("p1", 7))) == untraced
+        report = report_of(world.run(ReportRequest.for_bundle("p1", 7)))
+        # The same report (its wall time aside).
+        assert report.model_dump(exclude={"seconds"}) == untraced.model_dump(exclude={"seconds"})
         report_of(world.run(ReportRequest.for_question(QUESTION, appid=GAME)))
         traced.close()
 

@@ -3,16 +3,22 @@ model asks, cleaned and cut, and never republished.
 
 GetNewsForApp is asked for the few posts up to the patch's timestamp and the post is matched by
 its news item id; a post Steam no longer returns is "not found", a result rather than an error.
-The request goes through the shared SteamHttp, so the 2.25-second limiter paces it.
+The request goes through the shared SteamHttp, so the 2.25-second limiter paces it, with the
+agent's own retry policy (`agent_steam`): a visitor is waiting, so two short tries and no pause
+on a rate limit, where the ingest's batch policy allows six tries and a five-minute pause.
 """
 
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from patchpulse.ingest.http import SteamHttp
+import httpx2
+
+from patchpulse.ingest.http import RateLimiter, RetryPolicy, SteamHttp
 from patchpulse.ingest.news import NEWS_URL
 from patchpulse.models.text import clean_text
 
@@ -21,6 +27,17 @@ NEWS_COUNT = 5  # posts up to the patch's timestamp; the patch's own is among th
 _HTML = re.compile(r"<[a-zA-Z/!][^>]*>")  # tags, and clean_text's <url> placeholders
 _CLAN_IMAGE = re.compile(r"\{STEAM_CLAN_IMAGE\}\S*")
 _UNCUT = 10**9
+AGENT_STEAM_TIMEOUT_S = 10.0
+AGENT_STEAM_POLICY = RetryPolicy(max_attempts=2, base_s=1.0, cap_s=2.0, rate_limit_pauses=0)
+
+
+def agent_steam(
+    client: httpx2.Client, limiter: RateLimiter, *, sleep: Callable[[float], None] = time.sleep
+) -> SteamHttp:
+    """Steam for the agent: at most two tries of 10 s, 1-2 s apart, nothing more after a 429;
+    `limiter` is shared with the night's ingest (Steam limits per address)."""
+    return SteamHttp(client, limiter=limiter, policy=AGENT_STEAM_POLICY, sleep=sleep,
+                     timeout_s=AGENT_STEAM_TIMEOUT_S)  # fmt: skip
 
 
 @dataclass(frozen=True)

@@ -9,11 +9,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx2
+import pytest
 from agent_fixtures import GAME, make_bundle
 
-from patchpulse.agent.patch_notes import PATCH_NOTES_CHARS
+from patchpulse.agent.patch_notes import AGENT_STEAM_TIMEOUT_S, PATCH_NOTES_CHARS, agent_steam
 from patchpulse.agent.tools import Tools, Trace
-from patchpulse.ingest.http import RateLimiter, RetryPolicy, SteamHttp
+from patchpulse.ingest.http import RateLimiter, RetryPolicy, SteamHttp, SteamUnavailableError
+from patchpulse.ingest.news import NEWS_URL
 
 P1_PUBLISHED = datetime(2026, 9, 10, 16, tzinfo=UTC)  # the fixture's patch p1
 NOTES = (
@@ -153,3 +155,27 @@ def test_patch_notes_errors_are_results() -> None:
         "patch notes aren't available in this run",
     ]
     assert fake.params == []
+
+
+def test_the_agents_steam_client_gives_up_within_seconds() -> None:
+    """A visitor waits for the patch notes (the review's I5): two short tries and no pause on a
+    rate limit, where the ingest's policy allows six tries and a five-minute pause."""
+    for statuses, requests in (([429], 1), ([503, 503], 2)):
+        sent: list[Any] = []
+        slept: list[float] = []
+
+        def answer(
+            request: httpx2.Request, statuses: list[int] = statuses, sent: list[Any] = sent
+        ) -> httpx2.Response:
+            sent.append(request.extensions.get("timeout"))
+            return httpx2.Response(statuses.pop(0))
+
+        client = httpx2.Client(transport=httpx2.MockTransport(answer))
+        steam = agent_steam(client, RateLimiter(min_interval_s=0.0), sleep=slept.append)
+
+        with pytest.raises(SteamUnavailableError):
+            steam.get_json(NEWS_URL, {"appid": GAME})
+
+        assert len(sent) == requests
+        assert sum(slept) <= 2.0
+        assert all(t["read"] == AGENT_STEAM_TIMEOUT_S for t in sent)

@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fake_clock import FakeClock
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 
 from patchpulse.agent.tracing import MonthUnits
 from patchpulse.api.limits import (
@@ -106,3 +106,43 @@ def test_the_months_trace_units_survive_a_new_day(
     assert units.used() == 42
     assert store.get(f"visitor|2026-10-25|{visitor_hash(SECRET, '2026-10-25', VISITOR)}") is None
     assert store.get("day|2026-10-25") is None
+
+
+def test_the_daily_cleanup_runs_in_the_clusters_strict_mode(
+    qdrant: QdrantClient, new_collection: Callable[[], str]
+) -> None:
+    # The cluster refuses filters on unindexed fields (strict mode, read on 26 Oct): the store
+    # indexes `day`, so a new day's cleanup runs there and forgets the old day.
+    name, clock = new_collection(), FakeClock(NOON)
+    strict = models.StrictModeConfig(
+        enabled=True, unindexed_filtering_retrieve=False, unindexed_filtering_update=False
+    )
+    qdrant.create_collection(name, vectors_config={}, strict_mode_config=strict)
+    ask = limits(qdrant, name, clock)
+    ask.check(VISITOR)
+
+    clock.now = NOON + timedelta(days=1)
+
+    assert isinstance(ask.check(VISITOR), Allowed)
+    assert QdrantLimitStore(qdrant, name).get("day|2026-10-25") is None
+
+
+class FailingCleanup(MemoryLimitStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanups = 0
+
+    def forget_other_days(self, day: str) -> None:
+        self.cleanups += 1
+        raise RuntimeError("refused")
+
+
+def test_a_failed_cleanup_never_stops_ask(caplog: pytest.LogCaptureFixture) -> None:
+    store, clock = FailingCleanup(), FakeClock(NOON)
+    ask = AskLimits(store, secret=SECRET, per_visitor_hour=3, daily_cap=4, clock=clock)
+
+    answers = [ask.check(VISITOR), ask.check(VISITOR)]
+
+    assert all(isinstance(a, Allowed) for a in answers)
+    assert store.cleanups == 1  # tried again the next day, not on every question
+    assert "cleanup" in caplog.text

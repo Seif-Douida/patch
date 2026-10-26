@@ -466,7 +466,7 @@ def _run_stages(
         run.stages["index"] = _index(run, settings, publisher, index, health, clock)
 
     with run.stage("bundle"):
-        agent_bundle, dumped, run.stages["bundle"] = _bundle(run, bundle, now)
+        agent_bundle, dumped, run.stages["bundle"] = _bundle(run, bundle, now, settings)
 
     with run.stage("reports"):
         run.stages["reports"] = _reports(
@@ -474,7 +474,7 @@ def _run_stages(
         )
 
     with run.stage("agent_data"):
-        run.stages["agent_data"] = _agent_data(run, publisher, agent_bundle, dumped)
+        run.stages["agent_data"] = _agent_data(run, publisher, agent_bundle, dumped, settings)
 
     with run.stage("export"):
         with run.engine.connect() as connection:
@@ -576,7 +576,7 @@ def _warn(run: _Run, check: str, detail: str) -> None:
 
 
 def _bundle(
-    run: _Run, builder: BundleBuilder | None, now: datetime
+    run: _Run, builder: BundleBuilder | None, now: datetime, settings: Settings
 ) -> tuple[Bundle | None, bytes, dict[str, Any]]:
     """The agent's bundle, its gzip file and the stage's record; never raises."""
     try:
@@ -587,7 +587,7 @@ def _bundle(
             built = (builder or build_bundle)(connection, run_id=run.run_id, today=now.date())
         dumped = dump_bundle(built)
     except Exception as error:  # the reports wait a night; the API keeps yesterday's data
-        detail = f"{type(error).__name__}: {error}"
+        detail = scrub_secrets(f"{type(error).__name__}: {error}", settings)
         _warn(run, "bundle_skipped", detail)
         return None, b"", {"skipped": detail[:500]}
     record = {
@@ -677,7 +677,7 @@ def _reports(
 
 
 def _agent_data(
-    run: _Run, publisher: Publisher, bundle: Bundle | None, dumped: bytes
+    run: _Run, publisher: Publisher, bundle: Bundle | None, dumped: bytes, settings: Settings
 ) -> dict[str, Any]:
     """Publish the bundle and the shown reports for the API; never raises."""
     if bundle is None:
@@ -695,7 +695,7 @@ def _agent_data(
         }
         publisher.publish_branch(AGENT_BRANCH, files, data_version=run.run_id)
     except Exception as error:  # the API keeps yesterday's data
-        detail = f"{type(error).__name__}: {error}"
+        detail = scrub_secrets(f"{type(error).__name__}: {error}", settings)
         _warn(run, "agent_data_skipped", detail)
         return {"skipped": detail[:500]}
     return {"files": len(files), "bytes": sum(len(content) for content in files.values())}

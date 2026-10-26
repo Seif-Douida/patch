@@ -48,9 +48,13 @@ param githubAppPrivateKey string
 @secure()
 param qdrantUrl string
 
-@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches pp-nightly and pp-api (Phase 5), as a Container Apps secret.')
+@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches pp-nightly only (its index stage writes the review index), as a Container Apps secret.')
 @secure()
 param qdrantApiKey string
+
+@description('Restricted API key of that cluster for pp-api (Phase 5 review, I4), from the secret PP_QDRANT_ASK_API_KEY: it reads the review collection and reads and writes ask_limits only, since pp-api is public.')
+@secure()
+param qdrantAskApiKey string
 
 @description('Free-tier Gemini API key for the agent (Phase 5), from the secret PP_GEMINI_API_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret. Billing stays off on its Google project.')
 @secure()
@@ -99,7 +103,7 @@ module containerApps 'modules/containerapps.bicep' = {
     allowedOrigin: 'https://${web.outputs.defaultHostname}'
     geminiApiKey: geminiApiKey
     qdrantUrl: qdrantUrl
-    qdrantApiKey: qdrantApiKey
+    qdrantAskApiKey: qdrantAskApiKey
     langfusePublicKey: langfusePublicKey
     langfuseSecretKey: langfuseSecretKey
   }

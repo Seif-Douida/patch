@@ -95,6 +95,7 @@ jobs:
           PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
           PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}
           PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}
+          PP_QDRANT_ASK_API_KEY: ${{ secrets.PP_QDRANT_ASK_API_KEY }}
           PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}
           PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}
           PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}
@@ -109,6 +110,7 @@ jobs:
           [ -n "$PP_GITHUB_APP_ID" ] || missing="$missing PP_GITHUB_APP_ID(variable)"
           [ -n "$PP_QDRANT_URL" ] || missing="$missing PP_QDRANT_URL"
           [ -n "$PP_QDRANT_API_KEY" ] || missing="$missing PP_QDRANT_API_KEY"
+          [ -n "$PP_QDRANT_ASK_API_KEY" ] || missing="$missing PP_QDRANT_ASK_API_KEY"
           [ -n "$PP_GEMINI_API_KEY" ] || missing="$missing PP_GEMINI_API_KEY"
           [ -n "$PP_LANGFUSE_PUBLIC_KEY" ] || missing="$missing PP_LANGFUSE_PUBLIC_KEY"
           [ -n "$PP_LANGFUSE_SECRET_KEY" ] || missing="$missing PP_LANGFUSE_SECRET_KEY"
@@ -160,6 +162,7 @@ jobs:
           PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
           PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}
           PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}
+          PP_QDRANT_ASK_API_KEY: ${{ secrets.PP_QDRANT_ASK_API_KEY }}
           PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}
           PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}
           PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}
@@ -181,6 +184,7 @@ jobs:
           PP_GITHUB_APP_ID: ${{ vars.PP_GITHUB_APP_ID }}
           PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}
           PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}
+          PP_QDRANT_ASK_API_KEY: ${{ secrets.PP_QDRANT_ASK_API_KEY }}
           PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}
           PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}
           PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}

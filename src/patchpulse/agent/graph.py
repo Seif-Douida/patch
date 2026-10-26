@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -40,7 +41,16 @@ from patchpulse.agent.evidence import (
     days_in,
 )
 from patchpulse.agent.prompts import PROMPT_VERSION, SCHEMAS, load_prompt
-from patchpulse.agent.report import DateWindow, Draft, Finding, Hypothesis, Report, confidence_for
+from patchpulse.agent.report import (
+    DateWindow,
+    Draft,
+    Finding,
+    Hypothesis,
+    ModelUse,
+    Report,
+    confidence_for,
+    renumbered,
+)
 from patchpulse.agent.router import AllModelsDownError, ModelRouter
 from patchpulse.agent.rules import CoreEvidence, HypothesisResult, decide
 from patchpulse.agent.search import ReviewSearch
@@ -120,6 +130,7 @@ class _State(TypedDict, total=False):
     summary: str
     summary_passed: bool | None
     report: Report
+    started: float  # time.monotonic() when the run began
 
 
 def _hash(*parts: object) -> str:
@@ -231,13 +242,22 @@ class _Nodes:
                 return Refusal(f"Patch {data['patch_id']} isn't one of {game.name}'s patches.")
         start = window[0]
         baseline_start = max(first, start - timedelta(days=BASELINE_DAYS))
+        horizon = None
+        if patch is not None:
+            # The longest horizon the window covers that the bundle has estimates at: a bundle
+            # with another patch within 14 days has no 14-day rows, but still its 7-day ones.
+            estimated = {e.horizon for e in game.estimates if e.bundle_id == patch.bundle_id}
+            horizon = next(
+                (h for h in (14, 7) if days_in(window) >= h and h in estimated),
+                14 if days_in(window) >= 14 else 7,
+            )
         return Scope(
             appid=game.appid,
             window=window,
             baseline=(baseline_start, start - timedelta(days=1)),
             start=start,
             bundle_id=None if patch is None else patch.bundle_id,
-            horizon=None if patch is None else (14 if days_in(window) >= 14 else 7),
+            horizon=horizon,
             patch=patch,
         )
 
@@ -324,7 +344,7 @@ class _Nodes:
         lines += [self._render(c, trace.retrieved) for c in trace.calls]
         try:
             answer = self._ask(state, "draft", "\n".join(lines))
-            return {"draft": Draft.model_validate(answer)}
+            return {"draft": renumbered(Draft.model_validate(answer))}
         except (AllModelsDownError, ValidationError) as error:
             log.warning("draft: no usable draft (%s); writing a basic report", type(error).__name__)
             return {"basic": True}
@@ -392,6 +412,17 @@ class _Nodes:
             confidence="low",
             basic=bool(state.get("basic")),
             rule_pass_rates=dict(sorted(rates.items())),
+            usage=[
+                ModelUse(
+                    step=c.step,
+                    model_id=c.model_id,
+                    input_tokens=c.input_tokens,
+                    output_tokens=c.output_tokens,
+                    cached=c.cached,
+                )
+                for c in state["trace"].model_calls
+            ],
+            seconds=round(time.monotonic() - state["started"], 3),
         )
         report = report.model_copy(update={"confidence": confidence_for(report)})
         log.info(
@@ -493,6 +524,7 @@ def run_report(request: ReportRequest, deps: AgentDeps) -> Report | Refusal:
         "observer": observer,
         "tools": tools,
         "model_ids": {},
+        "started": time.monotonic(),
     }
     try:
         final = build_graph(deps).invoke(state)
