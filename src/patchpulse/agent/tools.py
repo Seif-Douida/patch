@@ -20,6 +20,7 @@ from typing import Any
 from patchpulse.agent.bundle import Bundle, GameData
 from patchpulse.agent.patch_notes import fetch_patch_notes
 from patchpulse.agent.search import DEFAULT_HITS, ReviewSearch, find_reviews, snippet
+from patchpulse.agent.tracing import Observer
 from patchpulse.causal.decompose import BUCKETS, PARTS, decompose
 from patchpulse.causal.its import POSITIVE_SHARE
 from patchpulse.causal.store import StoredEstimate, serve
@@ -120,7 +121,8 @@ def _within(day: date, window: Window) -> bool:
 class Tools:
     """The tools on one loaded bundle, recording into one trace. The model's two tools need their
     sources: `search` (Qdrant and the query encoder) and `steam` (the shared Steam client); without
-    one, its tool answers that it isn't available in this run."""
+    one, its tool answers that it isn't available in this run. `observer` hears of each call (the
+    run's trace); V2's re-executions aren't calls."""
 
     def __init__(
         self,
@@ -129,9 +131,11 @@ class Tools:
         *,
         search: ReviewSearch | None = None,
         steam: SteamHttp | None = None,
+        observer: Observer | None = None,
     ) -> None:
         self.bundle = bundle
         self.trace = trace
+        self._observer = observer or Observer()
         self._search = search
         self._steam = steam
         self._games = {g.appid: g for g in bundle.games}
@@ -156,9 +160,11 @@ class Tools:
             return {"error": str(error)}
 
     def _call(self, tool: str, args: dict[str, Any]) -> Result:
+        self._observer.tool_started(tool, args)
         result = self._execute(tool, args)
-        call_id = f"{self.trace.run}.{len(self.trace.calls) + 1}"
-        self.trace.calls.append(ToolCall(call_id, tool, args, result))
+        call = ToolCall(f"{self.trace.run}.{len(self.trace.calls) + 1}", tool, args, result)
+        self.trace.calls.append(call)
+        self._observer.tool_ended(call, self.trace.retrieved)
         return result
 
     def rerun(self, call: ToolCall) -> Result:

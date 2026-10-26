@@ -17,6 +17,13 @@ param qdrantUrl string
 @secure()
 param qdrantApiKey string
 
+@description('Langfuse keys: Ask is traced at a sample (Phase 5 Task 18).')
+@secure()
+param langfusePublicKey string
+
+@secure()
+param langfuseSecretKey string
+
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-07-01' existing = {
   name: logAnalyticsWorkspaceName
 }
@@ -84,6 +91,14 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
           name: 'qdrant-api-key'
           value: qdrantApiKey
         }
+        {
+          name: 'langfuse-public-key'
+          value: langfusePublicKey
+        }
+        {
+          name: 'langfuse-secret-key'
+          value: langfuseSecretKey
+        }
       ]
     }
     template: {
@@ -103,6 +118,20 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
             {
               name: 'PP_QDRANT_API_KEY'
               secretRef: 'qdrant-api-key'
+            }
+            {
+              // Phase 5 Task 18: the agent's traces (counts and ids, never review text).
+              name: 'PP_LANGFUSE_PUBLIC_KEY'
+              secretRef: 'langfuse-public-key'
+            }
+            {
+              name: 'PP_LANGFUSE_SECRET_KEY'
+              secretRef: 'langfuse-secret-key'
+            }
+            {
+              // The EU region, where the Langfuse project is.
+              name: 'PP_LANGFUSE_HOST'
+              value: 'https://cloud.langfuse.com'
             }
             {
               name: 'PP_SITE_ORIGIN'

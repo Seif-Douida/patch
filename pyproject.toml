@@ -160,7 +160,9 @@ retrieval = [
 ]
 # Phase 5: the agent's workflow graph (ADR-005), used by the nightly reports and the API. Model
 # calls go through our router, not LangChain; LangSmith tracing stays off (no LANGSMITH_* set).
+# Langfuse's SDK sends the runs' traces (counts, ids, models; never review text).
 agent = [
+    "langfuse>=5.0.4",
     "langgraph>=1.2.17",
 ]
 # Phase 5: what pp-api needs beside FastAPI for /reports and /ask: its settings, HTTP (the agent's

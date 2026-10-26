@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # with, and the stage's time budget. No key means the stage is skipped; 0 turns it off.
     gemini_api_key: SecretStr | None = None
     reports_budget_minutes: int = 3
+    # Phase 5 (Task 18): Langfuse, where every report is traced. No keys: no traces.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str | None = None
     github_repository: str | None = None
     github_app_id: str | None = None
     github_app_private_key: SecretStr | None = None
@@ -91,17 +95,23 @@ class LabSettings(BaseSettings):
     qdrant_url: str | None = None
     qdrant_api_key: SecretStr | None = None
     qdrant_local_url: str = "http://localhost:6333"
+    # Phase 5 (Task 18): the backfill's and the acceptance run's traces.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str | None = None
 
 
 def scrub_secrets(detail: str, settings: Settings) -> str:
-    """`detail` without the Qdrant cluster's URL, host or key, or the Gemini key: they're secrets,
-    and a stage's error can carry them into logs and ops.data_quality_result."""
+    """`detail` without the Qdrant cluster's URL, host or key, the Gemini key or Langfuse's secret
+    key: a stage's error can carry them into logs and ops.data_quality_result."""
     url = settings.qdrant_url or ""
     found = [(url, "<qdrant>"), (urlsplit(url).hostname or "", "<qdrant>")]
     if settings.qdrant_api_key is not None:
         found.append((settings.qdrant_api_key.get_secret_value(), "<qdrant>"))
     if settings.gemini_api_key is not None:
         found.append((settings.gemini_api_key.get_secret_value(), "<gemini>"))
+    if settings.langfuse_secret_key is not None:
+        found.append((settings.langfuse_secret_key.get_secret_value(), "<langfuse>"))
     for secret, label in sorted(found, key=lambda pair: len(pair[0]), reverse=True):
         if secret:
             detail = detail.replace(secret, label)

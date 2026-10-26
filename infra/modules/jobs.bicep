@@ -37,6 +37,13 @@ param qdrantApiKey string
 @secure()
 param geminiApiKey string
 
+@description('Langfuse keys: every nightly report is traced (Phase 5 Task 18).')
+@secure()
+param langfusePublicKey string
+
+@secure()
+param langfuseSecretKey string
+
 resource nightly 'Microsoft.App/jobs@2025-07-01' = {
   name: 'pp-nightly'
   location: location
@@ -77,6 +84,14 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
         {
           name: 'gemini-api-key'
           value: geminiApiKey
+        }
+        {
+          name: 'langfuse-public-key'
+          value: langfusePublicKey
+        }
+        {
+          name: 'langfuse-secret-key'
+          value: langfuseSecretKey
         }
       ]
     }
@@ -164,6 +179,20 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
             {
               name: 'PP_QDRANT_API_KEY'
               secretRef: 'qdrant-api-key'
+            }
+            {
+              // Phase 5 Task 18: the agent's traces (counts and ids, never review text).
+              name: 'PP_LANGFUSE_PUBLIC_KEY'
+              secretRef: 'langfuse-public-key'
+            }
+            {
+              name: 'PP_LANGFUSE_SECRET_KEY'
+              secretRef: 'langfuse-secret-key'
+            }
+            {
+              // The EU region, where the Langfuse project is.
+              name: 'PP_LANGFUSE_HOST'
+              value: 'https://cloud.langfuse.com'
             }
           ]
           resources: {

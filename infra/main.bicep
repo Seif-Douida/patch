@@ -56,6 +56,14 @@ param qdrantApiKey string
 @secure()
 param geminiApiKey string
 
+@description('Langfuse public key for the agent traces (Phase 5), from the secret PP_LANGFUSE_PUBLIC_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret.')
+@secure()
+param langfusePublicKey string
+
+@description('Langfuse secret key, from the secret PP_LANGFUSE_SECRET_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret. The project is on the free Hobby plan.')
+@secure()
+param langfuseSecretKey string
+
 @description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
 @secure()
 param alertEmail string
@@ -92,6 +100,8 @@ module containerApps 'modules/containerapps.bicep' = {
     geminiApiKey: geminiApiKey
     qdrantUrl: qdrantUrl
     qdrantApiKey: qdrantApiKey
+    langfusePublicKey: langfusePublicKey
+    langfuseSecretKey: langfuseSecretKey
   }
 }
 
@@ -125,6 +135,8 @@ module jobs 'modules/jobs.bicep' = {
     qdrantUrl: qdrantUrl
     qdrantApiKey: qdrantApiKey
     geminiApiKey: geminiApiKey
+    langfusePublicKey: langfusePublicKey
+    langfuseSecretKey: langfuseSecretKey
   }
 }
 

@@ -24,6 +24,7 @@ def test_the_api_imports_the_agent_with_only_its_image_groups() -> None:
     result = run_with_only(
         installed,
         "import patchpulse.agent.graph, patchpulse.api.app\n"
+        "from langfuse import Langfuse, propagate_attributes\n"
         "from patchpulse.api.ask import LiveDeps, live_limits\n"
         "from patchpulse.retrieval.embedders import OnnxEmbedder\n"
         "import onnxruntime, tokenizers\n"
@@ -43,4 +44,4 @@ def test_api_image_carries_the_encoder_and_the_config() -> None:
     # The image refuses to build with an encoder its own packages can't load and run, or with
     # an agent that doesn't import.
     assert runtime.index("COPY build/encoder ") < runtime.index("embed_queries")
-    assert "import patchpulse.agent.graph, patchpulse.api.app" in runtime
+    assert "import patchpulse.agent.graph, patchpulse.api.app, langfuse" in runtime

@@ -12,10 +12,13 @@ import pytest
 from fake_clock import FakeClock
 from qdrant_client import QdrantClient
 
+from patchpulse.agent.tracing import MonthUnits
 from patchpulse.api.limits import (
     RESTING,
     Allowed,
     AskLimits,
+    LimitStore,
+    MemoryLimitStore,
     QdrantLimitStore,
     Refused,
     visitor_hash,
@@ -79,3 +82,27 @@ def test_visitors_are_never_stored_raw(
     assert tomorrow in stored
     assert today not in stored
     assert "2026-10-25" not in stored
+
+
+@pytest.mark.parametrize("kind", ["qdrant", "memory"])
+def test_the_months_trace_units_survive_a_new_day(
+    qdrant: QdrantClient, new_collection: Callable[[], str], kind: str
+) -> None:
+    # Task 18: the month's Langfuse units share the store with Ask's daily counters; a new day
+    # forgets the visitors and the day's total, never the month's units.
+    clock = FakeClock(NOON)
+    store: LimitStore = (
+        QdrantLimitStore(qdrant, new_collection()) if kind == "qdrant" else MemoryLimitStore()
+    )
+    ask = AskLimits(store, secret=SECRET, per_visitor_hour=3, daily_cap=4, clock=clock)
+    units = MonthUnits(store, clock=clock)
+    ask.check(VISITOR)
+    units.add(40)
+
+    clock.now = NOON + timedelta(days=1)
+    ask.check(VISITOR)
+    units.add(2)
+
+    assert units.used() == 42
+    assert store.get(f"visitor|2026-10-25|{visitor_hash(SECRET, '2026-10-25', VISITOR)}") is None
+    assert store.get("day|2026-10-25") is None

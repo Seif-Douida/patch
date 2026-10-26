@@ -13,7 +13,8 @@
 
 Every model call goes through the router. With every model down before the draft, the report is
 basic: fixed claims from the core evidence and the template summary. A run uses one bundle (the
-deps hold it), so every call and V2's re-execution see the same data version.
+deps hold it), so every call and V2's re-execution see the same data version. The deps' tracer
+hears of each step, tool call and model call (agent/tracing.py: counts and ids, never text).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from patchpulse.agent.router import AllModelsDownError, ModelRouter
 from patchpulse.agent.rules import CoreEvidence, HypothesisResult, decide
 from patchpulse.agent.search import ReviewSearch
 from patchpulse.agent.tools import ModelCall, ToolCall, Tools, Trace
-from patchpulse.agent.tracing import NoTracer, Tracer
+from patchpulse.agent.tracing import NoTracer, Observer, Tracer
 from patchpulse.agent.untrusted import wrap_patch_notes, wrap_question, wrap_reviews
 from patchpulse.agent.verifier import (
     HYPOTHESIS_TITLES,
@@ -105,6 +106,7 @@ class AgentDeps:
 class _State(TypedDict, total=False):
     request: ReportRequest
     trace: Trace
+    observer: Observer
     tools: Tools
     model_ids: dict[str, str]
     scope: Scope
@@ -149,12 +151,18 @@ class _Nodes:
     # Helpers.
 
     def _ask(self, state: _State, step: str, user: str) -> dict[str, Any]:
-        routed = self.deps.router.generate(step, load_prompt(step).text, user, SCHEMAS[step])
-        state["trace"].model_calls.append(
-            ModelCall(
-                step, routed.model_id, routed.input_tokens, routed.output_tokens, routed.cached
-            )
+        observer = state["observer"]
+        observer.model_started(step)
+        try:
+            routed = self.deps.router.generate(step, load_prompt(step).text, user, SCHEMAS[step])
+        except AllModelsDownError:
+            observer.model_ended(step, None)
+            raise
+        call = ModelCall(
+            step, routed.model_id, routed.input_tokens, routed.output_tokens, routed.cached
         )
+        state["trace"].model_calls.append(call)
+        observer.model_ended(step, call)
         state["model_ids"][step] = routed.model_id
         return routed.data
 
@@ -439,7 +447,7 @@ def build_graph(deps: AgentDeps) -> Any:
         "finalize": nodes.finalize,
     }
     for name, step in steps.items():
-        graph.add_node(name, _traced(deps.tracer, name, step))
+        graph.add_node(name, _traced(name, step))
     graph.add_edge(START, "scope")
     graph.add_conditional_edges(
         "scope", lambda s: END if "refusal" in s else "core_evidence", ["core_evidence", END]
@@ -456,19 +464,12 @@ def build_graph(deps: AgentDeps) -> Any:
     return graph.compile()
 
 
-def _traced(tracer: Tracer, name: str, step: _Step) -> _Step:
+def _traced(name: str, step: _Step) -> _Step:
     def run(state: _State) -> dict[str, Any]:
+        observer = state["observer"]
+        observer.step_started(name)
         update = step(state)
-        trace = state["trace"]
-        tracer.step(
-            trace.run,
-            name,
-            {
-                "tool_calls": len(trace.calls),
-                "model_calls": len(trace.model_calls),
-                "keys": sorted(update),
-            },
-        )
+        observer.step_ended(name, update)
         return update
 
     return run
@@ -484,11 +485,20 @@ def run_report(request: ReportRequest, deps: AgentDeps) -> Report | Refusal:
         deps.bundle.data_version,
     )
     trace = Trace(run=run[:6])
-    tools = Tools(deps.bundle, trace, search=deps.search, steam=deps.steam)
-    state: _State = {"request": request, "trace": trace, "tools": tools, "model_ids": {}}
-    final = build_graph(deps).invoke(state)
-    if "refusal" in final:
-        refusal: Refusal = final["refusal"]
-        return refusal
-    report: Report = final["report"]
-    return report
+    observer = deps.tracer.start(request, data_version=deps.bundle.data_version)
+    tools = Tools(deps.bundle, trace, search=deps.search, steam=deps.steam, observer=observer)
+    state: _State = {
+        "request": request,
+        "trace": trace,
+        "observer": observer,
+        "tools": tools,
+        "model_ids": {},
+    }
+    try:
+        final = build_graph(deps).invoke(state)
+    except BaseException as error:
+        observer.finish(None, error)
+        raise
+    result: Report | Refusal = final["refusal"] if "refusal" in final else final["report"]
+    observer.finish(result)
+    return result

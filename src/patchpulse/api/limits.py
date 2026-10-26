@@ -5,8 +5,9 @@ The counters live in a small Qdrant collection (`ask_limits`: free, already reac
 survives the replica scaling to zero), one point per key with its counts as the payload. A visitor
 is an HMAC of their address with a key derived from a server secret and the day: never stored
 raw, and not linkable from one day to the next. The previous days' points are deleted on the first
-check of a new day. Only questions that will run the agent are counted (the API checks the limits
-after its free answers: refusals it can make without a model, and cached answers).
+check of a new day; points without a day (the month's Langfuse units, agent/tracing.py) stay. Only
+questions that will run the agent are counted (the API checks the limits after its free answers:
+refusals it can make without a model, and cached answers).
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ class MemoryLimitStore:
         self._points[key] = dict(payload)
 
     def forget_other_days(self, day: str) -> None:
-        self._points = {k: p for k, p in self._points.items() if p.get("day") == day}
+        self._points = {k: p for k, p in self._points.items() if p.get("day") in (None, day)}
 
 
 class QdrantLimitStore:
@@ -93,7 +94,10 @@ class QdrantLimitStore:
     def forget_other_days(self, day: str) -> None:
         self._ensure()
         other_days = models.Filter(
-            must_not=[models.FieldCondition(key="day", match=models.MatchValue(value=day))]
+            must_not=[
+                models.FieldCondition(key="day", match=models.MatchValue(value=day)),
+                models.IsEmptyCondition(is_empty=models.PayloadField(key="day")),
+            ]
         )
         self.client.delete(
             self.collection, points_selector=models.FilterSelector(filter=other_days)

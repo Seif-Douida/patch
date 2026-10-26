@@ -187,6 +187,7 @@ def test_the_reports_stage_imports_with_only_the_jobs_image_groups() -> None:
         installed,
         "from patchpulse.pipeline.reports import run_reports\n"
         "import patchpulse.agent.graph\n"
+        "from langfuse import Langfuse, propagate_attributes\n"
         "print('imported')\n",
     )
 
@@ -196,4 +197,4 @@ def test_the_reports_stage_imports_with_only_the_jobs_image_groups() -> None:
 
 def test_jobs_image_checks_the_agent_imports_at_build() -> None:
     runtime = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8").split("\nFROM ", 2)[2]
-    assert "import patchpulse.agent.graph, patchpulse.pipeline.reports" in runtime
+    assert "import patchpulse.agent.graph, patchpulse.pipeline.reports, langfuse" in runtime

@@ -1,7 +1,7 @@
 """The API's settings (Phase 5, design D9), from PP_-prefixed environment variables.
 
 In Azure each arrives as a Container Apps env var on `pp-api`; the secrets (the Gemini key,
-Qdrant's URL and key, Langfuse's secret key) come from Container Apps secrets. Everything is
+Qdrant's URL and key, Langfuse's keys) come from Container Apps secrets. Everything is
 optional: without a value the API still answers /health and /reports, and Ask says it's
 unavailable. The Qdrant URL is a secret too (with the key, it's the cluster's only door).
 """
@@ -12,6 +12,8 @@ from pathlib import Path
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from patchpulse.agent.tracing import ASK_SAMPLE
 
 # The orphan branch the nightly job publishes the bundle and the reports to (a public repository:
 # both are aggregates and public copies only).
@@ -31,6 +33,8 @@ class ApiSettings(BaseSettings):
     langfuse_public_key: str | None = None
     langfuse_secret_key: SecretStr | None = None
     langfuse_host: str | None = None
+    # The share of Ask's runs traced (Task 18), within the month's cap on Langfuse units.
+    ask_trace_sample: float = ASK_SAMPLE
     # Ask's limits (design D9): questions per visitor an hour, and a day's questions in all. The
     # cap stays 15 until Task 17 measures the compute per wake.
     ask_per_visitor_hour: int = 3

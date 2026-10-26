@@ -41,6 +41,8 @@ from patchpulse.agent.store import (
     reports_due,
     write_report,
 )
+from patchpulse.agent.tracing import make_tracer
+from patchpulse.api.limits import LimitStore, MemoryLimitStore, QdrantLimitStore
 from patchpulse.config import LabSettings, get_lab_settings
 from patchpulse.db.engine import connect_with_resume_retry, make_entra_engine
 from patchpulse.ingest.http import RateLimiter, SteamHttp
@@ -142,7 +144,8 @@ def _live_deps(
     stack: ExitStack, settings: LabSettings, encoder_dir: Path
 ) -> Callable[[Bundle], AgentDeps]:
     """The Gemini chain of config/models.yaml (counting requests with Phase 2's labeling, in
-    data/local), the pinned review search, and Steam for patch notes."""
+    data/local), the pinned review search, Steam for patch notes, and Langfuse when its keys are
+    set (every report traced; the month's units counted in the Qdrant cluster with Ask's)."""
     if settings.gemini_api_key is None:
         raise ValueError("backfill-reports needs PP_GEMINI_API_KEY")
     models = load_model_config()
@@ -171,9 +174,17 @@ def _live_deps(
         log.warning("no review search (PP_QDRANT_URL or %s missing): reports cite no reviews",
                     encoder_dir)  # fmt: skip
     steam = SteamHttp(stack.enter_context(httpx2.Client()), limiter=RateLimiter())
+    store: LimitStore = MemoryLimitStore() if search is None else QdrantLimitStore(search.client)
+    tracer = make_tracer(
+        settings.langfuse_public_key,
+        settings.langfuse_secret_key,
+        settings.langfuse_host,
+        store=store,
+    )
+    stack.callback(tracer.close)
 
     def deps(bundle: Bundle) -> AgentDeps:
-        return AgentDeps(bundle=bundle, router=router, search=search, steam=steam)
+        return AgentDeps(bundle=bundle, router=router, search=search, steam=steam, tracer=tracer)
 
     return deps
 

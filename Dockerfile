@@ -33,8 +33,9 @@ COPY config ./config
 # The encoder must match embedder.json and embed one query, or the image isn't built.
 COPY build/encoder /app/encoder
 RUN python -c "from pathlib import Path; from patchpulse.retrieval.embedders import OnnxEmbedder; OnnxEmbedder(Path('/app/encoder')).embed_queries(['the game stutters'])"
-# The agent imports only when a question comes: a missing dependency fails here instead.
-RUN python -c "import patchpulse.agent.graph, patchpulse.api.app"
+# The agent imports only when a question comes, and the tracer imports Langfuse's SDK only
+# when its keys are set: a missing dependency fails here instead.
+RUN python -c "import patchpulse.agent.graph, patchpulse.api.app, langfuse"
 USER app
 EXPOSE 8000
 CMD ["uvicorn", "patchpulse.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

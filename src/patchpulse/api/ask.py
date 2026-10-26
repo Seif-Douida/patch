@@ -1,9 +1,11 @@
 """What POST /ask needs (Phase 5, design D9): the request, the answer cache, the visitor's
 address, and the live agent and limits built from the API's settings.
 
-The agent's models, review search and Steam client are built on the first question, not at start,
-so /health and /reports never wait for the encoder to load. The visitors' HMAC key is derived from
-the Gemini key, a secret the API already holds: rotating that key only resets the counters.
+The agent's models, review search, Steam client and tracer are built on the first question, not at
+start, so /health and /reports never wait for the encoder to load. Ask's runs are traced at the
+settings' sample (agent/tracing.py); the SDK sends what's left when the process exits. The
+visitors' HMAC key is derived from the Gemini key, a secret the API already holds: rotating that
+key only resets the counters.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from patchpulse.agent.graph import AgentDeps
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
 from patchpulse.agent.router import ModelRouter, make_agent_clients
 from patchpulse.agent.search import ReviewSearch, open_pinned_search
+from patchpulse.agent.tracing import Tracer, make_tracer
 from patchpulse.api.limits import AskLimits, LimitStore, MemoryLimitStore, QdrantLimitStore
 from patchpulse.api.settings import ApiSettings
 from patchpulse.ingest.http import RateLimiter, SteamHttp
@@ -92,9 +95,9 @@ class LiveDeps:
         self.settings = settings
         self.gemini_key = gemini_key
         self._lock = threading.Lock()
-        self._built: tuple[ModelRouter, ReviewSearch | None, SteamHttp] | None = None
+        self._built: tuple[ModelRouter, ReviewSearch | None, SteamHttp, Tracer] | None = None
 
-    def _build(self) -> tuple[ModelRouter, ReviewSearch | None, SteamHttp]:
+    def _build(self) -> tuple[ModelRouter, ReviewSearch | None, SteamHttp, Tracer]:
         settings = self.settings
         models = load_model_config()
         if models.agent is None:
@@ -117,14 +120,25 @@ class LiveDeps:
                 settings.qdrant_url.get_secret_value(), settings.qdrant_api_key,
                 settings.encoder_dir,
             )  # fmt: skip
-        return router, search, SteamHttp(httpx2.Client(), limiter=RateLimiter())
+        # The month's Langfuse units are counted with Ask's limits, in the Qdrant cluster.
+        store: LimitStore = MemoryLimitStore()
+        if search is not None:
+            store = QdrantLimitStore(search.client)
+        tracer = make_tracer(
+            settings.langfuse_public_key,
+            settings.langfuse_secret_key,
+            settings.langfuse_host,
+            store=store,
+            ask_sample=settings.ask_trace_sample,
+        )
+        return router, search, SteamHttp(httpx2.Client(), limiter=RateLimiter()), tracer
 
     def __call__(self, bundle: Bundle) -> AgentDeps:
         with self._lock:
             if self._built is None:
                 self._built = self._build()
-            router, search, steam = self._built
-        return AgentDeps(bundle=bundle, router=router, search=search, steam=steam)
+            router, search, steam, tracer = self._built
+        return AgentDeps(bundle=bundle, router=router, search=search, steam=steam, tracer=tracer)
 
 
 def live_deps(settings: ApiSettings) -> Callable[[Bundle], AgentDeps] | None:

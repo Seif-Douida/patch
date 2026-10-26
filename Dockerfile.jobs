@@ -46,8 +46,8 @@ COPY build/encoder /app/encoder
 RUN python -c "from pathlib import Path; from patchpulse.retrieval.embedders import OnnxEmbedder; OnnxEmbedder(Path('/app/encoder')).embed_queries(['the game stutters'])"
 # The effects stage imports the estimators only when it runs: a missing dependency fails here.
 RUN python -c "import patchpulse.causal.estimate, patchpulse.pipeline.effects"
-# The reports stage too: the agent's graph (LangGraph) and its models config.
-RUN python -c "import patchpulse.agent.graph, patchpulse.pipeline.reports"
+# The reports stage too: the agent's graph (LangGraph), its models config and Langfuse's SDK.
+RUN python -c "import patchpulse.agent.graph, patchpulse.pipeline.reports, langfuse"
 USER app
 ENTRYPOINT ["patchpulse-pipeline"]
 CMD ["--help"]

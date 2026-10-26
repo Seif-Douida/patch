@@ -45,6 +45,8 @@ from patchpulse.agent.store import (
     shown_reports,
     write_report,
 )
+from patchpulse.agent.tracing import Tracer, make_tracer
+from patchpulse.api.limits import LimitStore, MemoryLimitStore, QdrantLimitStore
 from patchpulse.config import Settings, scrub_secrets
 from patchpulse.ingest.http import SteamHttp
 from patchpulse.ingest.load import record_dq
@@ -88,8 +90,22 @@ def _search(stack: ExitStack, settings: Settings) -> ReviewSearch | None:
     return search
 
 
+def _tracer(stack: ExitStack, settings: Settings, search: ReviewSearch | None) -> Tracer:
+    """Langfuse when its keys are set: every report traced, the month's units counted with Ask's
+    in the Qdrant cluster (in memory without one); what's left is sent when the stage ends."""
+    store: LimitStore = MemoryLimitStore() if search is None else QdrantLimitStore(search.client)
+    tracer = make_tracer(
+        settings.langfuse_public_key,
+        settings.langfuse_secret_key,
+        settings.langfuse_host,
+        store=store,
+    )
+    stack.callback(tracer.close)
+    return tracer
+
+
 def _live_agent(stack: ExitStack, settings: Settings, bundle: Bundle, steam: SteamHttp) -> Agent:
-    """The graph with the Gemini chain of config/models.yaml, live (no cache)."""
+    """The graph with the Gemini chain of config/models.yaml, live (no cache), traced."""
     if settings.gemini_api_key is None:
         raise ValueError("the reports stage needs PP_GEMINI_API_KEY")
     models = load_model_config()
@@ -113,7 +129,14 @@ def _live_agent(stack: ExitStack, settings: Settings, bundle: Bundle, steam: Ste
     router = ModelRouter(
         models.agent.chain, clients, ReplayCache(Path(AGENT_CACHE_FILE), "live"), clock=now
     )
-    deps = AgentDeps(bundle=bundle, router=router, search=_search(stack, settings), steam=steam)
+    search = _search(stack, settings)
+    deps = AgentDeps(
+        bundle=bundle,
+        router=router,
+        search=search,
+        steam=steam,
+        tracer=_tracer(stack, settings, search),
+    )
     return functools.partial(run_report, deps=deps)
 
 

@@ -167,6 +167,8 @@ def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
         "PP_QDRANT_URL",
         "PP_QDRANT_API_KEY",
         "PP_GEMINI_API_KEY",
+        "PP_LANGFUSE_PUBLIC_KEY",
+        "PP_LANGFUSE_SECRET_KEY",
     ):
         assert f"secrets.{secret}" in check
         assert f'missing="$missing {secret}"' in check
@@ -193,6 +195,13 @@ def test_infra_passes_the_qdrant_secrets_to_what_if_and_deploy() -> None:
     assert text.count("PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}") == 3
     assert text.count("PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}") == 3
     assert "vars.PP_QDRANT" not in text
+
+
+def test_infra_passes_the_langfuse_keys_to_what_if_and_deploy() -> None:
+    # Phase 5 Task 18: the traces of the nightly reports and of Ask.
+    text = read("infra.yml")
+    assert text.count("PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}") == 3
+    assert text.count("PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}") == 3
 
 
 def test_guard_counts_both_jobs_executions() -> None:

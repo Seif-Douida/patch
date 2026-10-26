@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from patchpulse.config import SettingsError, get_lab_settings, get_settings
+from patchpulse.config import SettingsError, get_lab_settings, get_settings, scrub_secrets
 
 REQUIRED = {
     "PP_DB_HOST": "sql.example.net",
@@ -106,3 +106,24 @@ def test_settings_read_the_agent_variables(clean_env: pytest.MonkeyPatch) -> Non
     assert settings.gemini_api_key.get_secret_value() == "hunter2-gemini"
     assert settings.reports_budget_minutes == 0
     assert "hunter2" not in repr(settings)
+
+
+def test_settings_read_the_langfuse_variables(clean_env: pytest.MonkeyPatch) -> None:
+    # Phase 5 Task 18: the agent's traces. No keys: the reports aren't traced.
+    for name, value in REQUIRED.items():
+        clean_env.setenv(name, value)
+    assert get_settings(env_file=None).langfuse_secret_key is None
+    clean_env.setenv("PP_LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    clean_env.setenv("PP_LANGFUSE_SECRET_KEY", "hunter2-hunter2")
+    clean_env.setenv("PP_LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+    settings = get_settings(env_file=None)
+    lab = get_lab_settings(env_file=None)
+
+    for loaded in (settings, lab):
+        assert loaded.langfuse_public_key == "pk-lf-test"
+        assert loaded.langfuse_secret_key is not None
+        assert loaded.langfuse_secret_key.get_secret_value() == "hunter2-hunter2"
+        assert loaded.langfuse_host == "https://cloud.langfuse.com"
+        assert "hunter2" not in repr(loaded)
+    assert scrub_secrets("refused hunter2-hunter2", settings) == "refused <langfuse>"

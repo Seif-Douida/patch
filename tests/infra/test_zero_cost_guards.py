@@ -236,7 +236,7 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     for job in of_type(resources, "microsoft.app/jobs"):
         for container in job["properties"]["template"]["containers"]:
             for variable in container.get("env", []):
-                if re.search(r"PASSWORD|SALT|PRIVATE_KEY|QDRANT|GEMINI", variable["name"]):
+                if re.search(r"PASSWORD|SALT|_KEY|QDRANT|GEMINI", variable["name"]):
                     assert "secretRef" in variable, f"{job['name']}: {variable['name']}"
                     assert "value" not in variable, f"{job['name']}: {variable['name']}"
     # Phase 3 (design D5): the free cluster's URL is a secret too; with the key, it's the
@@ -246,8 +246,12 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     env = {variable["name"]: variable for variable in container["env"]}
     assert env["PP_QDRANT_URL"]["secretRef"] == "qdrant-url"
     assert env["PP_QDRANT_API_KEY"]["secretRef"] == "qdrant-api-key"
-    # Phase 5 (design D8): the free-tier Gemini key for the nightly reports.
+    # Phase 5 (design D8): the free-tier Gemini key for the nightly reports, and Langfuse's keys
+    # for their traces (Task 18; the host isn't a secret).
     assert env["PP_GEMINI_API_KEY"]["secretRef"] == "gemini-api-key"
+    assert env["PP_LANGFUSE_PUBLIC_KEY"]["secretRef"] == "langfuse-public-key"
+    assert env["PP_LANGFUSE_SECRET_KEY"]["secretRef"] == "langfuse-secret-key"
+    assert env["PP_LANGFUSE_HOST"]["value"] == "https://cloud.langfuse.com"
 
 
 def test_nightly_job_publishes_with_the_github_app(resources: list[dict[str, Any]]) -> None:
@@ -412,7 +416,8 @@ def test_api_scales_down_after_a_minute(resources: list[dict[str, Any]]) -> None
 
 
 def test_api_credentials_come_from_container_app_secrets(resources: list[dict[str, Any]]) -> None:
-    # Phase 5: Ask's Gemini key and the Qdrant cluster (search and the limits' counters).
+    # Phase 5: Ask's Gemini key, the Qdrant cluster (search and the limits' counters) and
+    # Langfuse's keys (Ask's traces).
     api = api_app(resources)
     (container,) = api["properties"]["template"]["containers"]
     env = {variable["name"]: variable for variable in container["env"]}
@@ -420,8 +425,11 @@ def test_api_credentials_come_from_container_app_secrets(resources: list[dict[st
         ("PP_GEMINI_API_KEY", "gemini-api-key"),
         ("PP_QDRANT_URL", "qdrant-url"),
         ("PP_QDRANT_API_KEY", "qdrant-api-key"),
+        ("PP_LANGFUSE_PUBLIC_KEY", "langfuse-public-key"),
+        ("PP_LANGFUSE_SECRET_KEY", "langfuse-secret-key"),
     ):
         assert env[name] == {"name": name, "secretRef": secret}
+    assert env["PP_LANGFUSE_HOST"]["value"] == "https://cloud.langfuse.com"
     for name, variable in env.items():
         if re.search(r"KEY|QDRANT|PASSWORD|SECRET", name):
             assert "value" not in variable, name
