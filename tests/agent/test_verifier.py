@@ -21,6 +21,8 @@ from patchpulse.agent.tools import Tools, Trace
 from patchpulse.agent.verifier import (
     CAUSAL_LEXICON,
     LEAK_WORDS,
+    NO_ESTIMATE_CITED,
+    CausalCheck,
     basic_claims,
     hedge,
     safe_findings,
@@ -273,6 +275,37 @@ def test_failed_causal_claim_without_an_estimate_is_withheld() -> None:
 
     assert withheld_rules(no_row) == ["V4"]
     assert withheld_rules(not_an_estimate) == ["V4"]
+
+
+def test_causal_checks_record_each_outcome_and_its_cause() -> None:
+    """The acceptance run counts V4's rewordings and blocks by cause (plan Task 21)."""
+    run = Run()  # the 7-day synthetic control estimate has a volume spike; no spike verdict yet
+    run.tools.estimate_patch_effect("p1", method="synth")  # r1.4: no 14-day synth estimate
+    bundle = make_bundle()
+    allowing = Run(replace(bundle, causal=replace(bundle.causal, spike_causal_ok=True)))
+    fall = claim(
+        "The patch led to a 12-point fall in the positive share.",
+        claim_type="causal",
+        value=-12.25,
+        call="r1.1",
+        path="horizons.7.effect",
+    )
+
+    checked = run.verify(
+        fall,
+        claim("It caused a fall.", claim_type="causal", call="r1.4", path="horizons.14.effect",
+              claim_id="c2"),
+        claim("The patch caused more performance complaints.", claim_id="c3"),
+        claim("Performance mentions changed.", claim_type="comparative",
+              value=performance_change(run), claim_id="c4"),
+    )  # fmt: skip
+
+    assert checked.causal_checks == (
+        CausalCheck("c1", "reworded", "volume_spike"),
+        CausalCheck("c2", "withheld", "no_estimate"),
+        CausalCheck("c3", "withheld", NO_ESTIMATE_CITED),
+    )
+    assert allowing.verify(fall).causal_checks == (CausalCheck("c1", "allowed", None),)
 
 
 def test_hedges_never_use_causal_words() -> None:

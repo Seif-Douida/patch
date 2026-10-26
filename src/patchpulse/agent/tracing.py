@@ -172,6 +172,11 @@ class Observer:
     untraced run). Events come from one thread, in order: a step's tool and model calls come
     between its start and its end."""
 
+    @property
+    def trace_id(self) -> str | None:
+        """The trace's id in Langfuse; None for an untraced run."""
+        return None
+
     def step_started(self, name: str) -> None:
         return None
 
@@ -220,6 +225,11 @@ class LangfuseObserver(Observer):
         self.broken = False
         self.created = 1  # the root observation
         self._open: list[Any] = []  # the observations started and not ended, innermost last
+
+    @property
+    def trace_id(self) -> str | None:
+        found = getattr(self.root, "trace_id", None)
+        return found if isinstance(found, str) else None
 
     def _safely(self, event: Callable[[], None]) -> None:
         if self.broken:

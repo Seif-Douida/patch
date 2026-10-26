@@ -1,6 +1,7 @@
 """`patchpulse-agent`: the agent's commands on Seif's machine (Phase 5).
 
     backfill-reports   Write a report for every past patch bundle that has none (design D10).
+    acceptance         The acceptance run on the published bundle (plan Task 21, design D15).
 
 `backfill-reports` signs in to Azure SQL as the person at the keyboard (as `patchpulse-ml pull`
 does), builds the agent's bundle from the marts, and writes the missing reports newest first
@@ -8,6 +9,12 @@ through the same graph and store as the nightly job, as one run in ops.pipeline_
 stores a basic report: when the day's Gemini quota is used up, or no model answers, it stops and a
 later run picks up where it left off (stored reports are skipped). The database stays awake while
 it runs, so it needs --yes.
+
+`acceptance` never touches the database: it reads the bundle the night published to
+`agent-data` (or --bundle, a local file), asks 10 bundles a templated question each with every
+run traced, forces one basic report, prints the coverage table and writes it, with each
+report's public copy, under --out/v<data version>. --add runs more bundles, chosen to hit a
+path the table lists as never seen. About 40 Gemini free-tier requests.
 
 Exit codes: 0 done (stopping at the quota included), 2 refused or bad configuration.
 """
@@ -28,7 +35,8 @@ from typing import Protocol
 import httpx2
 from sqlalchemy import Connection, Engine
 
-from patchpulse.agent.bundle import Bundle, build_bundle
+from patchpulse.agent.acceptance import pick_bundles, run_acceptance, write_acceptance
+from patchpulse.agent.bundle import BUNDLE_FILE, Bundle, build_bundle, load_bundle
 from patchpulse.agent.graph import AgentDeps, ReportRequest, run_report
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
 from patchpulse.agent.report import Report
@@ -41,8 +49,10 @@ from patchpulse.agent.store import (
     reports_due,
     write_report,
 )
-from patchpulse.agent.tracing import make_tracer
+from patchpulse.agent.tracing import ASK_SAMPLE, make_tracer
+from patchpulse.api.bundle_source import http_fetch
 from patchpulse.api.limits import LimitStore, MemoryLimitStore, QdrantLimitStore
+from patchpulse.api.settings import AGENT_DATA_URL
 from patchpulse.config import LabSettings, get_lab_settings
 from patchpulse.db.engine import connect_with_resume_retry, make_entra_engine
 from patchpulse.ingest.http import RateLimiter, SteamHttp
@@ -56,6 +66,7 @@ RUN_KIND = "reports_backfill"
 QUOTA_SPENT = "the day's model quota is used up"
 NO_MODEL = "no model answered"
 PROGRESS_EVERY = 10
+ACCEPTANCE_DIR = Path("data/local/acceptance")
 ENCODER_DIR = Path("build/encoder")  # `patchpulse-ml retrieval encoder download --to build/encoder`
 BACKFILL_COST = (
     "`backfill-reports` wakes Azure SQL and keeps it awake while it runs (about an hour for every "
@@ -141,11 +152,12 @@ def backfill_reports(
 
 
 def _live_deps(
-    stack: ExitStack, settings: LabSettings, encoder_dir: Path
+    stack: ExitStack, settings: LabSettings, encoder_dir: Path, *, ask_sample: float = ASK_SAMPLE
 ) -> Callable[[Bundle], AgentDeps]:
     """The Gemini chain of config/models.yaml (counting requests with Phase 2's labeling, in
     data/local), the pinned review search, Steam for patch notes, and Langfuse when its keys are
-    set (every report traced; the month's units counted in the Qdrant cluster with Ask's)."""
+    set (every report traced, questions at `ask_sample`; the month's units counted in the Qdrant
+    cluster with Ask's)."""
     if settings.gemini_api_key is None:
         raise ValueError("backfill-reports needs PP_GEMINI_API_KEY")
     models = load_model_config()
@@ -180,6 +192,7 @@ def _live_deps(
         settings.langfuse_secret_key,
         settings.langfuse_host,
         store=store,
+        ask_sample=ask_sample,
     )
     stack.callback(tracer.close)
 
@@ -222,6 +235,42 @@ def _backfill(settings: LabSettings, *, encoder_dir: Path) -> int:
     return 0
 
 
+def _acceptance(
+    settings: LabSettings,
+    *,
+    bundle_file: Path | None,
+    extra: Sequence[str],
+    out_dir: Path,
+    encoder_dir: Path,
+) -> int:
+    if (
+        settings.gemini_api_key is None
+        or not settings.langfuse_public_key
+        or settings.langfuse_secret_key is None
+    ):
+        print(
+            "patchpulse-agent: acceptance needs PP_GEMINI_API_KEY, PP_LANGFUSE_PUBLIC_KEY and "
+            "PP_LANGFUSE_SECRET_KEY (every run is traced)",
+            file=sys.stderr,
+        )
+        return 2
+    if bundle_file is None:
+        bundle = load_bundle(http_fetch(AGENT_DATA_URL)(BUNDLE_FILE))
+    else:
+        bundle = load_bundle(bundle_file.read_bytes())
+    try:
+        picks = pick_bundles(bundle, extra=extra)
+    except ValueError as error:
+        print(f"patchpulse-agent: {error}", file=sys.stderr)
+        return 2
+    with ExitStack() as stack:
+        deps = _live_deps(stack, settings, encoder_dir, ask_sample=1.0)(bundle)
+        runs = run_acceptance(deps, picks)
+    text = write_acceptance(out_dir / f"v{bundle.data_version}", bundle.data_version, runs)
+    print(text, end="")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="patchpulse-agent", description="The agent's commands on Seif's machine (Phase 5)."
@@ -238,8 +287,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=ENCODER_DIR,
         help=f"the pinned review encoder (default {ENCODER_DIR})",
     )
+    acceptance = commands.add_parser(
+        "acceptance",
+        help="the acceptance run: 10 bundles of the published data, traced (no database)",
+    )
+    acceptance.add_argument(
+        "--bundle", type=Path, help="a local bundle file instead of the published one"
+    )
+    acceptance.add_argument(
+        "--add",
+        action="append",
+        default=[],
+        metavar="BUNDLE_ID",
+        help="also run this bundle (chosen to hit a path never seen); repeatable",
+    )
+    acceptance.add_argument(
+        "--out",
+        type=Path,
+        default=ACCEPTANCE_DIR,
+        help=f"where the table and the public copies go (default {ACCEPTANCE_DIR})",
+    )
+    acceptance.add_argument(
+        "--encoder-dir",
+        type=Path,
+        default=ENCODER_DIR,
+        help=f"the pinned review encoder (default {ENCODER_DIR})",
+    )
     args = parser.parse_args(argv)
     configure_logging()
+    if args.command == "acceptance":
+        return _acceptance(
+            get_lab_settings(),
+            bundle_file=args.bundle,
+            extra=args.add,
+            out_dir=args.out,
+            encoder_dir=args.encoder_dir,
+        )
     if not args.yes:
         print(f"patchpulse-agent: {BACKFILL_COST}", file=sys.stderr)
         return 2

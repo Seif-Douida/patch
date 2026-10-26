@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from patchpulse.agent.gate import (
     CONFOUNDED,
@@ -105,11 +105,25 @@ _EXEMPT_AFTER = re.compile(
 )
 
 
+NO_ESTIMATE_CITED = "no_estimate_cited"  # V4's cause when a causal claim cites no estimate row
+
+
+@dataclass(frozen=True)
+class CausalCheck:
+    """What V4 did with one causal claim, and the gate's blocker when it didn't allow it
+    (NO_ESTIMATE_CITED when the claim cites no estimate row)."""
+
+    claim_id: str
+    outcome: Literal["allowed", "reworded", "withheld"]
+    blocked_by: str | None
+
+
 @dataclass(frozen=True)
 class Verified:
     claims: list[Claim]
     withheld: list[WithheldClaim]
     pass_rates: dict[str, float]  # per rule: claims that passed / claims it applied to
+    causal_checks: tuple[CausalCheck, ...] = ()  # V4's outcome per causal claim reaching it
 
 
 # Helpers shared by the rules.
@@ -257,6 +271,7 @@ def _verify(
     config: CausalConfig,
     runs: set[tuple[str, ...]],
     tally: _Tally,
+    checks: list[CausalCheck],
 ) -> tuple[Claim | None, str | None]:
     call = None if claim.evidence is None else trace.find(claim.evidence.call_id)
     v1 = call is not None if claim.evidence is not None else (
@@ -273,13 +288,17 @@ def _verify(
         gate = None if row is None else causal_gate(row, config)
         tally.check("V4", gate is not None and gate.allowed)
         if row is None or gate is None:
+            checks.append(CausalCheck(claim.claim_id, "withheld", NO_ESTIMATE_CITED))
             return None, "V4"
         if gate.allowed:
+            checks.append(CausalCheck(claim.claim_id, "allowed", None))
             if gate.caveat:
                 claim = claim.model_copy(update={"text": f"{claim.text} {gate.caveat}"})
         elif row.effect is None or row.lo90 is None or row.hi90 is None:
+            checks.append(CausalCheck(claim.claim_id, "withheld", gate.blocked_by))
             return None, "V4"
         else:
+            checks.append(CausalCheck(claim.claim_id, "reworded", gate.blocked_by))
             claim = claim.model_copy(
                 update={"text": hedge(row, gate), "claim_type": "comparative", "reworded": True}
             )
@@ -301,13 +320,14 @@ def verify_claims(
     tally = _Tally()
     kept: list[Claim] = []
     withheld: list[WithheldClaim] = []
+    checks: list[CausalCheck] = []
     for claim in claims:
-        verified, rule = _verify(claim, trace, tools, config, runs, tally)
+        verified, rule = _verify(claim, trace, tools, config, runs, tally, checks)
         if verified is not None:
             kept.append(verified)
         else:
             withheld.append(WithheldClaim(claim=claim, rule=rule or "V1"))
-    return Verified(claims=kept, withheld=withheld, pass_rates=tally.rates())
+    return Verified(kept, withheld, tally.rates(), tuple(checks))
 
 
 def safe_findings(

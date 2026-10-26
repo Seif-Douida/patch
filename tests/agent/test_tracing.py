@@ -256,6 +256,19 @@ def test_no_keys_means_no_tracer() -> None:
     assert isinstance(make_tracer(None, None, None, store=MemoryLimitStore()), NoTracer)
 
 
+def test_a_traced_run_knows_its_trace_id(capture: Capture) -> None:
+    """The acceptance run prints each run's trace (plan Task 21)."""
+    request = ReportRequest.for_bundle("p1", 7)
+    traced = tracer(capture).start(request, data_version=52)
+    untraced = NoTracer().start(request, data_version=52)
+
+    traced.finish(None)
+
+    (root,) = capture.spans()
+    assert traced.trace_id == format(root.context.trace_id, "032x")
+    assert untraced.trace_id is None
+
+
 def test_the_live_agents_trace_with_the_langfuse_keys(tmp_path: Path) -> None:
     # The nightly stage and the backfill trace every report; the API traces Ask at its sample.
     keys: dict[str, Any] = {
