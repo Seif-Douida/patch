@@ -182,8 +182,9 @@ def test_ask_answers_and_caches_by_data_version(tmp_path: Path) -> None:
     assert body["data_version"] == 52
     assert body["report"]["scope"] == "question"
     assert [c["claim_id"] for c in body["report"]["claims"]] == ["c1"]
-    assert again.json() == body
-    assert model.steps == ["scope", "gather", "draft", "summary"]  # the second came from the cache
+    # The same answer, without the count: the second came from the cache, so it wasn't counted.
+    assert again.json() == {k: v for k, v in body.items() if not k.startswith("questions_")}
+    assert model.steps == ["scope", "gather", "draft", "summary"]
 
     ask.published.publish(replace(make_bundle(), data_version=53), sample_report("p1", 7))
     ask.clock.now += 301
@@ -209,6 +210,20 @@ def test_per_visitor_and_daily_limits(tmp_path: Path) -> None:
     resting = ask.ask("What changed after the patch?", visitor="192.0.2.1")
     assert resting.status_code == 429
     assert resting.json()["detail"] == RESTING
+
+
+def test_a_counted_answer_says_how_many_questions_are_left(tmp_path: Path) -> None:
+    # Task 20: the Ask page shows the questions left this hour.
+    ask = Ask(tmp_path, Scripted())
+
+    first = ask.ask("Why did reviews drop, take 0?").json()
+    second = ask.ask("Why did reviews drop, take 1?").json()
+
+    assert (first["questions_left"], first["questions_per_hour"]) == (2, 3)
+    assert (second["questions_left"], second["questions_per_hour"]) == (1, 3)
+    # What costs nothing isn't counted, so it doesn't say (a cached answer, not its first count).
+    assert "questions_left" not in ask.ask("Why did reviews drop, take 0?").json()
+    assert "questions_left" not in ask.ask("   ").json()
 
 
 def test_ask_never_returns_quotes_or_review_ids(tmp_path: Path) -> None:

@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 import { Atkinson_Hyperlegible_Next } from "next/font/google";
-import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { Footer } from "@/components/Footer";
+import { SiteHeader } from "@/components/SiteHeader";
 import { loadIndex } from "@/lib/data";
 
 import "./globals.css";
@@ -26,11 +26,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en-GB" className={sans.className}>
       <body>
-        <header className="site-header">
-          <Link href="/" className="wordmark">
-            PatchPulse
-          </Link>
-        </header>
+        <SiteHeader />
         <main>{children}</main>
         <Footer
           attribution={index.attribution}

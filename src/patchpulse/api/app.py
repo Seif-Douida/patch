@@ -6,7 +6,8 @@
 - `POST /ask` ({appid, question}): a visitor's question about one tracked game, answered by the
   agent on the loaded bundle (one bundle for the whole run). Refusals come back in plain words as
   `refusal`; an answer as the report's public copy. Answers are cached by data version, game and
-  question; only questions that run the agent count against Ask's limits (429 with the reason).
+  question; only questions that run the agent count against Ask's limits (429 with the reason),
+  and only those answers say how many are left (`questions_left` of `questions_per_hour`).
 
 Interactive docs stay off: every request wakes a replica. Browsers may read the API from the
 site's origin only (PP_SITE_ORIGIN; none set, none allowed).
@@ -127,21 +128,26 @@ def create_app(
         if isinstance(verdict, Refused):
             headers = {"Retry-After": str(verdict.retry_after)}
             raise HTTPException(429, verdict.reason, headers=headers)
+        # Said with this answer only: a cached copy served later wasn't counted.
+        left = {
+            "questions_left": verdict.left,
+            "questions_per_hour": counters.per_visitor_hour,
+        }
         with one_run:
             cached = answers.get(key)
             if cached is not None:
-                return cached
+                return {**cached, **left}
             question = ReportRequest.for_question(body.question, appid=body.appid)
             result = run_report(question, agent(loaded.bundle))
         if isinstance(result, Refusal):
             answer: dict[str, Any] = {"data_version": version, "refusal": result.reason}
             if result.reason != MODELS_DOWN:
                 answers.put(key, answer)
-            return answer
+            return {**answer, **left}
         answer = {"data_version": version, "report": public_copy(result)}
         if not result.basic:  # a basic answer is tried again with the models next time
             answers.put(key, answer)
-        return answer
+        return {**answer, **left}
 
     return app
 

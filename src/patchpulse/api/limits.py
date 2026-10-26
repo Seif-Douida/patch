@@ -106,7 +106,7 @@ class QdrantLimitStore:
 
 @dataclass(frozen=True)
 class Allowed:
-    pass
+    left: int  # the visitor's questions left this hour, this one counted
 
 
 @dataclass(frozen=True)
@@ -161,4 +161,4 @@ class AskLimits:
                 )
             self.store.put(key, {"day": day, "visitor": visitor, "asked": [*asked, stamp]})
             self.store.put(f"day|{day}", {"day": day, "count": total["count"] + 1})
-            return Allowed()
+            return Allowed(left=self.per_visitor_hour - len(asked) - 1)

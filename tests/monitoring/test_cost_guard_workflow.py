@@ -275,6 +275,20 @@ def test_swa_token_is_fetched_at_run_time_and_masked() -> None:
     assert "secrets.AZURE_STATIC_WEB_APPS" not in read("publish-site.yml")
 
 
+def test_publish_site_builds_ask_with_the_apis_address() -> None:
+    # Phase 5 Task 20: the Ask page calls pp-api from the browser; its address is read from Azure
+    # at build time (public, not a secret), so nothing has to be kept in step by hand.
+    text = read("publish-site.yml")
+    find = step("publish-site.yml", "Find the API's address")
+    assert "az containerapp show -n pp-api" in find
+    assert "properties.configuration.ingress.fqdn" in find
+    assert "::warning::" in find  # no pp-api: the site still builds, Ask says it's unavailable
+    build = step("publish-site.yml", "Build the site")
+    assert "NEXT_PUBLIC_API_URL: ${{ steps.api.outputs.url }}" in build
+    assert text.index("uses: azure/login@") < text.index("- name: Find the API's address")
+    assert text.index("- name: Find the API's address") < text.index("- name: Build the site")
+
+
 def test_publish_site_never_puts_the_dispatch_payload_in_a_shell() -> None:
     # Whoever can send a dispatch controls client_payload; in a run: script it would be code.
     assert "client_payload" not in read("publish-site.yml")

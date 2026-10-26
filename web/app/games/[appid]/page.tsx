@@ -59,6 +59,7 @@ export default async function GamePage({ params }: Props) {
       {aspects && (
         <>
           <PatchAspectTables
+            appid={game.appid}
             aspects={aspects}
             patches={game.patches}
             model={index.aspect_model}

@@ -27,6 +27,12 @@
   --heat-4: #1c5cab;
   --heat-5: #104281;
   --hatch: #c3c4bd;
+  /* A report's explanation statuses (always with their words): supported in the pulse family,
+     inconclusive in a muted amber, ruled out in the neutral chip. */
+  --status-yes: #104281;
+  --status-yes-wash: #dbe8f8;
+  --status-open: #6b5a1e;
+  --status-open-wash: #f3efe2;
 
   --step--1: 0.875rem;
   --step-0: 1.0625rem;
@@ -60,6 +66,10 @@
     --heat-4: #6da7ec;
     --heat-5: #9ec5f4;
     --hatch: #4b5059;
+    --status-yes: #b9d5f6;
+    --status-yes-wash: #1d3350;
+    --status-open: #e3cf94;
+    --status-open-wash: #37301f;
   }
 }
 
@@ -133,6 +143,26 @@ a:hover {
 
 .site-header {
   padding: 1.25rem 0 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.site-menu {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.site-menu a {
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.site-menu a:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: currentColor;
 }
 
 .wordmark {
@@ -881,5 +911,345 @@ table {
 @media (max-width: 640px) {
   .chart {
     padding: 1rem 0.75rem 0.5rem;
+  }
+}
+
+/* Reports (Phase 5, layout B): the five explanations first, then the summary, then each verified
+   claim under the explanation it backs; what the verifier withheld folds at the bottom. */
+
+.patch-report {
+  margin: 0.6rem 0 0;
+}
+
+.report-header {
+  margin: 0.5rem 0 0;
+}
+
+.report {
+  margin: 0.5rem 0 3rem;
+}
+
+.report-meta {
+  color: var(--ink-2);
+  margin: 0 0 1.5rem;
+}
+
+.report-basic {
+  max-width: 44rem;
+  margin: 0 0 1.5rem;
+  padding: 0.65rem 0.9rem;
+  border-left: 3px solid var(--axis);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: var(--step--1);
+}
+
+.verdicts {
+  list-style: none;
+  margin: 0 0 1.75rem;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.verdict {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.7rem 0.8rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-top: 3px solid var(--axis);
+  border-radius: 6px;
+}
+
+.verdict-supported {
+  border-top-color: var(--status-yes);
+}
+
+.verdict-inconclusive {
+  border-top-color: var(--status-open);
+}
+
+.verdict-name {
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.status {
+  display: inline-block;
+  padding: 0.05rem 0.55rem;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--ink-2);
+  font-size: var(--step--1);
+  white-space: nowrap;
+}
+
+.status-supported {
+  background: var(--status-yes-wash);
+  color: var(--status-yes);
+}
+
+.status-inconclusive {
+  background: var(--status-open-wash);
+  color: var(--status-open);
+}
+
+.report-summary {
+  max-width: 44rem;
+  margin: 0 0 2.25rem;
+  font-size: var(--step-1);
+  line-height: 1.5;
+}
+
+.report-claims {
+  max-width: 44rem;
+  margin: 0 0 1.75rem;
+}
+
+.report-claims h2 {
+  font-size: var(--step-0);
+  padding: 0 0 0.4rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.report-claims ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.claim {
+  position: relative;
+  padding: 0.55rem 0 0.55rem 1.6rem;
+}
+
+.claim-tick {
+  position: absolute;
+  left: 0.15rem;
+  top: 0.55rem;
+  color: var(--pulse);
+  font-weight: 700;
+}
+
+.claim-support {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+}
+
+.claim-reworded {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--ink-2);
+  font-size: var(--step--1);
+}
+
+.report-withheld {
+  max-width: 44rem;
+  margin: 2rem 0 0;
+  padding: 0.75rem 0 0;
+  border-top: 1px dashed var(--axis);
+  color: var(--ink-2);
+  font-size: var(--step--1);
+}
+
+.report-withheld summary {
+  cursor: pointer;
+}
+
+.report-withheld ul {
+  margin: 0.5rem 0;
+  padding: 0 0 0 1.2rem;
+}
+
+.report-withheld p {
+  color: var(--ink-3);
+}
+
+.report-provenance {
+  max-width: 44rem;
+  margin: 2.5rem 0 0;
+  color: var(--ink-3);
+  font-size: var(--step--1);
+}
+
+@media (max-width: 640px) {
+  .verdicts {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+  }
+
+  .verdict {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.55rem 0.75rem;
+    border-top-width: 1px;
+    border-top-color: var(--hairline);
+    border-left: 3px solid var(--axis);
+  }
+
+  .verdict-supported {
+    border-left-color: var(--status-yes);
+  }
+
+  .verdict-inconclusive {
+    border-left-color: var(--status-open);
+  }
+
+  .report-summary {
+    font-size: var(--step-0);
+  }
+}
+
+/* Ask (Phase 5): one form, then the answer as a report. */
+
+.ask-header {
+  margin: 1.5rem 0;
+}
+
+.ask-header p {
+  max-width: 44rem;
+  margin-top: 0.6rem;
+  color: var(--ink-2);
+}
+
+.ask-form {
+  display: grid;
+  grid-template-columns: minmax(12rem, 20rem) 1fr;
+  gap: 1rem 1.25rem;
+  max-width: 52rem;
+  padding: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+}
+
+.ask-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ask-field label {
+  font-size: var(--step--1);
+  font-weight: 700;
+  color: var(--ink-2);
+}
+
+.ask-field select,
+.ask-field textarea {
+  font: inherit;
+  color: var(--ink);
+  background: var(--page);
+  border: 1px solid var(--axis);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+
+.ask-field textarea {
+  resize: vertical;
+  min-height: 4.75rem;
+}
+
+.ask-suggestions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+.ask-suggestions ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ask-suggestions button {
+  font: inherit;
+  color: var(--ink-2);
+  background: var(--chip);
+  border: 0;
+  border-radius: 999px;
+  padding: 0.2rem 0.75rem;
+  cursor: pointer;
+}
+
+.ask-suggestions button:hover {
+  color: var(--ink);
+}
+
+.ask-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+}
+
+.ask-submit {
+  font: inherit;
+  font-weight: 700;
+  color: #fff;
+  background: var(--pulse);
+  border: 0;
+  border-radius: 6px;
+  padding: 0.5rem 1.5rem;
+  cursor: pointer;
+}
+
+.ask-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ask-left {
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+.ask-warming,
+.ask-unavailable {
+  max-width: 52rem;
+  margin: 1rem 0 0;
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--status-open);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: var(--step--1);
+}
+
+.ask-status {
+  max-width: 52rem;
+  margin: 1rem 0 0;
+  color: var(--ink-2);
+}
+
+.ask-answer {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.ask-asked {
+  max-width: 44rem;
+  margin: 0 0 0.35rem;
+  font-size: var(--step-1);
+  font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .ask-form {
+    grid-template-columns: 1fr;
+    padding: 1rem;
   }
 }

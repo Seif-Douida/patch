@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import {
   type PatchComparison,
   WEAK_NOTE,
@@ -6,6 +8,7 @@ import {
   weakAspects,
 } from "@/lib/aspects";
 import { describeEffect } from "@/lib/effects";
+import { reportHref } from "@/lib/reports";
 import { formatCount, formatDate, formatShare } from "@/lib/series";
 import type { AspectModel, AspectSeries, CausalInfo, Patch } from "@/lib/types";
 
@@ -78,13 +81,14 @@ function Estimate({ patch, causal, discountsFrom }: { patch: Patch } & EstimateC
 }
 
 type TableProps = {
+  appid: number;
   patch: Patch;
   aspects: AspectSeries;
   open: boolean;
   weak: Set<string>;
 } & EstimateContext;
 
-function PatchTable({ patch, aspects, open, weak, causal, discountsFrom }: TableProps) {
+function PatchTable({ appid, patch, aspects, open, weak, causal, discountsFrom }: TableProps) {
   const comparison = beforeAfter(aspects, patch.date);
   return (
     <details className="patch-aspect" open={open}>
@@ -93,6 +97,13 @@ function PatchTable({ patch, aspects, open, weak, causal, discountsFrom }: Table
         <span className="patch-aspect-date">{formatDate(patch.date)}</span>
       </summary>
       <Estimate patch={patch} causal={causal} discountsFrom={discountsFrom} />
+      {patch.report && (
+        <p className="patch-report">
+          <Link href={reportHref(appid, patch.report)} prefetch={false}>
+            Read the report
+          </Link>
+        </p>
+      )}
       <Notes comparison={comparison} />
       <div className="table-scroll">
         <table>
@@ -133,16 +144,18 @@ function PatchTable({ patch, aspects, open, weak, causal, discountsFrom }: Table
 
 /**
  * One table per major update or patch, newest first (the first one open), each under its
- * estimated effect when the data has one (schema 3). `discountsFrom` is the first day the game's
- * price is known.
+ * estimated effect when the data has one (schema 3) and a link to its bundle's report when there
+ * is one (schema 4). `discountsFrom` is the first day the game's price is known.
  */
 export function PatchAspectTables({
+  appid,
   aspects,
   patches,
   model = null,
   causal = null,
   discountsFrom = null,
 }: {
+  appid: number;
   aspects: AspectSeries;
   patches: Patch[];
   model?: AspectModel | null;
@@ -166,6 +179,7 @@ export function PatchAspectTables({
       {treatments.map((patch, index) => (
         <PatchTable
           key={`${patch.date}-${patch.url}`}
+          appid={appid}
           patch={patch}
           aspects={aspects}
           open={index === 0}
