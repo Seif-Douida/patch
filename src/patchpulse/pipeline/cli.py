@@ -16,7 +16,7 @@ import logging
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx2
@@ -26,8 +26,15 @@ from patchpulse.db.engine import connect_with_resume_retry, make_engine
 from patchpulse.db.local import create_local_database
 from patchpulse.db.migrate import upgrade_to_head
 from patchpulse.db.provision import provision_writer
-from patchpulse.ingest.games import GAMES_FILE
+from patchpulse.ingest.games import GAMES_FILE, load_games
 from patchpulse.ingest.http import RateLimiter, SteamHttp
+from patchpulse.pipeline.donor_history import (
+    fetch_history,
+    history_plan,
+    merge_history,
+    write_history_csv,
+)
+from patchpulse.pipeline.donors import check_candidates, summary_lines
 from patchpulse.pipeline.runner import NoPublisher, PipelineError, Publisher, run_nightly
 from patchpulse.publish.github import GitHubPublisher, usable_private_key
 
@@ -129,6 +136,52 @@ def _nightly(settings: Settings, export_dir: Path | None, games_file: Path, publ
     return 0
 
 
+def _donor_candidates(appids: Sequence[int], games_file: Path) -> int:
+    """Phase 4: check comparison-game candidates against Steam; prints, stores nothing."""
+    tracked = [game for game in load_games(games_file) if game.tracked]
+    with httpx2.Client() as client:
+        checks, qualifying = check_candidates(
+            SteamHttp(client, limiter=RateLimiter()),
+            list(appids),
+            tracked,
+            today=datetime.now(UTC).date(),
+        )
+    for line in summary_lines(checks, qualifying):
+        print(line)
+    return 0
+
+
+def _donor_history(args: argparse.Namespace) -> int:
+    """Phase 4: the comparison games' history (Steam only; no database)."""
+    if args.step == "plan":
+        last = date.fromisoformat(args.last) if args.last else None
+        today = datetime.now(UTC).date()
+        for line in history_plan(load_games(args.games_file), last=last, today=today):
+            print(line)
+        return 0
+    if args.step == "fetch":
+        with httpx2.Client() as client:
+            steam = SteamHttp(client, limiter=RateLimiter())
+            rows = fetch_history(
+                steam, args.appid, date.fromisoformat(args.first), date.fromisoformat(args.last)
+            )
+        write_history_csv(rows, args.out)
+        log.info("game %d: %d days written to %s", args.appid, len(rows), args.out)
+        return 0
+    try:
+        rows = merge_history(
+            args.directory, load_games(args.games_file), date.fromisoformat(args.last)
+        )
+    except ValueError as error:
+        print(f"patchpulse-pipeline: {error}", file=sys.stderr)
+        return 1
+    write_history_csv(rows, args.out)
+    log.info(
+        "%d rows for %d games written to %s", len(rows), len({r.appid for r in rows}), args.out
+    )
+    return 0
+
+
 def _create_local_db(settings: Settings) -> int:
     server = make_engine(settings.model_copy(update={"db_name": "master"}))
     create_local_database(server, settings.db_name)
@@ -153,9 +206,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="publish to the site-data branch and report the outcome on GitHub (Azure)",
     )
     commands.add_parser("create-local-db", help="local/CI only: create PP_DB_NAME on the container")
+    candidates = commands.add_parser(
+        "donor-candidates", help="Phase 4: check comparison-game candidates on Steam (no database)"
+    )
+    candidates.add_argument("appids", nargs="+", type=int)
+    candidates.add_argument(
+        "--games-file", type=Path, default=GAMES_FILE, help=f"default: {GAMES_FILE}"
+    )
+    history = commands.add_parser(
+        "donor-history", help="Phase 4: the comparison games' daily counts, fetched once"
+    ).add_subparsers(dest="step", required=True)
+    plan = history.add_parser("plan", help="GITHUB_OUTPUT lines: the last day and the matrix")
+    plan.add_argument("--games-file", type=Path, default=GAMES_FILE)
+    plan.add_argument("--last", default="", help="YYYY-MM-DD; default yesterday (UTC)")
+    fetch = history.add_parser("fetch", help="one game's days into a CSV (a runner per game)")
+    fetch.add_argument("--appid", type=int, required=True)
+    fetch.add_argument("--first", required=True)
+    fetch.add_argument("--last", required=True)
+    fetch.add_argument("--out", type=Path, required=True)
+    merge = history.add_parser("merge", help="check the downloaded CSVs and write the dbt seed")
+    merge.add_argument("directory", type=Path)
+    merge.add_argument("--games-file", type=Path, default=GAMES_FILE)
+    merge.add_argument("--last", required=True)
+    merge.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
     configure_logging()
+    if args.command == "donor-candidates":  # Steam only: no database settings needed
+        return _donor_candidates(args.appids, args.games_file)
+    if args.command == "donor-history":
+        return _donor_history(args)
     try:
         settings = get_settings()
         if args.command == "migrate":

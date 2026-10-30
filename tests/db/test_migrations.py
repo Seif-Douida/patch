@@ -33,16 +33,18 @@ EXPECTED_TABLES = {
     "ops.data_quality_result",
     "ops.qdrant_point",
     "ops.qdrant_reconciliation",
+    "raw.steam_review_daily",
+    "app.patch_effect",
 }
-EXPECTED_SCHEMAS = {"raw", "ops", "stg", "core", "mart"}
+EXPECTED_SCHEMAS = {"raw", "ops", "stg", "core", "mart", "app"}
 
 
 def tables(engine: Engine) -> set[str]:
     with engine.connect() as connection:
         rows = connection.execute(
             text(
-                "SELECT s.name + '.' + t.name FROM sys.tables t "
-                "JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name IN ('raw', 'ops')"
+                "SELECT s.name + '.' + t.name FROM sys.tables t JOIN sys.schemas s "
+                "ON s.schema_id = t.schema_id WHERE s.name IN ('raw', 'ops', 'app')"
             )
         )
         return {row[0] for row in rows}
@@ -266,3 +268,57 @@ def stored_review(rid: int, appid: int, created: datetime) -> dict[str, object]:
         "first_seen_run_id": 1,
         "last_seen_run_id": 1,
     }
+
+
+def migrate_to(engine: Engine, revision: str, *, down: bool = False) -> None:
+    with engine.begin() as connection:
+        config = Config()
+        config.set_main_option("script_location", SCRIPT_LOCATION)
+        config.attributes["connection"] = connection
+        (command.downgrade if down else command.upgrade)(config, revision)
+
+
+def test_0005_creates_and_drops_its_tables(migrated: tuple[Settings, Engine]) -> None:
+    # Phase 4: the comparison games' daily counts and the stored effect estimates.
+    _, engine = migrated
+    added = {"raw.steam_review_daily", "app.patch_effect"}
+    assert added <= tables(engine)
+
+    migrate_to(engine, "0004", down=True)
+
+    assert not added & tables(engine)
+    assert "app" not in schemas(engine)
+
+
+def test_pp_writer_can_write_counts_and_effects(migrated: tuple[Settings, Engine]) -> None:
+    # pp-migrate provisions the writer after every upgrade, so its grants reach the new schema.
+    admin, engine = migrated
+    with engine.begin() as connection:
+        provision_writer(connection, password="Writer-One-1")
+
+    with as_writer(admin, "Writer-One-1").begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO raw.steam_review_daily "
+                "(appid, [day], positive, negative, fetched_run_id, fetched_at) "
+                "VALUES (10, '2026-10-20', 7, 2, 1, '2026-10-21 03:00:00')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO app.patch_effect (bundle_id, patch_ids, appid, outcome, sample, "
+                "horizon, method, run_id, effect, lo90, hi90, p_value, pre_fit_rmse, donors, "
+                "flags, reason, fingerprint, version, computed_at) VALUES ('b1', '[\"p1\"]', 10, "
+                "'positive_share', 'all', 14, 'its', 1, -2.5, -4.0, -1.0, NULL, NULL, '[]', '', "
+                "NULL, REPLICATE('a', 64), 'e2', '2026-10-21 03:00:00')"
+            )
+        )
+        stored: int = connection.execute(
+            text("SELECT positive + negative FROM raw.steam_review_daily")
+        ).scalar_one()
+        effect: float = connection.execute(text("SELECT effect FROM app.patch_effect")).scalar_one()
+        connection.execute(text("DELETE FROM app.patch_effect"))
+        connection.execute(text("DELETE FROM raw.steam_review_daily"))
+
+    assert stored == 9
+    assert effect == pytest.approx(-2.5)

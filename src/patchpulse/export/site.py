@@ -55,6 +55,7 @@ class GameRow:
     appid: int
     name: str
     genres: str  # "Action, RPG" as stored in core.dim_game
+    role: str = "tracked"  # comparison games (role donor) are never exported
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,8 @@ def shape_site_export(
 
     files: dict[str, bytes] = {}
     listing: list[dict[str, Any]] = []
-    for game in sorted(games, key=lambda g: (g.name, g.appid)):
+    shown = (g for g in games if g.role != "donor")
+    for game in sorted(shown, key=lambda g: (g.name, g.appid)):
         series = series_by_game.get(game.appid, [])
         aspect_days = aspects_by_game.get(game.appid, [])
         genres = [genre.strip() for genre in game.genres.split(",") if genre.strip()]
@@ -329,8 +331,8 @@ def build_site_export(
 ) -> dict[str, bytes]:
     """Read the marts and shape the site files; aspects only with a model."""
     games = [
-        GameRow(r.appid, r.name, r.genres)
-        for r in connection.execute(text("SELECT appid, name, genres FROM core.dim_game"))
+        GameRow(r.appid, r.name, r.genres, r.role)
+        for r in connection.execute(text("SELECT appid, name, genres, role FROM core.dim_game"))
     ]
     days = [
         DayRow(

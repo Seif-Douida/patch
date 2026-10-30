@@ -48,6 +48,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from patchpulse.causal import cli as causal_cli
 from patchpulse.config import LabSettings, SettingsError, get_lab_settings
 from patchpulse.db.engine import connect_with_resume_retry, make_entra_engine
 from patchpulse.labeling.agreement import agreement, render_agreement
@@ -1002,6 +1003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     download = champion.add_parser("download", help="download the pinned champion and check it")
     download.add_argument("--to", type=Path, required=True, help="the directory to write it to")
     retrieval_cli.register(commands)
+    causal_cli.register(commands)
     args = parser.parse_args(argv)
 
     # A character the console can't encode (Windows' cp1252, redirected to a file) prints as "?"
@@ -1017,6 +1019,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _pull(settings, yes=args.yes)
         if args.command == "retrieval":
             return retrieval_cli.run(args, settings)
+        if args.command == "causal":
+            return causal_cli.run(args, settings)
         if args.command == "champion" and args.champion_command == "download":
             return _champion_download(args.to)
         if args.command == "champion":

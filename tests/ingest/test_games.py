@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from patchpulse.ingest.games import GAMES_FILE, GamesConfigError, Role, load_games
+from patchpulse.ingest.games import GAMES_FILE, Game, GamesConfigError, Role, load_games
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,10 +30,10 @@ def game(appid: int = 1, role: str = "tracked", start: str = "2024-10-01") -> st
     return GAME.format(appid=appid, role=role, start=start)
 
 
-def test_games_yaml_is_valid_and_has_twelve_games() -> None:
+def test_games_yaml_is_valid_and_has_twelve_tracked_games() -> None:
     games = load_games(REPO_ROOT / GAMES_FILE)
 
-    assert len(games) == 12
+    assert len([g for g in games if g.tracked]) == 12
     appids = {g.appid for g in games}
     assert {553850, 949230, 1091500, 292030, 3751260} <= appids  # incident seeds + Seif's picks
     assert all(g.genres for g in games)
@@ -53,6 +53,35 @@ def test_a_game_is_loaded_with_its_fields(tmp_path: Path) -> None:
     assert loaded.role is Role.BOTH
     assert loaded.backfill_start == date(2024, 10, 1)
     assert loaded.release_date is None
+
+
+def test_games_file_has_donors_and_both() -> None:
+    # Phase 4: the 12 tracked games are comparison games too (role both); 30 comparison-only games
+    # (role donor) approved by Seif on 2026-10-21, all with history from 2024-10-01.
+    from patchpulse.causal.rules import GenreGroup, genre_group
+
+    games = load_games(REPO_ROOT / GAMES_FILE)
+    donors = [g for g in games if g.donor]
+
+    assert {g.role for g in games if g.tracked} == {Role.BOTH}
+    assert len(donors) == 30
+    assert all(g.backfill_start == date(2024, 10, 1) for g in donors)
+    assert all(g.release_date and g.release_date < date(2024, 9, 3) for g in donors)
+    groups = [genre_group(g.genres) for g in donors]
+    assert (groups.count(GenreGroup.ACTION_RPG), groups.count(GenreGroup.SIM_STRATEGY)) == (22, 8)
+
+
+def test_role_helpers() -> None:
+    def game(role: Role) -> Game:
+        return Game(
+            appid=1, name="A game", genres=["Action"], role=role, backfill_start=date(2024, 10, 1)
+        )
+
+    assert [(game(r).tracked, game(r).donor) for r in (Role.TRACKED, Role.BOTH, Role.DONOR)] == [
+        (True, False),
+        (True, False),
+        (False, True),
+    ]
 
 
 def test_duplicate_appids_are_rejected(tmp_path: Path) -> None:

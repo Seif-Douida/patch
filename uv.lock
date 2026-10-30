@@ -2323,6 +2323,10 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+causal = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
 dev = [
     { name = "alembic" },
     { name = "azure-identity" },
@@ -2405,6 +2409,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+causal = [
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "scipy", specifier = ">=1.18.1" },
+]
 dev = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "azure-identity", specifier = ">=1.26.0" },

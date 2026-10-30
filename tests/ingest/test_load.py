@@ -11,12 +11,15 @@ from sqlalchemy import Engine, inspect, text
 
 from patchpulse.db import tables
 from patchpulse.ingest.coverage import Coverage
+from patchpulse.ingest.day_counts import DayCounts
 from patchpulse.ingest.games import Game, Role
 from patchpulse.ingest.load import (
+    last_count_days,
     purge_raw_pages,
     read_coverage,
     record_dq,
     record_page,
+    store_day_counts,
     upsert_classifications,
     upsert_games,
     upsert_news,
@@ -245,3 +248,48 @@ def test_record_dq(migrated_engine: Engine) -> None:
         migrated_engine, "SELECT run_id, check_name, appid, severity FROM ops.data_quality_result"
     )
     assert [tuple(r) for r in stored] == [(3, "cursor_repeat", 553850, "warn")]
+
+
+FETCHED = datetime(2026, 10, 22, 3, tzinfo=UTC)
+
+
+def test_a_counted_day_fetched_again_replaces_the_stored_one(migrated_engine: Engine) -> None:
+    day = date(2026, 10, 20)
+    with migrated_engine.begin() as connection:
+        store_day_counts(connection, DayCounts(7, day, 5, 1), run_id=1, fetched_at=FETCHED)
+        store_day_counts(connection, DayCounts(7, day, 6, 1), run_id=2, fetched_at=FETCHED)
+
+    stored = rows(
+        migrated_engine,
+        "SELECT appid, [day], positive, negative, fetched_run_id FROM raw.steam_review_daily",
+    )
+    assert [tuple(r) for r in stored] == [(7, day, 6, 1, 2)]
+
+
+def test_last_count_days_take_the_later_of_raw_and_the_seed(migrated_engine: Engine) -> None:
+    with migrated_engine.begin() as connection:
+        assert last_count_days(connection) == {}  # nothing stored, no seed loaded yet
+        store_day_counts(
+            connection, DayCounts(7, date(2026, 10, 20), 5, 1), run_id=1, fetched_at=FETCHED
+        )
+        store_day_counts(
+            connection, DayCounts(9, date(2026, 10, 2), 5, 1), run_id=1, fetched_at=FETCHED
+        )
+        # What `dbt seed` loads into core (dbt_project.yml's column types).
+        connection.execute(
+            text(
+                "CREATE TABLE core.donor_daily_counts "
+                "(appid int, [day] date, positive int, negative int)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO core.donor_daily_counts VALUES "
+                "(7, '2026-10-01', 1, 1), (7, '2026-10-21', 1, 1), (8, '2026-10-21', 1, 1), "
+                "(9, '2026-10-01', 1, 1)"
+            )
+        )
+
+        last = last_count_days(connection)
+
+    assert last == {7: date(2026, 10, 21), 8: date(2026, 10, 21), 9: date(2026, 10, 2)}

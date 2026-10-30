@@ -217,3 +217,90 @@ def test_create_local_db_is_idempotent(
     finally:
         with sql_server.connect() as connection:
             connection.execute(text(f"IF DB_ID('{name}') IS NOT NULL DROP DATABASE [{name}]"))
+
+
+def test_donor_candidates_needs_no_database_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Phase 4: the candidate check (and the history fetch on GitHub runners) talk to Steam only.
+    from datetime import date
+
+    from patchpulse.causal.rules import GenreGroup
+    from patchpulse.pipeline import cli
+    from patchpulse.pipeline.donors import CandidateCheck
+
+    for name in list(os.environ):
+        if name.startswith("PP_"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)  # no .env here
+    games = tmp_path / "games.yaml"
+    games.write_text(
+        "games:\n  - {appid: 553850, name: Helldivers 2, genres: [Action], role: both, "
+        "backfill_start: 2024-10-01}\n",
+        encoding="utf-8",
+    )
+    check = CandidateCheck(
+        1001,
+        "Passes",
+        ("Action",),
+        GenreGroup.ACTION_RPG,
+        date(2020, 3, 4),
+        25.0,
+        True,
+        1,
+        (date(2025, 3, 10),),
+        "pass",
+        (),
+    )
+    seen: list[list[int]] = []
+
+    def fake_check(http: object, appids: list[int], tracked: list[object], **_: object) -> object:
+        seen.append(list(appids))
+        assert [g.appid for g in tracked] == [553850]  # type: ignore[attr-defined]
+        return [check], {"t1": 3}
+
+    monkeypatch.setattr(cli, "check_candidates", fake_check)
+
+    assert main(["donor-candidates", "1001", "--games-file", str(games)]) == 0
+    assert seen == [[1001]]
+    out = capsys.readouterr().out
+    assert "Passes" in out
+    assert "1 bundles of tracked patches; 1 with fewer than 5 qualifying candidates" in out
+
+
+def test_donor_history_plan_and_merge_need_no_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import date
+
+    from patchpulse.ingest.day_counts import DayCounts
+    from patchpulse.pipeline.donor_history import write_history_csv
+
+    for name in list(os.environ):
+        if name.startswith("PP_"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+    games = tmp_path / "games.yaml"
+    games.write_text(
+        "games:\n  - {appid: 1245620, name: Elden Ring, genres: [Action], role: donor, "
+        "backfill_start: 2024-10-01}\n",
+        encoding="utf-8",
+    )
+    write_history_csv(
+        [DayCounts(1245620, date(2024, 10, d), 3, 1) for d in (1, 2)],
+        tmp_path / "artifacts" / "donor-1245620" / "donor-1245620.csv",
+    )
+
+    assert main(["donor-history", "plan", "--games-file", str(games), "--last", "2024-10-02"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "last_day=2024-10-02",
+        'matrix=[{"appid": 1245620, "first": "2024-10-01"}]',
+    ]
+    seed = tmp_path / "seed.csv"
+    args = ["donor-history", "merge", str(tmp_path / "artifacts"), "--games-file", str(games)]
+    assert main([*args, "--last", "2024-10-02", "--out", str(seed)]) == 0
+    assert seed.read_text(encoding="utf-8").splitlines()[1:] == [
+        "1245620,2024-10-01,3,1",
+        "1245620,2024-10-02,3,1",
+    ]
+    assert main([*args, "--last", "2024-10-03", "--out", str(seed)]) == 1  # a day missing

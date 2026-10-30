@@ -5,6 +5,12 @@ models:
     columns:
       - name: game_key
         data_tests: [unique, not_null]
+      - name: role
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [tracked, donor, both]
 
   - name: dim_date
     columns:

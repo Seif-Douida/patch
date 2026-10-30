@@ -157,6 +157,19 @@ def test_game_without_data_yet_is_listed_without_a_summary() -> None:
     assert "games/553850.json" in export([HD2], [], [])
 
 
+def test_export_leaves_out_comparison_games() -> None:
+    # Phase 4: comparison games (role donor) are stored as daily counts only, never shown.
+    donor = GameRow(appid=1245620, name="Elden Ring", genres="Action, RPG", role="donor")
+    both = GameRow(appid=949230, name="Cities: Skylines II", genres="Simulation", role="both")
+    days = [day(1245620, D1, 50, 40), day(553850, D1, 10, 8)]
+    patches = [patch(1245620, D1, "Patch 1.16")]
+
+    files = export([HD2, donor, both], days, patches)
+
+    assert "games/1245620.json" not in files
+    assert {g["appid"] for g in load(files, "index.json")["games"]} == {553850, 949230}
+
+
 def test_files_end_with_a_newline_and_are_utf8() -> None:
     files = export([CS2], [], [patch(949230, D1, "Patch 1.6.2f1 — Autumn Breeze")])
 

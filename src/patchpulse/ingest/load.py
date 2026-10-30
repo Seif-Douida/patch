@@ -13,10 +13,24 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import Column, Connection, MetaData, Table, delete, insert, select, update
+from sqlalchemy import (
+    Column,
+    Connection,
+    MetaData,
+    Table,
+    column,
+    delete,
+    func,
+    insert,
+    select,
+    table,
+    text,
+    update,
+)
 
 from patchpulse.db import tables
 from patchpulse.ingest.coverage import Coverage
+from patchpulse.ingest.day_counts import DayCounts
 from patchpulse.ingest.games import Game
 from patchpulse.ingest.models import NewsItem, PriceSnapshot, RawPage, ReviewRecord
 from patchpulse.ingest.patches import CLASSIFIER_VERSION, Classification
@@ -205,6 +219,42 @@ def upsert_prices(
             connection.execute(
                 insert(table).values(appid=appid, snapshot_date=snapshot_date, **values)
             )
+
+
+def store_day_counts(
+    connection: Connection, counts: DayCounts, *, run_id: int, fetched_at: datetime
+) -> None:
+    """A comparison game's review counts for one day (Phase 4); a day fetched again replaces it."""
+    table = tables.steam_review_daily
+    values = {
+        "positive": counts.positive,
+        "negative": counts.negative,
+        "fetched_run_id": run_id,
+        "fetched_at": naive_utc(fetched_at),
+    }
+    where = (table.c.appid == counts.appid) & (table.c.day == counts.day)
+    if not connection.execute(update(table).where(where).values(**values)).rowcount:
+        connection.execute(insert(table).values(appid=counts.appid, day=counts.day, **values))
+
+
+# The dbt seed `donor_daily_counts` (dbt loads seeds into core): dbt's table, not Alembic's, so it
+# exists only once a `dbt build` has run.
+_DONOR_SEED = table("donor_daily_counts", column("appid"), column("day"), schema="core")
+
+
+def last_count_days(connection: Connection) -> dict[int, date]:
+    """Each comparison game's last counted day: the later of raw.steam_review_daily's and the dbt
+    seed's (the history fetched once by the donor-history workflow)."""
+    stored = tables.steam_review_daily
+    query = select(stored.c.appid, func.max(stored.c.day)).group_by(stored.c.appid)
+    last = {int(appid): day for appid, day in connection.execute(query)}
+    seeded = connection.execute(text("SELECT OBJECT_ID(N'core.donor_daily_counts', N'U')"))
+    if seeded.scalar() is not None:
+        seed = _DONOR_SEED
+        rows = connection.execute(select(seed.c.appid, func.max(seed.c.day)).group_by(seed.c.appid))
+        for appid, day in rows:
+            last[int(appid)] = max(day, last.get(int(appid), day))
+    return last
 
 
 def read_coverage(connection: Connection, appid: int) -> Coverage | None:
