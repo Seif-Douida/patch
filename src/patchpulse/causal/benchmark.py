@@ -23,12 +23,14 @@ from datetime import date, timedelta
 
 import numpy as np
 
-from patchpulse.causal.bundles import Bundle
+from patchpulse.causal.bundles import Bundle, Patch, bundle_patches
+from patchpulse.causal.estimate import volume_spike
 from patchpulse.causal.its import (
     POSITIVE_SHARE,
     VOLUME,
     ItsResult,
     Kind,
+    NoEstimate,
     calibrated_its_effect,
 )
 from patchpulse.causal.rules import FIT_DAYS, MIN_DONORS, POST_DAYS, eligible_donors, genre_group
@@ -42,6 +44,10 @@ VOLUME_EFFECTS = (0.0, -10.0, -25.0)  # percent
 SHAPES = ("step", "ramp")
 COVERAGE_RANGE = (0.85, 0.95)
 MAX_FPR = 0.10
+# Phase 5's causal gate (V4, Seif's option C, 25 Oct): causal wording on volume-spike windows is
+# allowed only if the default method's false alarms there stay within ADR-007's own bar.
+SPIKE_MIN_TRIALS = 20
+SPIKE_MAX_FPR = 0.10
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,8 @@ class Trial:
     hi90: float | None
     p_value: float | None
     fallback: bool  # synthetic control fell back to interrupted time series
+    volume_spike: bool  # the site's flag on the (injected) window: a real event the calendar missed
+    pair: int  # shared by both methods' rows on the same injected series and horizon
 
 
 @dataclass(frozen=True)
@@ -84,6 +92,32 @@ class Choice:
     validated: bool
     reason: str
     table: dict[str, dict[str, float]]
+
+
+@dataclass(frozen=True)
+class SpikeVerdict:
+    trials: int
+    false_alarms: float | None
+    allowed: bool
+
+
+def spike_verdict(trials: Sequence[Trial], method: str) -> SpikeVerdict:
+    """`method`'s positive-share trials at an injected 0 on volume-spike windows, as served, both
+    horizons pooled: allowed when there are at least SPIKE_MIN_TRIALS with an estimate and at most
+    SPIKE_MAX_FPR of them excluded 0."""
+    mine = [
+        t
+        for t in trials
+        if t.method == method
+        and t.outcome == POSITIVE_SHARE
+        and t.effect_pts == 0
+        and t.volume_spike
+        and t.estimate is not None
+    ]
+    if not mine:
+        return SpikeVerdict(0, None, False)
+    rate = float(np.mean([not _covers(t, 0.0) for t in mine]))
+    return SpikeVerdict(len(mine), rate, len(mine) >= SPIKE_MIN_TRIALS and rate <= SPIKE_MAX_FPR)
 
 
 def _clean(series: DailySeries, first: date, last: date) -> bool:
@@ -204,7 +238,9 @@ def _estimate(
     """(method, estimate, lo, hi, p-value, fallback) for interrupted time series and for synthetic
     control as served (falling back to interrupted time series when it would)."""
     own = patch_days.get(treated.appid, ())
-    earlier = [d for d in own if d < start]
+    # Steps at the earlier bundles' starts, as the nightly estimates fit them.
+    bundles = bundle_patches([Patch(f"p{i}", treated.appid, d) for i, d in enumerate(own)])
+    earlier = [b.start for b in bundles if b.start < start]
     busy = frozenset(own) | sale_days
     its = calibrated_its_effect(treated, start, horizon, earlier, kind, busy_days=busy)
     values = (its.effect, its.lo90, its.hi90) if isinstance(its, ItsResult) else (None, None, None)
@@ -219,9 +255,10 @@ def _estimate(
         fit = synth_effect(treated, donors, start, horizon, kind)
         if isinstance(fit, SynthFit) and fit.fit_ok:
             interval = conformal_interval(treated, donors, start, horizon, kind)
-            p_value = placebo_p_value(treated, donors, start, horizon, kind, fit)
-            lo, hi = interval if interval else (None, None)
-            synth_row = ("synth", fit.effect, lo, hi, p_value, False)
+            # Without a range the site serves the fallback instead.
+            if not isinstance(interval, NoEstimate):
+                p_value = placebo_p_value(treated, donors, start, horizon, kind, fit)
+                synth_row = ("synth", fit.effect, *interval, p_value, False)
     return [its_row, synth_row]
 
 
@@ -263,6 +300,8 @@ def run_trials(
                         rows = _estimate(
                             hit, pool, groups, patch_days, window.start, horizon, kind, sale_days
                         )
+                        spike = volume_spike(hit, window.start, horizon)
+                        pair = len(trials)
                         for method, estimate, lo, hi, p_value, fallback in rows:
                             trials.append(
                                 Trial(
@@ -280,6 +319,8 @@ def run_trials(
                                     hi,
                                     p_value,
                                     fallback,
+                                    spike,
+                                    pair,
                                 )
                             )
     return trials
@@ -309,6 +350,8 @@ def placebo_in_space(
             if not _clean(data, start - timedelta(days=FIT_DAYS), last):
                 continue
             pool = {a: s for a, s in donors.items() if a != appid}
+            spike = volume_spike(data, start, horizon)
+            pair = len(trials)
             for method, estimate, lo, hi, p_value, fallback in _estimate(
                 data, pool, groups, patch_days, start, horizon, "share", sale_days
             ):
@@ -328,6 +371,8 @@ def placebo_in_space(
                         hi,
                         p_value,
                         fallback,
+                        spike,
+                        pair,
                     )
                 )
     return trials
@@ -403,6 +448,108 @@ def _fmt(value: float | None, percent: bool = False) -> str:
     return f"{100 * value:.0f}%" if percent else f"{value:+.2f}"
 
 
+Pooled = tuple[int, float | None, float | None, float | None, float | None]
+
+
+def _pooled(trials: Sequence[Trial]) -> Pooled:
+    """(trials with an estimate, bias, RMSE, coverage of the non-zero effects, false alarms at 0),
+    every effect, shape, tier and horizon pooled."""
+    scored = [t for t in trials if t.estimate is not None]
+    errors = np.array([t.estimate - t.truth for t in scored if t.estimate is not None])
+    hits = [t for t in scored if t.effect_pts != 0]
+    nulls = [t for t in scored if t.effect_pts == 0]
+    return (
+        len(scored),
+        float(errors.mean()) if len(errors) else None,
+        float(np.sqrt((errors**2).mean())) if len(errors) else None,
+        float(np.mean([_covers(t, t.truth) for t in hits])) if hits else None,
+        float(np.mean([not _covers(t, 0.0) for t in nulls])) if nulls else None,
+    )
+
+
+def _shared_section(trials: Sequence[Trial]) -> list[str]:
+    """Both methods on the positive-share trials where each has an estimate: the rule uses each
+    method's own, and interrupted time series has none where the quiet history is too short."""
+    share = [t for t in trials if t.outcome == POSITIVE_SHARE]
+    estimated: dict[int, set[str]] = defaultdict(set)
+    for t in share:
+        if t.estimate is not None:
+            estimated[t.pair].add(t.method)
+    methods = sorted({t.method for t in share})
+    both = {pair for pair, have in estimated.items() if have == set(methods)}
+    if len(methods) < 2 or not both:
+        return []
+    lines = [
+        "## Both methods on the same trials",
+        "",
+        f"The {len(both)} positive-share trials where both methods had an estimate (the rule "
+        "above counts each method's own).",
+        "",
+        "| Method | Trials | Coverage | False alarms at 0 | RMSE (points) |",
+        "|---|---|---|---|---|",
+    ]
+    for method in methods:
+        n, _, rmse, coverage, fpr = _pooled(
+            [t for t in share if t.method == method and t.pair in both]
+        )
+        lines.append(
+            f"| {method} | {n} | {_fmt(coverage, True)} | {_fmt(fpr, True)} | "
+            f"{'-' if rmse is None else f'{rmse:.2f}'} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _spike_section(trials: Sequence[Trial], method: str) -> list[str]:
+    share = float(np.mean([t.volume_spike for t in trials]))
+    lines = [
+        "## Windows with a volume spike",
+        "",
+        f"{100 * share:.0f}% of the trials ran on a window with a volume spike: the site's "
+        "`volume_spike` flag, a day in the horizon with reviews 3 SD above the 28 days before "
+        "(log scale). Quiet windows avoid patches and Steam's seasonal sales, so these are events "
+        "neither list holds: a game's own discount before 30 Sep 2026, an anniversary, an update "
+        "the classifier didn't mark as a patch. The rule above pools them, as the nightly "
+        "estimates meet them; the table shows how much less a flagged estimate can be trusted. "
+        "Bias and RMSE in points (positive share) or percent (volume).",
+        "",
+        "| Outcome | Method | Volume spike | Trials | Bias | RMSE | Coverage | False alarms at 0 |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for outcome in sorted({t.outcome for t in trials}):
+        for method in sorted({t.method for t in trials}):
+            for spike in (False, True):
+                group = [
+                    t
+                    for t in trials
+                    if (t.outcome, t.method, t.volume_spike) == (outcome, method, spike)
+                ]
+                if not group:
+                    continue
+                n, bias, rmse, coverage, fpr = _pooled(group)
+                lines.append(
+                    f"| {outcome.replace('_', ' ').capitalize()} | {method} | "
+                    f"{'yes' if spike else 'no'} | {n} | {_fmt(bias)} | "
+                    f"{'-' if rmse is None else f'{rmse:.2f}'} | {_fmt(coverage, True)} | "
+                    f"{_fmt(fpr, True)} |"
+                )
+    verdict = spike_verdict(trials, method)
+    measured = (
+        "no spike-window trials at an injected 0"
+        if verdict.false_alarms is None
+        else f"false alarms on {_fmt(verdict.false_alarms, True)} of {verdict.trials} "
+        "spike-window trials at an injected 0"
+    )
+    lines += [
+        "",
+        f"Causal wording on volume-spike windows (Phase 5): "
+        f"{'allowed' if verdict.allowed else 'blocked'}. The default method raised {measured} "
+        f"(allowed: at most {100 * SPIKE_MAX_FPR:.0f}% over at least {SPIKE_MIN_TRIALS} trials).",
+        "",
+    ]
+    return lines
+
+
 def render_benchmark_report(
     summary: Mapping[tuple[str, str, int, str, float, str], Metrics],
     choice: Choice,
@@ -437,6 +584,7 @@ def render_benchmark_report(
         f"Default method: {choice.method} ({choice.reason}).",
         "",
     ]
+    lines += _shared_section(trials)
     fallbacks = [t for t in trials if t.method == "synth"]
     if fallbacks:
         rate = np.mean([t.fallback for t in fallbacks])
@@ -455,6 +603,8 @@ def render_benchmark_report(
             "(too little quiet history to calibrate, or too few reviews).",
             "",
         ]
+    if trials:
+        lines += _spike_section(trials, choice.method)
     for outcome in sorted({key[1] for key in summary}):
         unit = "points" if outcome == POSITIVE_SHARE else "percent"
         lines += [
@@ -495,7 +645,8 @@ def render_benchmark_report(
         "- Patch dates come from a rules classifier (rules-v1): a missed patch can leave a "
         '"quiet" window or a comparison game contaminated.',
         "- Game-specific discounts are known only since 30 Sep 2026; quiet windows avoid Steam's "
-        "seasonal sales but not earlier game discounts.",
+        "seasonal sales but not earlier game discounts (the volume-spike table shows their "
+        "weight).",
         "- Injected effects are level shifts or 7-day ramps; effects that fade are not tested.",
         "",
     ]

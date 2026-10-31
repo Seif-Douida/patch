@@ -19,6 +19,7 @@ game's twin.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -27,7 +28,7 @@ import numpy as np
 from scipy.optimize import LinearConstraint, minimize
 
 from patchpulse.causal.its import Kind, NoEstimate
-from patchpulse.causal.series import DailySeries, FloatArray
+from patchpulse.causal.series import DailySeries, FloatArray, too_thin
 
 PRE_DAYS = 28
 MIN_FIT_DAYS = 21
@@ -36,6 +37,8 @@ LEVEL = 0.90
 # Conformal grids: hypothesised effects in points (shares) or percent (volume).
 SHARE_STEP, SHARE_SPAN = 0.25, 25.0
 VOLUME_STEP, VOLUME_SPAN = 2.0, 60.0
+WIDER = "interval wider than the grid"
+EMPTY = "interval empty: no effect size passed the conformal test"
 
 
 def fit_weights(treated_pre: FloatArray, donors_pre: FloatArray) -> FloatArray:
@@ -161,6 +164,8 @@ def synth_effect(
         return NoEstimate("window not complete")
     if first < treated.first_day:
         return NoEstimate("pre-period under 28 days")
+    if too_thin(treated, first, end):
+        return NoEstimate("too few reviews (median under 10 a day)")
     panel = _panel(treated, donors, first, end, start, kind)
     if not panel.appids:
         return NoEstimate("no comparison games")
@@ -224,15 +229,18 @@ def conformal_interval(
     level: float = LEVEL,
     step: float | None = None,
     span: float | None = None,
-) -> tuple[float, float] | None:
-    """The effects (points or percent) not rejected at 1 - `level`: from the point estimate, steps
-    outward on the grid while the cyclic-shift p-value stays above 1 - `level`. None when nothing
-    near the estimate is kept or the kept range reaches the grid's edge."""
+) -> tuple[float, float] | NoEstimate:
+    """The effects (points or percent) not rejected at 1 - `level`: from the point estimate, out
+    along the grid while the cyclic-shift p-value stays above 1 - `level`; each end is the first
+    rejected grid point, so the range holds the estimate and every kept effect. No range when the
+    estimate itself is rejected, or the kept effects reach the grid's edge."""
     step = step if step is not None else (SHARE_STEP if kind == "share" else VOLUME_STEP)
     span = span if span is not None else (SHARE_SPAN if kind == "share" else VOLUME_SPAN)
     point = synth_effect(treated, donors, start, horizon, kind)
     if not isinstance(point, SynthFit):
-        return None
+        return point
+    if abs(point.effect) > span:
+        return NoEstimate(WIDER)
     panel = _panel(
         treated,
         donors,
@@ -253,16 +261,16 @@ def conformal_interval(
         )
         return bool(p_value > 1 - level)
 
-    centre = float(np.clip(round(point.effect / step) * step, -span, span))
-    if not kept(centre):
-        return None
-    lo = hi = centre
-    while kept(lo - step):
+    if not kept(point.effect):
+        return NoEstimate(EMPTY)
+    lo = math.floor(point.effect / step) * step
+    while kept(lo):
         lo -= step
-        if lo - step < -span - 1e-9:
-            return None
-    while kept(hi + step):
+        if lo < -span - 1e-9:
+            return NoEstimate(WIDER)
+    hi = math.ceil(point.effect / step) * step
+    while kept(hi):
         hi += step
-        if hi + step > span + 1e-9:
-            return None
+        if hi > span + 1e-9:
+            return NoEstimate(WIDER)
     return lo, hi

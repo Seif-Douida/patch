@@ -7,9 +7,9 @@ import path from "node:path";
 
 import type { GameData, Header, SiteIndex } from "./types";
 
-// Schema 2 only adds fields (aspects), so this site reads both: the live data may still be at 1
-// for a night after a deploy, and old site-data commits stay readable.
-export const SUPPORTED_SCHEMAS: readonly number[] = [1, 2];
+// Schema 3 only adds fields (the patch estimates), so this site reads 2 and 3: the live data may
+// still be at 2 for a night after a deploy. Schema 1 (before the aspects) is no longer read.
+export const SUPPORTED_SCHEMAS: readonly number[] = [2, 3];
 
 const DATA_DIR = path.resolve(process.cwd(), process.env.SITE_DATA_DIR ?? "fixtures");
 

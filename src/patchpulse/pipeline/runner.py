@@ -19,14 +19,18 @@ publish.
    and the night goes on without fresh aspects.
 7. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
    advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
-8. Index (Phase 3, design D5): keep the Qdrant collection in step with core.review_index within
+8. Effects (Phase 4, design D10): estimate the patch bundles whose window has ended or whose
+   inputs changed, newest first, within PP_EFFECTS_BUDGET_MINUTES (pipeline/effects.py); what's
+   left waits a night. A budget of 0 is an INFO line; any failure is an `effects_skipped` warning,
+   the stored estimates stay as they were, and the night goes on.
+9. Index (Phase 3, design D5): keep the Qdrant collection in step with core.review_index within
    PP_INDEX_BUDGET_MINUTES, reconcile the counts per game and day, and check that a search
    answers (pipeline/indexing.py). No PP_QDRANT_URL or PP_ENCODER_DIR, or a budget of 0, is an
    INFO line. Any failure is an `index_skipped` warning and an alert ("Qdrant unreachable" when
    Qdrant didn't answer); counts more than 0.5% apart are a `qdrant_mismatch` warning and an
    alert. A clean night closes all three alerts. The night goes on either way.
-9. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
-10. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
+10. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
+11. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
     success). A failure to report is logged and never changes the run's own result.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
@@ -75,6 +79,7 @@ from patchpulse.pipeline.dbt import DbtResult, run_dbt
 from patchpulse.pipeline.runs import finish_run, start_run
 
 if TYPE_CHECKING:
+    from patchpulse.pipeline.effects import EffectsOutcome
     from patchpulse.pipeline.indexing import IndexOutcome
 
 log = logging.getLogger("patchpulse.pipeline")
@@ -85,9 +90,9 @@ RAW_RETENTION = timedelta(days=30)
 # nights; a game up to date costs one.
 COUNT_DAYS_A_NIGHT = 4
 # pp-nightly's replicaTimeout (infra/modules/jobs.bicep; a guard test keeps them equal). The
-# budgeted stages (backfill, score, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S, whatever
-# their own budgets, so a killed job never takes the night's export and publish with it. The
-# reserve covers what runs after them or between them, measured on 20 Oct (run 25): dbt 167 s,
+# budgeted stages (backfill, score, effects, index) stop at NIGHT_SECONDS - NIGHT_RESERVE_S,
+# whatever their own budgets, so a killed job never takes the night's export and publish with it.
+# The reserve covers what runs after them or between them, measured on 20 Oct (run 25): dbt 167 s,
 # export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled.
 NIGHT_SECONDS = 2_700
 NIGHT_RESERVE_S = 600
@@ -147,6 +152,20 @@ class IndexStage(Protocol):
         clock: Callable[[], float],
         deadline: float,
     ) -> IndexOutcome: ...
+
+
+class EffectsStage(Protocol):
+    """The effects stage's work: pipeline.effects.run_effects, or a fake in tests."""
+
+    def __call__(
+        self,
+        engine: Engine,
+        *,
+        run_id: int,
+        now: datetime,
+        clock: Callable[[], float],
+        deadline: float,
+    ) -> EffectsOutcome: ...
 
 
 class Exporter(Protocol):
@@ -242,8 +261,10 @@ def run_nightly(
     export: Exporter = build_site_export,
     clock: Callable[[], float] = time.monotonic,
     index: IndexStage | None = None,
+    effects: EffectsStage | None = None,
 ) -> RunResult:
-    """`index` replaces the index stage's work in tests; by default it's imported when needed."""
+    """`index` and `effects` replace those stages' work in tests; by default each is imported when
+    needed."""
     if settings.author_hash_salt is None:
         raise SettingsError("missing or invalid settings: PP_AUTHOR_HASH_SALT")
     night_end = clock() + NIGHT_SECONDS - NIGHT_RESERVE_S
@@ -253,7 +274,18 @@ def run_nightly(
     log.info("nightly run %d started", run_id)
     try:
         _run_stages(
-            run, settings, steam, now, publisher, target_root, games_file, dbt, export, clock, index
+            run,
+            settings,
+            steam,
+            now,
+            publisher,
+            target_root,
+            games_file,
+            dbt,
+            export,
+            clock,
+            index,
+            effects,
         )
     except Exception as error:
         with engine.begin() as connection:
@@ -293,6 +325,7 @@ def _run_stages(
     export: Exporter,
     clock: Callable[[], float],
     index: IndexStage | None,
+    effects: EffectsStage | None,
 ) -> None:
     games = load_games(games_file, today=now.date())
     # Comparison games (Phase 4) get news and daily counts only: no reviews, prices or coverage.
@@ -376,6 +409,9 @@ def _run_stages(
             coverage = advance(previous, windows, backfill_reached=reached.get(game.appid))
             write_coverage(connection, game.appid, coverage, run_id=run.run_id)
 
+    with run.stage("effects"):
+        run.stages["effects"] = _effects(run, settings, effects, now, clock)
+
     with run.stage("index"):
         health = (tracked or games)[0].appid
         run.stages["index"] = _index(run, settings, publisher, index, health, clock)
@@ -428,6 +464,47 @@ def _score(run: _Run, settings: Settings, clock: Callable[[], float]) -> dict[st
             )
         return {"skipped": detail[:500]}
     return asdict(stats)
+
+
+def _effects(
+    run: _Run,
+    settings: Settings,
+    effects: EffectsStage | None,
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The effects stage's record for ops.pipeline_run.stages; never raises."""
+    if settings.effects_budget_minutes <= 0:
+        reason = "turned off (PP_EFFECTS_BUDGET_MINUTES is 0)"
+        log.info("effects stage skipped: %s", reason)
+        return {"skipped": reason}
+    try:
+        if effects is None:
+            # Imported here: the stage needs the `causal` group, which an older image may lack.
+            from patchpulse.pipeline.effects import run_effects
+
+            effects = run_effects
+        outcome = effects(
+            run.engine,
+            run_id=run.run_id,
+            now=now,
+            clock=clock,
+            deadline=run.deadline(settings.effects_budget_minutes * 60, clock),
+        )
+    except Exception as error:  # the estimates lag a night; the stored ones and the site go on
+        detail = f"{type(error).__name__}: {error}"
+        log.warning("effects stage skipped: %s", detail)
+        with run.engine.begin() as connection:
+            record_dq(
+                connection,
+                run_id=run.run_id,
+                check="effects_skipped",
+                appid=None,
+                severity="warn",
+                detail=detail,
+            )
+        return {"skipped": detail[:500]}
+    return asdict(outcome)
 
 
 def _index(

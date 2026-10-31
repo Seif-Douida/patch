@@ -1,5 +1,6 @@
-# The causal default method (ADR-007), set by `patchpulse-ml causal benchmark`. Until the
-# real benchmark has run (Phase 4 Task 16): interrupted time series, not yet benchmarked.
-default_method: its
-effects_version: e1
-report_sha256: null
+# The causal default method (ADR-007), set by `patchpulse-ml causal benchmark`.
+default_method: synth
+effects_version: e2
+report_sha256: ea0bab630e36a6483a5e74c28a51f83c678e4321f52f79a4d85f5380a202d690
+validated: true
+spike_causal_ok: true

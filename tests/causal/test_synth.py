@@ -115,17 +115,33 @@ def test_conformal_covers_a_planted_effect() -> None:
     for seed in range(100):
         treated, donors = panel(1000 + seed)
         interval = conformal_interval(treated, donors, START, 14, "share")
-        assert interval is not None
+        assert not isinstance(interval, NoEstimate)
         covered += interval[0] <= -5.0 <= interval[1]
 
     assert 0.80 <= covered / 100 <= 0.98
     print(f"conformal: 100 intervals in {time.monotonic() - began:.1f} s")
 
 
-def test_conformal_reports_a_grid_edge() -> None:
-    treated, donors = panel(5)
+def test_conformal_range_holds_its_estimate() -> None:
+    # The ends are the first rejected grid points, so even a coarse grid keeps the estimate inside.
+    for seed in range(10):
+        treated, donors = panel(seed)
+        fit = synth_effect(treated, donors, START, 14, "share")
+        interval = conformal_interval(treated, donors, START, 14, "share", step=2.0)
+        assert isinstance(fit, SynthFit)
+        assert not isinstance(interval, NoEstimate)
+        assert interval[0] <= fit.effect <= interval[1], (seed, fit.effect, interval)
 
-    assert conformal_interval(treated, donors, START, 14, "share", span=2.0) is None
+
+def test_conformal_says_why_there_is_no_range() -> None:
+    treated, donors = panel(5)  # an effect of -5 points
+
+    wider = NoEstimate("interval wider than the grid")
+    assert conformal_interval(treated, donors, START, 14, "share", span=2.0) == wider
+    assert conformal_interval(treated, donors, START, 14, "share", span=6.0, step=2.0) == wider
+    assert conformal_interval(treated, donors, START, 14, "share", level=0.0) == NoEstimate(
+        "interval empty: no effect size passed the conformal test"
+    )
 
 
 def test_volume_is_a_percent_change() -> None:
@@ -151,3 +167,15 @@ def test_window_not_complete() -> None:
     assert synth_effect(treated, donors, START + timedelta(days=5), 14, "share") == NoEstimate(
         "window not complete"
     )
+
+
+def test_a_game_under_ten_reviews_a_day_gets_no_estimate() -> None:
+    # Spec §9.1, as interrupted time series applies it: descriptive analysis only.
+    thin, donors = panel(5, treated_n=8)
+    enough, _ = panel(5, treated_n=10)
+
+    for kind in ("share", "volume"):
+        assert synth_effect(thin, donors, START, 14, kind) == NoEstimate(
+            "too few reviews (median under 10 a day)"
+        )
+        assert isinstance(synth_effect(enough, donors, START, 14, kind), SynthFit)

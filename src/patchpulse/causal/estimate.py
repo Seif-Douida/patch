@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import StrEnum
@@ -117,17 +117,31 @@ class Estimate:
 
 
 def fingerprint(*parts: object) -> str:
-    """SHA-256 over the parts (arrays by dtype, shape and bytes; anything else by repr) and
-    EFFECTS_VERSION."""
+    """SHA-256 over the parts and EFFECTS_VERSION: arrays by dtype, shape and bytes, tuples and
+    lists item by item, sets in sorted order, anything else by repr. Each night is a new process
+    and a set's iteration order follows the process's string hashing, so sets are sorted."""
     digest = hashlib.sha256(EFFECTS_VERSION.encode())
     for part in parts:
-        if isinstance(part, np.ndarray):
-            digest.update(f"{part.dtype}{part.shape}".encode())
-            digest.update(np.ascontiguousarray(part).tobytes())
-        else:
-            digest.update(repr(part).encode())
-        digest.update(b"|")
+        for chunk in _chunks(part):
+            digest.update(chunk)
     return digest.hexdigest()
+
+
+def _chunks(part: object) -> Iterator[bytes]:
+    if isinstance(part, np.ndarray):
+        yield f"array{part.dtype}{part.shape}".encode()
+        yield np.ascontiguousarray(part).tobytes()
+    elif isinstance(part, set | frozenset):
+        yield f"set{len(part)}".encode()
+        for item in sorted(part, key=repr):
+            yield from _chunks(item)
+    elif isinstance(part, tuple | list):
+        yield f"seq{len(part)}".encode()
+        for item in part:
+            yield from _chunks(item)
+    else:
+        yield repr(part).encode()
+    yield b"|"
 
 
 def _clipped(series: DailySeries, first: date, last: date) -> DailySeries | None:
@@ -152,18 +166,24 @@ def flags_for(bundle: Bundle, horizon: int, inputs: EffectInputs) -> frozenset[s
     if bundle.start - timedelta(days=SALE_WINDOW_DAYS) < inputs.discounts_known_from:
         flags.add("discounts_unknown")
     series = inputs.series.get(bundle.appid)
-    if series is not None:
-        pre = _clipped(series, bundle.start - timedelta(days=FIT_DAYS), bundle.start - timedelta(1))
-        post = _clipped(series, bundle.start, bundle.start + timedelta(days=horizon - 1))
-        if pre is not None and post is not None and pre.observed.sum() >= 7:
-            before = np.log1p(pre.totals[pre.observed])
-            after = np.log1p(post.totals[post.observed])
-            # At least Poisson noise on the log scale: a perfectly steady volume still has a scale.
-            floor = 1.0 / np.sqrt(1.0 + float(pre.totals[pre.observed].mean()))
-            sd = max(float(before.std()), floor)
-            if (after > before.mean() + SPIKE_SDS * sd).any():
-                flags.add("volume_spike")
+    if series is not None and volume_spike(series, bundle.start, horizon):
+        flags.add("volume_spike")
     return frozenset(flags)
+
+
+def volume_spike(series: DailySeries, start: date, horizon: int) -> bool:
+    """A day in the horizon with reviews 3 SD above the 28 days before (log scale), given at least
+    7 days of data before. The benchmark splits its trials by this same test."""
+    pre = _clipped(series, start - timedelta(days=FIT_DAYS), start - timedelta(1))
+    post = _clipped(series, start, start + timedelta(days=horizon - 1))
+    if pre is None or post is None or pre.observed.sum() < 7:
+        return False
+    before = np.log1p(pre.totals[pre.observed])
+    after = np.log1p(post.totals[post.observed])
+    # At least Poisson noise on the log scale: a perfectly steady volume still has a scale.
+    floor = 1.0 / np.sqrt(1.0 + float(pre.totals[pre.observed].mean()))
+    sd = max(float(before.std()), floor)
+    return bool((after > before.mean() + SPIKE_SDS * sd).any())
 
 
 @dataclass(frozen=True)
@@ -270,17 +290,27 @@ def _synth_plan(
 ) -> _Plan:
     key = EstimateKey(bundle.bundle_id, outcome, Sample.ALL, horizon, Method.SYNTH)
     treated = inputs.series[bundle.appid]
-    pool = {a: s for a, s in {**inputs.donors, **inputs.series}.items() if a != bundle.appid}
-    groups = {a: genre_group(inputs.games[a].genres) for a in pool if a in inputs.games}
-    patch_days = {a: [p.day for p in inputs.patches.get(a, [])] for a in groups}
-    group = genre_group(inputs.games[bundle.appid].genres)
-    chosen = eligible_donors(bundle, group, groups, patch_days, pool)
     first = bundle.start - timedelta(days=FIT_DAYS)
     last = bundle.start + timedelta(days=POST_DAYS - 1)
-    donor_arrays = [(a, *_arrays(pool[a].span(first, last))) for a in chosen]
-    print_ = fingerprint(
-        key, bundle.patch_ids, clear, flags, *_arrays(_clipped(treated, first, last)), donor_arrays
-    )
+    # A comparison game qualifies on its days to start + 13 whatever the horizon, so until they
+    # have ended the row only says when; its fingerprint holds still until then.
+    ready = last <= inputs.last_complete_day
+    pool: dict[int, DailySeries] = {}
+    chosen: list[int] = []
+    if not clear:
+        print_ = fingerprint(key, bundle.patch_ids, "another patch in the fit window", flags)
+    elif not ready:
+        print_ = fingerprint(key, bundle.patch_ids, "waiting for", last, flags)
+    else:
+        pool = {a: s for a, s in {**inputs.donors, **inputs.series}.items() if a != bundle.appid}
+        groups = {a: genre_group(inputs.games[a].genres) for a in pool if a in inputs.games}
+        patch_days = {a: [p.day for p in inputs.patches.get(a, [])] for a in groups}
+        group = genre_group(inputs.games[bundle.appid].genres)
+        chosen = eligible_donors(bundle, group, groups, patch_days, pool)
+        donor_arrays = [(a, *_arrays(pool[a].span(first, last))) for a in chosen]
+        print_ = fingerprint(
+            key, bundle.patch_ids, flags, *_arrays(_clipped(treated, first, last)), donor_arrays
+        )
 
     def run() -> Estimate:
         if not clear:
@@ -290,6 +320,17 @@ def _synth_plan(
                 print_,
                 flags,
                 reason="the game had another patch in the 28 days before",
+            )
+        if not ready:
+            return _row(
+                bundle,
+                key,
+                print_,
+                flags,
+                reason=(
+                    "the comparison games are checked over the 14 days after the patch, which "
+                    f"end on {last.day} {last:%b %Y}"
+                ),
             )
         if len(chosen) < MIN_DONORS:
             return _row(
@@ -319,18 +360,20 @@ def _synth_plan(
             )
         interval = conformal_interval(treated, donors, bundle.start, horizon, kind)
         p_value = placebo_p_value(treated, donors, bundle.start, horizon, kind, fit)
+        no_range = interval if isinstance(interval, NoEstimate) else None
+        lo, hi = (None, None) if isinstance(interval, NoEstimate) else interval
         return _row(
             bundle,
             key,
             print_,
             flags,
             effect=fit.effect,
-            lo90=interval[0] if interval else None,
-            hi90=interval[1] if interval else None,
+            lo90=lo,
+            hi90=hi,
             p_value=p_value,
             pre_fit_rmse=fit.pre_rmse,
             donors=weights,
-            reason=None if interval else "interval wider than the grid",
+            reason=no_range.reason if no_range else None,
         )
 
     return _Plan(key, print_, run)

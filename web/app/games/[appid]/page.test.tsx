@@ -9,8 +9,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // the page's data, so they render nothing here.
 vi.mock("@/components/GameCharts", () => ({ GameCharts: () => null }));
 
-// Site data without aspects: schema 1, or schema 2 from a night without a model (nulls).
-function siteData(schema: 1 | 2): string {
+// Site data from a night without a model (aspect fields null): schema 2, or schema 3 with its
+// causal block and a patch that isn't a treatment candidate (no estimate).
+function siteData(schema: 2 | 3): string {
   const dir = mkdtempSync(path.join(tmpdir(), "site-data-"));
   const header = {
     schema_version: schema,
@@ -18,7 +19,7 @@ function siteData(schema: 1 | 2): string {
     generated_at: "2026-10-14T03:30:00Z",
     attribution: "Data from Steam",
   };
-  const v2 = schema === 2;
+  const v3 = schema === 3;
   const summary = {
     appid: 900001,
     name: "Example Arena (sample data)",
@@ -26,12 +27,25 @@ function siteData(schema: 1 | 2): string {
     first_date: "2026-10-12",
     last_date: "2026-10-13",
     latest: { days: 30, to: "2026-10-13", n: 4, share: 0.75 },
-    ...(v2 ? { top_complaint_30d: null } : {}),
+    top_complaint_30d: null,
   };
+  const causal = { default_method: "its", effects_version: "e2", benchmark_report: null };
   writeFileSync(
     path.join(dir, "index.json"),
-    JSON.stringify({ ...header, games: [summary], ...(v2 ? { aspect_model: null } : {}) }),
+    JSON.stringify({
+      ...header,
+      games: [summary],
+      aspect_model: null,
+      ...(v3 ? { causal } : {}),
+    }),
   );
+  const post = {
+    date: "2026-10-12",
+    title: "Dev blog (sample data)",
+    url: "https://example.com/blog",
+    type: "other",
+    treatment: false,
+  };
   mkdirSync(path.join(dir, "games"));
   writeFileSync(
     path.join(dir, "games", "900001.json"),
@@ -41,8 +55,8 @@ function siteData(schema: 1 | 2): string {
       name: summary.name,
       genres: summary.genres,
       series: [],
-      patches: [],
-      ...(v2 ? { aspects: null } : {}),
+      patches: [v3 ? { ...post, effect: null } : post],
+      aspects: null,
     }),
   );
   return dir;
@@ -55,7 +69,7 @@ describe("GamePage", () => {
   });
 
   it("game_page_renders_without_aspects", async () => {
-    for (const schema of [1, 2] as const) {
+    for (const schema of [2, 3] as const) {
       vi.stubEnv("SITE_DATA_DIR", siteData(schema));
       vi.resetModules(); // the data folder is read when lib/data loads
       const { default: GamePage } = await import("./page");

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 
 import numpy as np
 import pytest
 from causal_fixtures import DONORS, FIRST, TREATED, steady, world
 
+from patchpulse.causal import benchmark
 from patchpulse.causal.benchmark import (
     Choice,
     QuietWindow,
@@ -18,9 +20,10 @@ from patchpulse.causal.benchmark import (
     quiet_windows,
     render_benchmark_report,
     run_trials,
+    spike_verdict,
     summarise,
 )
-from patchpulse.causal.its import ItsResult, calibrated_its_effect
+from patchpulse.causal.its import ItsResult, NoEstimate, calibrated_its_effect
 from patchpulse.causal.series import DailySeries
 
 
@@ -96,6 +99,8 @@ def trial(method: str, effect: float, estimate: float, lo: float, hi: float, **k
         "hi90": hi,
         "p_value": None,
         "fallback": False,
+        "volume_spike": False,
+        "pair": 0,
     }
     values.update(kw)
     return Trial(**values)  # type: ignore[arg-type]
@@ -129,9 +134,9 @@ def calibrated(method: str, *, miss: int, alarms: int, error: float) -> list[Tri
     trials = []
     for i in range(20):
         lo, hi = (-10.0, -9.0) if i < miss else (-8.0, -2.0)
-        trials.append(trial(method, -5.0, -5.0 + error, lo, hi))
+        trials.append(trial(method, -5.0, -5.0 + error, lo, hi, pair=2 * i))
         zlo, zhi = (0.5, 1.0) if i < alarms else (-1.0, 1.0)
-        trials.append(trial(method, 0.0, error, zlo, zhi))
+        trials.append(trial(method, 0.0, error, zlo, zhi, pair=2 * i + 1))
     return trials
 
 
@@ -185,6 +190,11 @@ def test_trials_cover_each_cell_and_method() -> None:
     cells = {(t.method, t.effect_pts) for t in trials}
     assert cells == {("its", 0.0), ("its", -5.0), ("synth", 0.0), ("synth", -5.0)}
     assert len(trials) == 12
+    # Each injected series and horizon: one row per method, sharing a pair id.
+    pairs: dict[int, list[str]] = {}
+    for t in trials:
+        pairs.setdefault(t.pair, []).append(t.method)
+    assert sorted(sorted(methods) for methods in pairs.values()) == [["its", "synth"]] * 6
     assert all(t.estimate is None or np.isfinite(t.estimate) for t in trials)
     assert all(t.estimate is not None for t in trials if t.method == "its")  # 11-12 quiet weeks
     assert {t.truth for t in trials if t.effect_pts == -5.0} == {-5.0}
@@ -216,6 +226,36 @@ def test_benchmark_serves_the_calibrated_interval() -> None:
     assert (its.estimate, its.lo90, its.hi90) == (served.effect, served.lo90, served.hi90)
 
 
+def test_benchmark_steps_at_earlier_bundles_as_the_nightly_estimates_do() -> None:
+    inputs = world()
+    series = inputs.series[TREATED]
+    patches = [at(80), at(83)]  # one bundle (within 7 days) inside the 56-day pre-period
+
+    trials = run_trials(
+        [QuietWindow(TREATED, at(130))],
+        {TREATED: series},
+        inputs.donors,
+        {a: inputs.games[a].genres for a in [*DONORS, TREATED]},
+        {TREATED: patches},
+        effects=(0.0,),
+        shapes=("step",),
+        per_cell=1,
+        seed=1,
+        horizons=(14,),
+        outcomes=("positive_share",),
+        sale_days=frozenset(),
+    )
+
+    busy = frozenset(patches)
+    served = calibrated_its_effect(series, at(130), 14, [at(80)], "share", busy_days=busy)
+    per_patch = calibrated_its_effect(series, at(130), 14, patches, "share", busy_days=busy)
+    assert isinstance(served, ItsResult)
+    assert isinstance(per_patch, ItsResult)
+    assert served.effect != per_patch.effect
+    (its,) = [t for t in trials if t.method == "its"]
+    assert (its.estimate, its.lo90, its.hi90) == (served.effect, served.lo90, served.hi90)
+
+
 def test_ramp_truth_is_the_horizons_average() -> None:
     inputs = world()
     trials = run_trials(
@@ -238,6 +278,37 @@ def test_ramp_truth_is_the_horizons_average() -> None:
     assert truths[14] == pytest.approx(-7.0 * 11 / 14)
 
 
+def test_trials_carry_the_sites_volume_spike_flag() -> None:
+    inputs = world()
+    base = inputs.series[TREATED]
+    totals, positives = base.totals.copy(), base.positives.copy()
+    i = base.index_of(at(112))  # the third day of the window starting at(110)
+    totals[i], positives[i] = totals[i] * 5, positives[i] * 5
+    jumped = replace(base, totals=totals, positives=positives)
+    groups = {a: inputs.games[a].genres for a in [*DONORS, TREATED]}
+
+    def flags(series: DailySeries) -> set[bool]:
+        trials = run_trials(
+            [QuietWindow(TREATED, at(110))],
+            {TREATED: series},
+            inputs.donors,
+            groups,
+            {},
+            sale_days=frozenset(),
+            effects=(0.0,),
+            volume_effects=(-25.0,),  # thinned, the jump is still a spike
+            shapes=("step",),
+            per_cell=1,
+            seed=7,
+            horizons=(7, 14),
+        )
+        assert {t.outcome for t in trials} == {"positive_share", "volume"}
+        return {t.volume_spike for t in trials}
+
+    assert flags(jumped) == {True}
+    assert flags(base) == {False}
+
+
 def test_placebo_in_space_runs_on_quiet_comparison_games() -> None:
     inputs = world()
     groups = {a: inputs.games[a].genres for a in DONORS}
@@ -247,6 +318,7 @@ def test_placebo_in_space_runs_on_quiet_comparison_games() -> None:
     assert {t.appid for t in trials} <= set(DONORS)
     assert {t.effect_pts for t in trials} == {0.0}
     assert {t.method for t in trials} == {"its", "synth"}
+    assert {t.volume_spike for t in trials} == {False}  # steady comparison games
 
 
 def test_report_states_the_rule_and_the_limitations() -> None:
@@ -270,3 +342,113 @@ def test_report_states_the_rule_and_the_limitations() -> None:
     assert "calibrated on quiet dates in the game's own past" in report
     for limitation in ("Aspect", "rules classifier", "30 Sep 2026"):
         assert limitation in report
+
+
+def test_report_splits_the_metrics_by_volume_spike() -> None:
+    calm = calibrated("its", miss=2, alarms=1, error=1.0)
+    spiky = [
+        replace(t, volume_spike=True) for t in calibrated("its", miss=10, alarms=10, error=3.0)
+    ]
+    trials = calm + spiky
+
+    report = render_benchmark_report(
+        summarise(trials), choose_default(trials), trials, [], {"seed": 7}
+    )
+
+    assert "## Windows with a volume spike" in report
+    assert "50% of the trials" in report
+    assert "| Positive share | its | no | 40 | +1.00 | 1.00 | 90% | 5% |" in report
+    assert "| Positive share | its | yes | 40 | +3.00 | 3.00 | 50% | 50% |" in report
+    # Phase 5's V4 reads this verdict (Seif's option C, 25 Oct): 10 of 20 spike trials at 0
+    # raised an alarm, so causal wording stays blocked on spike windows.
+    assert (
+        "Causal wording on volume-spike windows (Phase 5): blocked. The default method raised "
+        "false alarms on 50% of 20 spike-window trials at an injected 0 (allowed: at most 10% "
+        "over at least 20 trials)." in report
+    )
+
+
+def test_synth_without_a_range_is_scored_as_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The site shows interrupted time series where synthetic control has no 90% range.
+    no_range = NoEstimate("interval wider than the grid")
+    monkeypatch.setattr(benchmark, "conformal_interval", lambda *args, **kwargs: no_range)
+    inputs = world()
+    groups = {a: inputs.games[a].genres for a in [*DONORS, TREATED]}
+
+    trials = run_trials(
+        [QuietWindow(TREATED, at(110))],
+        {TREATED: inputs.series[TREATED]},
+        inputs.donors,
+        groups,
+        {},
+        sale_days=frozenset(),
+        effects=(-5.0,),
+        shapes=("step",),
+        per_cell=1,
+        seed=7,
+        horizons=(14,),
+        outcomes=("positive_share",),
+    )
+
+    its, synth = sorted(trials, key=lambda t: t.method)
+    assert (synth.estimate, synth.lo90, synth.hi90) == (its.estimate, its.lo90, its.hi90)
+    assert synth.fallback
+
+
+def test_report_compares_the_methods_on_the_same_trials() -> None:
+    # The rule uses each method's own trials with an estimate; interrupted time series has none
+    # where the quiet history is too short, so the two are also compared on the shared trials.
+    no_history = {0, 2, 4, 6}  # four of the -5 trials, two of them synthetic control's misses
+    its = [
+        replace(t, estimate=None, lo90=None, hi90=None) if t.pair in no_history else t
+        for t in calibrated("its", miss=2, alarms=1, error=1.0)
+    ]
+    trials = its + calibrated("synth", miss=2, alarms=1, error=0.5)
+
+    report = render_benchmark_report(
+        summarise(trials), choose_default(trials), trials, [], {"seed": 7}
+    )
+
+    assert "## Both methods on the same trials" in report
+    assert "36 positive-share trials where both methods had an estimate" in report
+    assert "| its | 36 | 100% | 5% | 1.00 |" in report
+    assert "| synth | 36 | 100% | 5% | 0.50 |" in report  # 90% coverage on its own 40
+
+
+def test_spike_verdict_needs_twenty_trials_and_ten_percent() -> None:
+    def at_zero(
+        n: int,
+        alarms: int,
+        *,
+        method: str = "synth",
+        outcome: str = "positive_share",
+        spike: bool = True,
+    ) -> list[Trial]:
+        bounds = [(0.2, 0.9) if i < alarms else (-1.0, 1.0) for i in range(n)]
+        return [
+            trial(method, 0.0, 0.5, lo, hi, outcome=outcome, volume_spike=spike)
+            for lo, hi in bounds
+        ]
+
+    unscored = replace(trial("synth", 0.0, 0.5, -1.0, 1.0), estimate=None, lo90=None, hi90=None)
+    noise = [
+        *at_zero(5, 5, spike=False),  # no spike: not counted
+        *[trial("synth", -5.0, -4.0, -6.0, -2.0, volume_spike=True) for _ in range(5)],  # not 0
+        *at_zero(5, 5, method="its"),  # another method
+        *at_zero(5, 5, outcome="volume"),  # another outcome
+        replace(unscored, volume_spike=True),  # no estimate
+    ]
+
+    few = spike_verdict(at_zero(19, 0) + noise, "synth")
+    ok = spike_verdict(at_zero(20, 2) + noise, "synth")
+    high = spike_verdict(at_zero(20, 3) + noise, "synth")
+    none = spike_verdict(noise, "synth")
+
+    assert (few.trials, few.false_alarms, few.allowed) == (19, 0.0, False)
+    assert ok.trials == 20
+    assert ok.false_alarms == pytest.approx(0.10)
+    assert ok.allowed
+    assert high.trials == 20
+    assert high.false_alarms == pytest.approx(0.15)
+    assert not high.allowed
+    assert (none.trials, none.false_alarms, none.allowed) == (0, None, False)

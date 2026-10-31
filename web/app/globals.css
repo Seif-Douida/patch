@@ -682,8 +682,31 @@ a:hover {
   white-space: nowrap;
 }
 
-.patch-aspects + .method-note {
+.method-notes {
   margin: 0 0 3rem;
+}
+
+.method-notes > .method-note {
+  margin: 0 0 0.75rem;
+}
+
+/* The patch's estimated effect (schema 3): a sentence in the text's ink, never a series colour. */
+.patch-effect {
+  margin: 0.6rem 0 0;
+  max-width: 44rem;
+}
+
+.patch-effect-line {
+  margin: 0;
+  color: var(--ink);
+}
+
+.patch-effect-notes {
+  margin: 0.3rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--step--1);
+  color: var(--ink-2);
 }
 
 .patch-aspect-notes {

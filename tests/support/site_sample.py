@@ -5,7 +5,8 @@ nightly job publishes; `tests/export/test_web_fixtures.py` fails if they drift. 
 numbers are invented (no Steam data, no review text): two fictional titles over 120 days, one
 with a patch that drops sentiment and a Steam sale that lifts volume. Aspect counts are invented
 too: the first two weeks aren't scored yet (as during a backlog), and the bad patch brings a wave
-of gameplay-balance complaints.
+of gameplay-balance complaints. So are the patch estimates (schema 3), one of each kind the site
+explains: an effect, an effect during a sale, too few comparison games, a window not yet over.
 
 Regenerate after changing the exporter: `uv run python tests/support/site_sample.py web/fixtures`
 """
@@ -23,6 +24,8 @@ from patchpulse.export.site import (
     AspectModel,
     Aspects,
     DayRow,
+    EffectRow,
+    Effects,
     GameRow,
     PatchRow,
     shape_site_export,
@@ -135,6 +138,7 @@ def sample_files() -> dict[str, bytes]:
             "https://example.com/arena/2-0",
             "major_update",
             True,
+            "5001",
         ),
         PatchRow(
             900001,
@@ -143,6 +147,16 @@ def sample_files() -> dict[str, bytes]:
             "https://example.com/arena/2-0-1",
             "hotfix",
             False,
+            "5002",
+        ),
+        PatchRow(
+            900001,
+            datetime(2026, 9, 24, 16, 0, tzinfo=UTC),
+            "Patch 2.1: balance changes",
+            "https://example.com/arena/2-1",
+            "patch",
+            True,
+            "5003",
         ),
         PatchRow(
             900002,
@@ -151,6 +165,16 @@ def sample_files() -> dict[str, bytes]:
             "https://example.com/colony/0-9-4",
             "patch",
             True,
+            "5011",
+        ),
+        PatchRow(
+            900002,
+            datetime(2026, 8, 20, 12, 0, tzinfo=UTC),
+            "Patch 0.9.5",
+            "https://example.com/colony/0-9-5",
+            "patch",
+            True,
+            "5012",
         ),
         PatchRow(
             900002,
@@ -159,6 +183,7 @@ def sample_files() -> dict[str, bytes]:
             "https://example.com/colony/blog",
             "other",
             False,
+            "5013",
         ),
     ]
     return shape_site_export(
@@ -168,7 +193,29 @@ def sample_files() -> dict[str, bytes]:
         data_version=42,
         generated_at=GENERATED_AT,
         aspects=Aspects(MODEL, aspect_days),
+        effects=EFFECTS,
     )
+
+
+TOO_FEW = "too few comparison games without their own patch (3 of 5 needed)"
+# Invented estimates, served as the nightly job serves them (the default method's row per bundle
+# and horizon). Update 2.0's drop; Patch 0.9.4 during the sale; Patch 0.9.5 without enough
+# comparison games (and too little quiet history for the fallback); Patch 2.1's 7 days end after
+# the sample's night, so it has none.
+EFFECTS = Effects(
+    default_method="synth",
+    effects_version="e2",
+    benchmark_report="reports/causal/benchmark.md",
+    validated=True,
+    rows=[
+        EffectRow("5001", 7, -12.4, -16.0, -8.9, "synth", frozenset(), None),
+        EffectRow("5001", 14, -9.8, -13.1, -6.4, "synth", frozenset(), None),
+        EffectRow("5011", 7, 1.1, -2.9, 5.0, "synth", frozenset({"confounded"}), None),
+        EffectRow("5011", 14, -0.6, -4.4, 3.1, "synth", frozenset({"confounded"}), None),
+        EffectRow("5012", 7, None, None, None, "synth", frozenset(), TOO_FEW),
+        EffectRow("5012", 14, None, None, None, "synth", frozenset(), TOO_FEW),
+    ],
+)
 
 
 def write(directory: Path) -> None:
