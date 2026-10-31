@@ -2,9 +2,10 @@
 
 Tracked games' daily series come from the pulled snapshot (each review's date and thumbs; never
 its text), comparison games' from the dbt seed, sale days from the sale calendar seed, patch
-dates from the snapshot and genre groups from config/games.yaml. The real run writes
-reports/causal/benchmark.md, logs the MLflow experiment `causal` and writes config/causal.yaml; a
-dry run (20 trials a cell by default) writes only data/local/causal-benchmark-dry-run.md.
+dates from the snapshot and genre groups from config/games.yaml. The real run checks MLflow before
+its trials, writes reports/causal/benchmark.md and config/causal.yaml, then logs the MLflow
+experiment `causal`; a dry run (20 trials a cell by default) writes only
+data/local/causal-benchmark-dry-run.md.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import csv
 import hashlib
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -22,8 +24,10 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import mlflow
 import numpy as np
 import pandas as pd
+from mlflow.exceptions import MlflowException
 
 from patchpulse.causal.benchmark import (
     choose_default,
@@ -39,7 +43,7 @@ from patchpulse.causal.estimate import EFFECTS_VERSION
 from patchpulse.causal.series import DailySeries, from_counts
 from patchpulse.config import LabSettings
 from patchpulse.ingest.games import GAMES_FILE, load_games
-from patchpulse.models.tracking import tracking_run
+from patchpulse.models.tracking import tracking_run, use_tracking
 
 log = logging.getLogger("patchpulse.causal")
 
@@ -48,6 +52,13 @@ CALENDAR_PATH = Path("dbt/seeds/steam_sale_calendar.csv")
 REPORT_PATH = Path("reports/causal/benchmark.md")
 DRY_RUN_REPORT = "causal-benchmark-dry-run.md"
 DRY_RUN_PER_CELL = 20
+EXPERIMENT = "causal"
+
+
+def _param_name(label: str) -> str:
+    """A report label as an MLflow param name, which allows no brackets: "snapshot (max run id)"
+    becomes "snapshot_max_run_id"."""
+    return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 
 
 @dataclass(frozen=True)
@@ -108,6 +119,10 @@ def sale_days(path: Path) -> frozenset[date]:
 
 def run_benchmark(paths: BenchmarkPaths, *, per_cell: int, seed: int, dry_run: bool) -> int:
     began = time.monotonic()
+    if not dry_run:
+        # The trials take over an hour: a missing setting or a refused login fails now.
+        use_tracking()
+        mlflow.set_experiment(EXPERIMENT)
     games = load_games(paths.games)
     groups = {g.appid: list(g.genres) for g in games}
     tracked = [g.appid for g in games if g.tracked]
@@ -154,7 +169,7 @@ def run_benchmark(paths: BenchmarkPaths, *, per_cell: int, seed: int, dry_run: b
     report = render_benchmark_report(summarise(trials), choice, trials, placebos, meta)
     target = paths.data_dir / DRY_RUN_REPORT if dry_run else paths.report
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(report, encoding="utf-8")
+    target.write_text(report, encoding="utf-8", newline="\n")  # as git stores it: the config's hash
     log.info(
         "benchmark: %d trials, %d placebos, default %s (%s) in %.0f s; report %s",
         len(trials),
@@ -166,29 +181,34 @@ def run_benchmark(paths: BenchmarkPaths, *, per_cell: int, seed: int, dry_run: b
     )
     if dry_run:
         return 0
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    with tracking_run("causal", params={**meta, "default_method": choice.method}):
-        import mlflow
-
-        mlflow.log_metrics(
-            {
-                f"{method}_{name}": value
-                for method, row in choice.table.items()
-                for name, value in row.items()
-                if not np.isnan(value)
-            }
-        )
-        mlflow.log_artifact(str(target))
+    # The config before MLflow: the nightly job reads the config, MLflow only mirrors the run.
     write_causal_config(
         CausalConfig(
             choice.method,
             EFFECTS_VERSION,
-            digest,
+            hashlib.sha256(target.read_bytes()).hexdigest(),
             validated=choice.validated,
             spike_causal_ok=spike_verdict(trials, choice.method).allowed,
         ),
         paths.config,
     )
+    params = {_param_name(label): value for label, value in meta.items()}
+    try:
+        with tracking_run(EXPERIMENT, params={**params, "default_method": choice.method}):
+            mlflow.log_metrics(
+                {
+                    f"{method}_{name}": value
+                    for method, row in choice.table.items()
+                    for name, value in row.items()
+                    if not np.isnan(value)
+                }
+            )
+            mlflow.log_artifact(str(target))
+    except (MlflowException, OSError):
+        log.exception(
+            "benchmark: the report and %s are written; MLflow logging failed", paths.config
+        )
+        return 1
     return 0
 
 

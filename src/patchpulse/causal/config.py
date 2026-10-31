@@ -58,4 +58,5 @@ def write_causal_config(config: CausalConfig, path: Path = CAUSAL_CONFIG_PATH) -
             sort_keys=False,
         ),
         encoding="utf-8",
+        newline="\n",
     )
