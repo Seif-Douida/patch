@@ -7,18 +7,22 @@ import os
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
 from qdrant_client import QdrantClient
+from review_index import create_index_tables, index_row, sync, write_target, write_texts
+from sqlalchemy import Engine
 from tiny_encoder import write_tiny_embedder
 
 from patchpulse.models.cli import main
 from patchpulse.retrieval import cli, load, queries, runs
 from patchpulse.retrieval.benchmark import EmbedderSpeed
-from patchpulse.retrieval.embedders import CANDIDATES
+from patchpulse.retrieval.embedders import CANDIDATES, OnnxEmbedder
 from patchpulse.retrieval.pin import pin_for, write_pin
+from patchpulse.retrieval.qdrant import ensure_collection
 
 SPEED = Path("reports/retrieval/embedder-speed.json")
 SECRET_TEXT = "a review nobody may publish " * 5
@@ -192,6 +196,64 @@ def test_load_command_uploads_the_pinned_encoder_to_the_cloud(
     write_pin(pin.model_copy(update={"embedder_json_sha256": "f" * 64}))
     assert main(["retrieval", "load", "--target", "cloud"]) == 1
     assert "isn't the pinned encoder" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+@pytest.mark.qdrant
+def test_catch_up_command_asks_then_syncs_from_the_laptop(
+    migrated_engine: Engine,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qdrant: QdrantClient,
+    new_collection: Callable[[], str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The local containers stand in for Azure SQL and the free cluster (runbook A, 1 Nov): the
+    # nights have synced one review, three are behind.
+    from patchpulse.db import engine as db_engine
+
+    tiny = workspace / "build" / "encoders" / "e5-small-int8"
+    write_tiny_embedder(tiny, replace(CANDIDATES["e5-small"], dims=4, max_tokens=16))
+    monkeypatch.setattr(cli, "embedder_dir", lambda name: tiny)
+    collection = new_collection()
+    pin = pin_for(tiny, 1).model_copy(update={"collection": collection})
+    write_pin(pin)
+    ensure_collection(qdrant, collection, 4)
+    create_index_tables(migrated_engine)
+    old = index_row(100, created=datetime(2026, 9, 1))
+    write_target(migrated_engine, [old])
+    write_texts(migrated_engine, {100: SECRET_TEXT})
+    sync(migrated_engine, qdrant, collection, OnnxEmbedder(tiny), run_id=1)
+    behind = [index_row(rid, created=datetime(2026, 10, rid)) for rid in range(1, 4)]
+    write_target(migrated_engine, [old, *behind])
+    write_texts(migrated_engine, dict.fromkeys(range(1, 4), SECRET_TEXT))
+    monkeypatch.setattr(db_engine, "make_entra_engine", lambda host, database: migrated_engine)
+
+    assert main(["retrieval", "catch-up", "--yes"]) == 2
+    assert "PP_QDRANT_URL" in capsys.readouterr().err
+    monkeypatch.setenv(
+        "PP_QDRANT_URL", os.environ.get("PP_TEST_QDRANT_URL", "http://localhost:6333")
+    )
+    monkeypatch.setenv(
+        "PP_QDRANT_API_KEY", os.environ.get("PP_TEST_QDRANT_API_KEY") or "unused-locally"
+    )
+    assert main(["retrieval", "catch-up", "--yes"]) == 2
+    assert "PP_PULL_HOST" in capsys.readouterr().err
+    monkeypatch.setenv("PP_PULL_HOST", "sql.invalid")
+    assert main(["retrieval", "catch-up"]) == 2  # asks before waking Azure SQL
+    assert "--yes" in capsys.readouterr().err
+    # Another build than the pinned one is refused before anything is read or sent.
+    write_pin(pin.model_copy(update={"embedder_json_sha256": "f" * 64}))
+    assert main(["retrieval", "catch-up", "--yes"]) == 1
+    assert "isn't the one config/retrieval.yaml pins" in capsys.readouterr().err
+    write_pin(pin)
+
+    assert main(["retrieval", "catch-up", "--yes", "--minutes", "5"]) == 0
+
+    assert qdrant.count(collection, exact=True).count == 4
+    captured = capsys.readouterr()
+    assert f"{collection}: caught up" in captured.out
+    assert "nobody may publish" not in captured.out + captured.err
 
 
 def frozen_queries(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
