@@ -32,9 +32,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 from sqlalchemy import Engine
 
 from patchpulse.config import Settings
-from patchpulse.models.artifact import sha256_file
-from patchpulse.models.text import CLEANING_VERSION
-from patchpulse.retrieval.embedders import MANIFEST_FILE, OnnxEmbedder
+from patchpulse.retrieval.embedders import OnnxEmbedder
 from patchpulse.retrieval.pin import PIN_PATH, read_pin
 from patchpulse.retrieval.qdrant import make_client
 from patchpulse.retrieval.reconcile import (
@@ -44,9 +42,15 @@ from patchpulse.retrieval.reconcile import (
     reconcile,
     repair,
 )
-from patchpulse.retrieval.rules import INDEX_RULES_VERSION
 from patchpulse.retrieval.search import search
-from patchpulse.retrieval.sync import SyncError, SyncStats, apply_sync, plan_sync, read_back
+from patchpulse.retrieval.sync import (
+    SyncError,
+    SyncStats,
+    apply_sync,
+    check_pin,
+    plan_sync,
+    read_back,
+)
 
 log = logging.getLogger("patchpulse.pipeline.indexing")
 
@@ -110,19 +114,7 @@ def run_index(
     if settings.qdrant_url is None or settings.encoder_dir is None:
         raise ValueError("the index stage needs PP_QDRANT_URL and PP_ENCODER_DIR")
     pin = read_pin(pin_path)
-    # Design D2: new index rules or a new cleaning build a new collection, never rewrite this one.
-    if pin.rules_version != INDEX_RULES_VERSION:
-        raise SyncError(
-            f"{pin.collection} has rules version {pin.rules_version}, the code "
-            f"{INDEX_RULES_VERSION}"
-        )
-    if pin.cleaning_version != CLEANING_VERSION:
-        raise SyncError(
-            f"{pin.collection} has cleaning version {pin.cleaning_version}, the code "
-            f"{CLEANING_VERSION}"
-        )
-    if sha256_file(settings.encoder_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
-        raise SyncError(f"the encoder in PP_ENCODER_DIR isn't the one {pin_path} pins")
+    check_pin(pin, settings.encoder_dir, pin_path)
     embedder = index_embedder(settings.encoder_dir)
     client = make_client(settings.qdrant_url, settings.qdrant_api_key)
     try:

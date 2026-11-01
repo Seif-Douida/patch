@@ -12,6 +12,11 @@
                          `--target cloud`: upload the pinned encoder's vectors to the free
                          cluster (PP_QDRANT_URL, PP_QDRANT_API_KEY) as the pin's collection,
                          check the count, then point the pin's alias at it.
+    retrieval catch-up --yes [--minutes 120]  After a large backlog (runbook A): the nightly's
+                         sync from this machine, against Azure SQL (signed in as for `pull`)
+                         and the free cluster over gRPC, embedding on every CPU thread; in
+                         5-minute chunks, each only while no night runs and the cluster is
+                         calm (retrieval/catchup.py). Stops when caught up or at --minutes.
     retrieval queries check   Check data/retrieval/queries.csv and count its queries.
     retrieval queries freeze  Check it and record its SHA-256 (queries.sha256); runs and the report
                               refuse queries that aren't frozen or changed since.
@@ -93,6 +98,10 @@ RUNS_DIR = Path("data/retrieval/runs")
 BATCHES_DIR = "retrieval_batches"  # under the data dir (data/local)
 REJUDGE_DIR = "retrieval_rejudge"  # judged again after a guidelines revision (D7, data/local)
 PILOT_DIR = "retrieval_pilot"  # the relevance pilot, judged and shown to Seif (data/local)
+CATCH_UP_COST = (
+    "`catch-up` keeps Azure SQL awake while it runs, and until it pauses after: about 50 of the "
+    "month's 100,000 free vCore-s a minute. Run it again with --yes to go ahead."
+)
 
 
 def embedder_dir(name: str) -> Path:
@@ -119,6 +128,15 @@ def register(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     load.add_argument(
         "--models",
         help="comma-separated candidate names (local: all by default; cloud: the pinned one only)",
+    )
+    catch_up = retrieval.add_parser(
+        "catch-up", help="sync the free cluster from this machine after a large backlog"
+    )
+    catch_up.add_argument(
+        "--minutes", type=int, default=120, help="stop after this long (default 120)"
+    )
+    catch_up.add_argument(
+        "--yes", action="store_true", help="go ahead: it keeps Azure SQL awake while it runs"
     )
     queries = retrieval.add_parser("queries", help="the eval's queries").add_subparsers(
         dest="queries_command", required=True
@@ -191,6 +209,8 @@ def run(args: argparse.Namespace, settings: LabSettings) -> int:
         return _embed(settings, args.model)
     if args.retrieval_command == "load" and args.target == "cloud":
         return _load_cloud(settings, args.models)
+    if args.retrieval_command == "catch-up":
+        return _catch_up(settings, minutes=args.minutes, yes=args.yes)
     models = getattr(args, "models", None) or ",".join(CANDIDATES)
     names = [name.strip() for name in models.split(",") if name.strip()]
     unknown = [name for name in names if name not in CANDIDATES]
@@ -334,6 +354,79 @@ def _load_cloud(settings: LabSettings, models: str | None) -> int:
         client.close()
     print(f"{pin.collection}: {points} points; alias {pin.alias} points at it")
     return 0
+
+
+def _catch_up(settings: LabSettings, *, minutes: int, yes: bool) -> int:
+    """The nightly's sync from this machine (runbook A): Azure SQL as the person signed in to
+    `az` (like `pull`), the free cluster over gRPC, the pinned encoder on every CPU thread."""
+    import time
+
+    from patchpulse.db.engine import make_entra_engine
+    from patchpulse.models.snapshot import explain_pull_error
+    from patchpulse.retrieval.catchup import CloudCluster, catch_up
+    from patchpulse.retrieval.pin import PIN_PATH, read_pin
+    from patchpulse.retrieval.qdrant import make_client
+    from patchpulse.retrieval.sync import SyncError, check_pin
+
+    key = settings.qdrant_api_key.get_secret_value() if settings.qdrant_api_key else ""
+    if not settings.qdrant_url or not key:
+        print("patchpulse-ml: set PP_QDRANT_URL and PP_QDRANT_API_KEY in .env", file=sys.stderr)
+        return 2
+    if settings.pull_host is None:
+        print("patchpulse-ml: set PP_PULL_HOST (the Azure SQL server) in .env", file=sys.stderr)
+        return 2
+    if not yes:
+        print(f"patchpulse-ml: {CATCH_UP_COST}", file=sys.stderr)
+        return 2
+    if not PIN_PATH.is_file():
+        print(
+            "patchpulse-ml: no pin: run `patchpulse-ml retrieval encoder register`", file=sys.stderr
+        )
+        return 2
+    pin = read_pin()
+    model_dir = embedder_dir(pin.embedder)
+    try:
+        check_pin(pin, model_dir, PIN_PATH)
+    except SyncError as error:
+        print(f"patchpulse-ml: {error}", file=sys.stderr)
+        return 1
+    engine = make_entra_engine(settings.pull_host, settings.pull_database)
+    # gRPC: the home connection is the limit, and JSON vectors are 5.6 times larger.
+    client = make_client(settings.qdrant_url, settings.qdrant_api_key, grpc=True)
+    try:
+        if not client.collection_exists(pin.collection):
+            print(
+                f"patchpulse-ml: {pin.collection} isn't on the cluster (runbook B)", file=sys.stderr
+            )
+            return 1
+        outcome = catch_up(
+            client,
+            engine,
+            OnnxEmbedder(model_dir),
+            CloudCluster(client, settings.qdrant_url, settings.qdrant_api_key, pin.collection),
+            collection=pin.collection,
+            deadline=time.monotonic() + minutes * 60,
+            clock=time.monotonic,
+            sleep=time.sleep,
+        )
+    except SyncError as error:
+        print(f"patchpulse-ml: {error}", file=sys.stderr)
+        return 1
+    except Exception as error:
+        fix = explain_pull_error(error)
+        if fix is None:
+            raise
+        print(f"patchpulse-ml: {fix}", file=sys.stderr)
+        return 1
+    finally:
+        client.close()
+        engine.dispose()
+    print(
+        f"{pin.collection}: {outcome.stopped.value}; {outcome.upserted} upserted, "
+        f"{outcome.updated} updated, {outcome.deleted} deleted in {outcome.chunks} chunk(s); "
+        f"{outcome.remaining} left"
+    )
+    return 0 if outcome.stopped.ok else 1
 
 
 def _report_cloud(settings: LabSettings) -> int:
