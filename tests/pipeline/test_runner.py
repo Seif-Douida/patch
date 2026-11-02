@@ -20,6 +20,7 @@ from pydantic import SecretStr
 from qdrant_client import QdrantClient
 from review_index import create_index_tables, index_row, write_target, write_texts
 from sqlalchemy import Connection, Engine, text
+from sqlalchemy.exc import ProgrammingError
 from tiny_encoder import write_tiny_embedder
 from toy_reviews import toy_reviews
 
@@ -34,12 +35,14 @@ from patchpulse.export.site import AspectModel
 from patchpulse.ingest.coverage import REREAD, start_of_day
 from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
+from patchpulse.pipeline import runner
 from patchpulse.pipeline.dbt import DbtResult
 from patchpulse.pipeline.effects import EffectsOutcome
 from patchpulse.pipeline.indexing import IndexOutcome, run_index
 from patchpulse.pipeline.reports import ReportsOutcome, run_reports
 from patchpulse.pipeline.runner import (
     BASIC_REPORTS,
+    DBT_RETRY_WAIT_S,
     NIGHT_RESERVE_S,
     NIGHT_SECONDS,
     PipelineError,
@@ -831,7 +834,7 @@ class FakeEffects:
     """The effects stage's work, replaced: each call returns (or raises) the next outcome."""
 
     outcomes: list[EffectsOutcome | Exception]
-    deadlines: list[float] = field(default_factory=list)
+    limits: list[tuple[float, float]] = field(default_factory=list)  # (budget_s, night_end)
 
     def __call__(
         self,
@@ -840,9 +843,10 @@ class FakeEffects:
         run_id: int,
         now: datetime,
         clock: Callable[[], float],
-        deadline: float,
+        budget_s: float,
+        night_end: float,
     ) -> EffectsOutcome:
-        self.deadlines.append(deadline)
+        self.limits.append((budget_s, night_end))
         next_outcome = self.outcomes.pop(0)
         if isinstance(next_outcome, Exception):
             raise next_outcome
@@ -867,21 +871,16 @@ def test_effects_failure_is_a_warning_and_the_night_publishes(env: Env) -> None:
     assert finding.detail.startswith("RuntimeError")
 
 
-@pytest.mark.parametrize(
-    ("later", "deadline"),
-    [(0.0, 2 * 60), (NIGHT_END - 60, NIGHT_END)],
-    ids=["early: its own 2 minutes", "late: the night's end"],
-)
-def test_effects_stage_gets_its_budget_within_the_night(
-    env: Env, later: float, deadline: float
-) -> None:
+def test_effects_stage_gets_its_budget_and_the_nights_end(env: Env) -> None:
+    # The stage sets its own deadline once its inputs are read (pipeline/effects.py), never past
+    # the night's end.
     effects = FakeEffects(
         [EffectsOutcome(estimated=3, written=45, unchanged=1, remaining=0, failed=0)]
     )
 
-    result = env.run(dbt=ok_dbt, export=stub_export, effects=effects, clock=LateClock(later))
+    result = env.run(dbt=ok_dbt, export=stub_export, effects=effects, clock=LateClock(600.0))
 
-    assert effects.deadlines == [deadline]
+    assert effects.limits == [(2 * 60, NIGHT_END)]
     assert result.stages["effects"] == {
         "estimated": 3,
         "written": 45,
@@ -903,7 +902,7 @@ def test_effects_stage_is_off_at_a_budget_of_0(env: Env) -> None:
 
     assert result.status == "succeeded"
     assert result.stages["effects"] == {"skipped": "turned off (PP_EFFECTS_BUDGET_MINUTES is 0)"}
-    assert effects.deadlines == []
+    assert effects.limits == []
 
 
 # Phase 5 (plan Task 12, design D10): the agent's data bundle and the nightly reports.
@@ -1209,3 +1208,106 @@ def test_bundle_and_agent_data_failures_keep_secrets_out(env: Env) -> None:
     )]  # fmt: skip
     assert len(details) == 4
     assert all("qdrant.invalid" not in d and "test-gemini-key" not in d for d in details)
+
+
+# Run 41 (31 Oct 2026): Azure SQL was briefly unavailable after dbt, as mssql-python reports it.
+UNAVAILABLE = (
+    "Driver Error: Syntax error or access violation; DDBC Error: [Microsoft][SQL Server]Database "
+    "'patchpulse' on server 'sql-patchpulse' is not currently available.  Please retry the "
+    "connection later."
+)
+
+
+def unrecordable(*args: Any, **kwargs: Any) -> None:
+    raise ProgrammingError("UPDATE ops.pipeline_run", None, Exception(UNAVAILABLE))
+
+
+def test_a_failed_run_is_reported_even_when_it_cant_be_recorded(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Run 41's failure couldn't be written to ops.pipeline_run either, and that error replaced
+    # it: no GitHub issue was opened.
+    monkeypatch.setattr(runner, "finish_run", unrecordable)
+
+    with pytest.raises(PipelineError, match="dbt build failed"):
+        env.run(dbt=failing_dbt, export=stub_export)
+
+    ((_, status, error),) = env.publisher.reports
+    assert status == "failed"
+    assert error is not None
+    assert "dbt build failed" in error
+    assert "the run couldn't be recorded: ProgrammingError" in error
+
+
+def test_a_run_that_cant_be_recorded_is_reported_as_failed(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "finish_run", unrecordable)
+
+    with pytest.raises(PipelineError, match="the run couldn't be recorded"):
+        env.run(dbt=ok_dbt, export=stub_export)
+
+    assert len(env.publisher.calls) == 1  # the site still went out
+    ((_, status, error),) = env.publisher.reports
+    assert status == "failed"
+    assert error is not None
+    assert error.startswith("the run couldn't be recorded: ProgrammingError")
+
+
+@dataclass
+class FlakyDbt:
+    """dbt failing with each message in turn, then succeeding."""
+
+    failures: list[str]
+    calls: int = 0
+
+    def __call__(self, args: Any, **_: Any) -> DbtResult:
+        self.calls += 1
+        if self.failures:
+            return DbtResult(1, {"error": 1}, [self.failures.pop(0)])
+        return DbtResult(0, {"success": 1})
+
+
+@dataclass
+class Sleeps:
+    waits: list[float] = field(default_factory=list)
+
+    def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+TRANSIENT_DBT = f"model.patchpulse.daily_game_sentiment: Database Error: {UNAVAILABLE}"
+
+
+def test_dbt_is_tried_again_after_a_transient_database_error(env: Env) -> None:
+    dbt, sleeps = FlakyDbt([TRANSIENT_DBT]), Sleeps()
+
+    result = env.run(dbt=dbt, export=stub_export, sleep=sleeps)
+
+    assert result.status == "succeeded"
+    assert dbt.calls == 2
+    assert sleeps.waits == [DBT_RETRY_WAIT_S]
+    assert result.stages["dbt"] == {"success": 1}
+    assert result.stages["dbt_retried"] == TRANSIENT_DBT
+
+
+def test_dbt_is_not_tried_again_after_other_failures(env: Env) -> None:
+    sleeps = Sleeps()
+    dbt = FlakyDbt(["model.patchpulse.fact_review: boom"])
+
+    with pytest.raises(PipelineError, match="dbt build failed"):
+        env.run(dbt=dbt, export=stub_export, sleep=sleeps)
+
+    assert dbt.calls == 1
+    assert sleeps.waits == []
+
+
+def test_dbt_is_tried_again_only_once(env: Env) -> None:
+    sleeps = Sleeps()
+    dbt = FlakyDbt([TRANSIENT_DBT, TRANSIENT_DBT])
+
+    with pytest.raises(PipelineError, match="dbt build failed"):
+        env.run(dbt=dbt, export=stub_export, sleep=sleeps)
+
+    assert dbt.calls == 2
+    assert sleeps.waits == [DBT_RETRY_WAIT_S]

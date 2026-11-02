@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from contextlib import nullcontext
 from datetime import date, timedelta
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import pytest
+from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 
 from patchpulse.causal import cli as causal_cli
 from patchpulse.causal.benchmark import Choice, SpikeVerdict
@@ -20,6 +25,7 @@ from patchpulse.causal.cli import (
     series_from_seed,
 )
 from patchpulse.causal.config import CausalConfig, read_causal_config, write_causal_config
+from patchpulse.models.tracking import TrackingError
 
 FIRST = date(2026, 3, 2)
 DAYS = 150
@@ -171,12 +177,20 @@ def test_report_has_no_review_text(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert "ZEBRA" not in (paths.data_dir / "causal-benchmark-dry-run.md").read_text("utf-8")
 
 
+@pytest.fixture
+def local_mlflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A real run checks MLflow before its trials: a local store, never the .env's DagsHub."""
+    monkeypatch.chdir(tmp_path)  # the store's artifacts stay in tmp
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}")
+    return tmp_path
+
+
 def test_the_real_run_records_an_unvalidated_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    local_mlflow: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # ADR-007 rule 3: with no eligible method the default is interrupted time series, and the
     # site has to say its intervals weren't validated, so the config carries it.
-    paths = toy_data(tmp_path)
+    paths = toy_data(local_mlflow)
     unvalidated = Choice("its", False, "no method met the rule", {})
     monkeypatch.setattr(causal_cli, "choose_default", lambda trials: unvalidated)
     monkeypatch.setattr(causal_cli, "tracking_run", lambda *args, **kwargs: nullcontext())
@@ -190,10 +204,10 @@ def test_the_real_run_records_an_unvalidated_default(
 
 
 def test_the_real_run_records_the_spike_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    local_mlflow: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Phase 5's V4 (Seif's option C): causal wording on spike windows follows the benchmark.
-    paths = toy_data(tmp_path)
+    paths = toy_data(local_mlflow)
     asked: list[str] = []
 
     def verdict(trials: object, method: str) -> SpikeVerdict:
@@ -212,3 +226,70 @@ def test_the_real_run_records_the_spike_verdict(
 
     assert asked == ["synth"]
     assert read_causal_config(paths.config).spike_causal_ok is True
+
+
+def test_the_real_run_logs_to_mlflow(local_mlflow: Path) -> None:
+    # The 31 Oct final run failed here: the report's labels went to MLflow as param names, and
+    # MLflow refuses brackets in names. A local store runs MLflow's own name check.
+    paths = toy_data(local_mlflow)
+
+    assert run_benchmark(paths, per_cell=1, seed=3, dry_run=False) == 0
+
+    (run,) = mlflow.search_runs(experiment_names=["causal"], output_format="list")
+    params = run.data.params
+    assert params["snapshot_max_run_id"] == "20"
+    assert params["trials_per_cell"] == "1"
+    assert params["default_method"] == read_causal_config(paths.config).default_method
+    artifacts = [a.path for a in mlflow.MlflowClient().list_artifacts(run.info.run_id)]
+    assert artifacts == ["benchmark.md"]
+
+
+def test_the_config_hashes_the_report_as_git_stores_it(local_mlflow: Path) -> None:
+    # Git stores LF (.gitattributes): a report written with Windows line ends would be committed
+    # with a different hash than the config records.
+    paths = toy_data(local_mlflow)
+
+    assert run_benchmark(paths, per_cell=1, seed=3, dry_run=False) == 0
+
+    report = paths.report.read_bytes()
+    assert b"\r\n" not in report
+    assert b"\r\n" not in paths.config.read_bytes()
+    assert read_causal_config(paths.config).report_sha256 == hashlib.sha256(report).hexdigest()
+
+
+def test_the_real_run_needs_mlflow_before_any_trial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The trials take 88 minutes: a missing tracking setting must cost seconds, not the run.
+    paths = toy_data(tmp_path)
+    for name in list(os.environ):
+        if name.startswith(("PP_", "MLFLOW_")):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)  # no .env here
+
+    def no_trials(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the trials ran before MLflow was checked")
+
+    monkeypatch.setattr(causal_cli, "run_trials", no_trials)
+
+    with pytest.raises(TrackingError):
+        run_benchmark(paths, per_cell=1, seed=3, dry_run=False)
+    assert not paths.report.exists()
+
+
+def test_the_config_is_written_when_mlflow_logging_fails(
+    local_mlflow: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MLflow mirrors the run; the nightly job reads the config. A logging failure after the
+    # trials (31 Oct: a refused param name) must not leave a new report beside an old config.
+    paths = toy_data(local_mlflow)
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise MlflowException("INVALID_PARAMETER_VALUE", INVALID_PARAMETER_VALUE)
+
+    monkeypatch.setattr("mlflow.log_metrics", refused)
+
+    assert run_benchmark(paths, per_cell=1, seed=3, dry_run=False) == 1
+
+    config = read_causal_config(paths.config)
+    assert config.report_sha256 == hashlib.sha256(paths.report.read_bytes()).hexdigest()

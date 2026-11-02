@@ -29,6 +29,9 @@ night's plan redoes what the mirror lacks, with the same ids, so a repeat is saf
 upload, which writes points but no mirror (design D4). Read back after field updates (a lost
 mirror), the stored fingerprints make the plan set fields again, which is harmless.
 
+`check_pin` is what the nightly and the laptop's catch-up (retrieval/catchup.py) check before
+they write: the pin's rules and cleaning are the code's, and the encoder is the pinned one.
+
 The nightly job runs this without pandas (the jobs image has none).
 """
 
@@ -39,16 +42,21 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol
 
 from qdrant_client import QdrantClient, models
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
-from patchpulse.models.text import clean_text
-from patchpulse.retrieval.embedders import PassageEmbedder
+from patchpulse.models.artifact import sha256_file
+from patchpulse.models.text import CLEANING_VERSION, clean_text
+from patchpulse.retrieval.embedders import MANIFEST_FILE, PassageEmbedder
 from patchpulse.retrieval.points import fields, to_point
-from patchpulse.retrieval.rules import INDEX_COLUMNS
+from patchpulse.retrieval.rules import INDEX_COLUMNS, INDEX_RULES_VERSION
+
+if TYPE_CHECKING:
+    from patchpulse.retrieval.pin import RetrievalPin
 
 log = logging.getLogger("patchpulse.retrieval")
 
@@ -96,6 +104,26 @@ _ANY = "SELECT TOP 1 1 FROM ops.qdrant_point WHERE collection = :collection"
 
 class SyncError(RuntimeError):
     """The target or the collection holds something the sync can't write."""
+
+
+def check_pin(pin: RetrievalPin, encoder_dir: Path, pin_path: Path) -> None:
+    """Refuse to write under another pin than the code's: new index rules or a new cleaning build
+    a new collection, never rewrite this one (design D2), and another encoder's vectors would
+    differ from the collection's."""
+    if pin.rules_version != INDEX_RULES_VERSION:
+        raise SyncError(
+            f"{pin.collection} has rules version {pin.rules_version}, the code "
+            f"{INDEX_RULES_VERSION}"
+        )
+    if pin.cleaning_version != CLEANING_VERSION:
+        raise SyncError(
+            f"{pin.collection} has cleaning version {pin.cleaning_version}, the code "
+            f"{CLEANING_VERSION}"
+        )
+    if sha256_file(encoder_dir / MANIFEST_FILE) != pin.embedder_json_sha256:
+        raise SyncError(
+            f"the encoder in {encoder_dir.as_posix()} isn't the one {pin_path.as_posix()} pins"
+        )
 
 
 class PointWriter(Protocol):
@@ -151,6 +179,11 @@ def _rows(connection: Connection, ids: Sequence[int]) -> list[dict[str, Any]]:
     if missing:
         raise SyncError(f"review(s) {missing[:5]} left core.review_index during the sync")
     return [found[rid] for rid in ids]
+
+
+def has_mirror(connection: Connection, collection: str) -> bool:
+    """Whether the mirror holds any row for the collection."""
+    return connection.execute(text(_ANY), {"collection": collection}).first() is not None
 
 
 def forget(connection: Connection, collection: str, ids: Sequence[int]) -> None:
@@ -218,14 +251,15 @@ def apply_sync(
     embedder: PassageEmbedder,
     *,
     collection: str,
-    run_id: int,
+    run_id: int | None,
     deadline: float,
     clock: Callable[[], float],
     batch: int = BATCH,
     field_batch: int = FIELD_BATCH,
 ) -> SyncStats:
     """Write the plan to the collection and the mirror, a batch at a time, until `deadline` (on
-    `clock`'s scale); what's left waits for the next night's plan."""
+    `clock`'s scale); what's left waits for the next night's plan. The mirror rows carry
+    `run_id`: None for the laptop's catch-up, which no night ran."""
     deleted = upserted = updated = 0
     for start in range(0, len(plan.deletes), batch):
         if clock() >= deadline:
@@ -279,7 +313,7 @@ def read_back(
     the mirror already holds rows for the collection."""
     read = 0
     with engine.begin() as connection:
-        if connection.execute(text(_ANY), {"collection": collection}).first() is not None:
+        if has_mirror(connection, collection):
             return 0
         offset: Any = None
         while True:

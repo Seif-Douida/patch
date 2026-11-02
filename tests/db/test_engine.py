@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+import mssql_python
 import pytest
 from mssql_python.exceptions import OperationalError as DriverOperationalError
+from mssql_python.exceptions import ProgrammingError as DriverProgrammingError
+from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 
 from patchpulse.config import Settings
+from patchpulse.db import engine as engine_module
 from patchpulse.db.engine import (
     connect_with_resume_retry,
     is_transient,
+    is_transient_text,
     make_engine,
     make_entra_engine,
 )
@@ -22,6 +30,9 @@ RESUMING = (
 )
 BUSY = "[Microsoft][SQL Server]The service is currently busy. Retry the request after 10 seconds."
 LOGIN_FAILED = "[Microsoft][SQL Server]Login failed for user 'pp_writer'."
+# What mssql-python reports when a connection drops (run 41, 31 Oct 2026; logged without the
+# driver's name, which the exception strips).
+LINK_FAILURE = "[Microsoft][ODBC Driver 18 for SQL Server]Communication link failure"
 
 
 def db_error(ddbc_error: str) -> OperationalError:
@@ -105,6 +116,7 @@ def test_retry_gives_up_after_the_wait_budget() -> None:
         (RESUMING, True),
         (BUSY, True),
         ("Client unable to establish connection because an error was encountered", True),
+        (LINK_FAILURE, True),
         (LOGIN_FAILED, False),
         ("[Microsoft][SQL Server]Invalid object name 'raw.game'.", False),
     ],
@@ -113,6 +125,72 @@ def test_transient_errors_are_recognised_by_their_documented_text(
     message: str, transient: bool
 ) -> None:
     assert is_transient(db_error(message)) is transient
+    assert is_transient_text(message) is transient
+
+
+def test_the_drivers_own_errors_are_recognised_too() -> None:
+    # Inside SQLAlchemy's connect hook the driver's exception arrives unwrapped, and mssql-python
+    # reports 40613 as a ProgrammingError ("Syntax error or access violation"), as on run 41.
+    assert is_transient(DriverProgrammingError("Syntax error or access violation", RESUMING))
+    login = DriverProgrammingError("Syntax error or access violation", LOGIN_FAILED)
+    assert not is_transient(login)
+
+
+class OpenedError(Exception):
+    """Raised in place of an open connection, so the tests need no server."""
+
+
+ENGINES: dict[str, Callable[[], Engine]] = {
+    "nightly": lambda: make_engine(settings()),
+    "laptop (Entra)": lambda: make_entra_engine("sql-x.database.windows.net", "patchpulse"),
+}
+
+
+@pytest.mark.parametrize("build", list(ENGINES.values()), ids=list(ENGINES))
+def test_every_new_connection_waits_while_the_database_is_unavailable(
+    build: Callable[[], Engine], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Run 41 (31 Oct): a pooled connection dropped after dbt, and the connection replacing it met
+    # 40613 once and gave up, failing the night. Every connection an engine opens now waits as
+    # the first one of a night does.
+    clock = FakeClock()
+    monkeypatch.setattr(engine_module, "_pause", clock.sleep)
+    monkeypatch.setattr(engine_module, "_now", clock.monotonic)
+    attempts: list[dict[str, Any]] = []
+
+    def connect(*args: Any, **kwargs: Any) -> Any:
+        attempts.append(kwargs)
+        if len(attempts) < 3:
+            raise DriverProgrammingError("Syntax error or access violation", RESUMING)
+        raise OpenedError
+
+    monkeypatch.setattr(mssql_python, "connect", connect)
+
+    with pytest.raises(OpenedError):
+        build().connect()
+
+    assert len(attempts) == 3
+    assert clock.waits == [2.0, 4.0]
+
+
+def test_a_new_connection_gives_up_at_once_on_other_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock()
+    monkeypatch.setattr(engine_module, "_pause", clock.sleep)
+    monkeypatch.setattr(engine_module, "_now", clock.monotonic)
+    attempts = 0
+
+    def connect(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise DriverOperationalError("Invalid authorization specification", LOGIN_FAILED)
+
+    monkeypatch.setattr(mssql_python, "connect", connect)
+
+    with pytest.raises(OperationalError, match="Login failed"):
+        make_engine(settings()).connect()
+
+    assert attempts == 1
+    assert clock.waits == []
 
 
 def test_make_engine_builds_an_encrypted_mssqlpython_url() -> None:
