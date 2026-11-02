@@ -17,12 +17,13 @@ publish.
    latest version not yet scored by it, newest first, within PP_SCORE_BUDGET_MINUTES. No model
    is an INFO line; a model that won't load or a scoring error is a `scoring_skipped` warning,
    and the night goes on without fresh aspects.
-7. dbt build (models and data tests). Only if it succeeds is each healthy game's coverage
-   advanced, so a failed night leaves no gap: the next one re-reads from the old watermark.
+7. dbt build (models and data tests). One that fails on a transient Azure SQL error runs once
+   more after DBT_RETRY_WAIT_S. Only if it succeeds is each healthy game's coverage advanced, so
+   a failed night leaves no gap: the next one re-reads from the old watermark.
 8. Effects (Phase 4, design D10): estimate the patch bundles whose window has ended or whose
-   inputs changed, newest first, within PP_EFFECTS_BUDGET_MINUTES (pipeline/effects.py); what's
-   left waits a night. A budget of 0 is an INFO line; any failure is an `effects_skipped` warning,
-   the stored estimates stay as they were, and the night goes on.
+   inputs changed, newest first, for PP_EFFECTS_BUDGET_MINUTES once its inputs are read
+   (pipeline/effects.py); what's left waits a night. A budget of 0 is an INFO line; any failure
+   is an `effects_skipped` warning, the stored estimates stay as they were, and the night goes on.
 9. Index (Phase 3, design D5): keep the Qdrant collection in step with core.review_index within
    PP_INDEX_BUDGET_MINUTES, reconcile the counts per game and day, and check that a search
    answers (pipeline/indexing.py). No PP_QDRANT_URL or PP_ENCODER_DIR, or a budget of 0, is an
@@ -31,7 +32,9 @@ publish.
    alert. A clean night closes all three alerts. The night goes on either way.
 10. Export the site JSON and publish it; purge raw payloads older than 30 days; finish the run.
 11. Report the outcome to the publisher (in Azure: a GitHub issue on failure, closed by the next
-    success). A failure to report is logged and never changes the run's own result.
+    success). A failure to report is logged and never changes the run's own result. A run that
+    can't be recorded in ops.pipeline_run (the database gone for good mid-run) is still reported,
+    as failed.
 
 Raw data is committed page by page, so what was fetched is kept even when a later stage fails.
 """
@@ -52,6 +55,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import Connection, Engine
 
 from patchpulse.config import Settings, SettingsError
+from patchpulse.db.engine import is_transient_text
 from patchpulse.export.site import AspectModel, build_site_export, read_aspect_model
 from patchpulse.ingest.coverage import Coverage, Windows, advance, plan_windows
 from patchpulse.ingest.day_counts import fetch_day_counts
@@ -96,6 +100,10 @@ COUNT_DAYS_A_NIGHT = 4
 # export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled.
 NIGHT_SECONDS = 2_700
 NIGHT_RESERVE_S = 600
+# dbt meeting a transient Azure SQL error (one a failover or a resume can give) runs once more
+# after this pause; its adapter retries a failed connection only seconds apart, and not at all
+# when mssql-python calls 40613 a ProgrammingError, as it does.
+DBT_RETRY_WAIT_S = 60.0
 # The index stage's alerts (design D5): one GitHub issue per title.
 OUT_OF_SYNC = "Qdrant out of sync"
 INDEX_SKIPPED = "index stage skipped"
@@ -164,7 +172,8 @@ class EffectsStage(Protocol):
         run_id: int,
         now: datetime,
         clock: Callable[[], float],
-        deadline: float,
+        budget_s: float,
+        night_end: float,
     ) -> EffectsOutcome: ...
 
 
@@ -262,6 +271,7 @@ def run_nightly(
     clock: Callable[[], float] = time.monotonic,
     index: IndexStage | None = None,
     effects: EffectsStage | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> RunResult:
     """`index` and `effects` replace those stages' work in tests; by default each is imported when
     needed."""
@@ -286,24 +296,41 @@ def run_nightly(
             clock,
             index,
             effects,
+            sleep,
         )
     except Exception as error:
-        with engine.begin() as connection:
-            finish_run(connection, run_id, status="failed", stages=run.stages, error=str(error))
-        _report(publisher, run_id, "failed", str(error))
+        unrecorded = _finish(run, "failed", str(error))
+        detail = str(error) if unrecorded is None else f"{error}; {unrecorded}"
+        _report(publisher, run_id, "failed", detail)
         if isinstance(error, PipelineError):
             raise
         raise PipelineError(f"run {run_id} failed: {error}") from error
 
     status = "failed" if run.errors else "succeeded"
     error_text = "; ".join(run.errors.values()) or None
-    with engine.begin() as connection:
-        finish_run(connection, run_id, status=status, stages=run.stages, error=error_text)
+    unrecorded = _finish(run, status, error_text)
+    if unrecorded is not None:
+        status, error_text = "failed", "; ".join(filter(None, (unrecorded, error_text)))
     log.info("nightly run %d %s", run_id, status)
     _report(publisher, run_id, status, error_text)
+    if unrecorded is not None:
+        raise PipelineError(f"run {run_id}: {error_text}")
     if run.errors:
         raise PipelineError(f"run {run_id}: {len(run.errors)} game(s) failed: {error_text}")
     return RunResult(run_id, status, run.stages)
+
+
+def _finish(run: _Run, status: str, error: str | None) -> str | None:
+    """Record the run's end in ops.pipeline_run; why it couldn't be recorded, if it couldn't (the
+    engine has already waited out a transient outage). Never raises: the run must still be
+    reported, or nobody hears of a night the database took down (run 41, 31 Oct 2026)."""
+    try:
+        with run.engine.begin() as connection:
+            finish_run(connection, run.run_id, status=status, stages=run.stages, error=error)
+    except Exception as failure:
+        log.error("could not record run %d as %s: %s", run.run_id, status, failure)
+        return f"the run couldn't be recorded: {type(failure).__name__}: {failure}"
+    return None
 
 
 def _report(publisher: Publisher, run_id: int, status: str, error: str | None) -> None:
@@ -326,6 +353,7 @@ def _run_stages(
     clock: Callable[[], float],
     index: IndexStage | None,
     effects: EffectsStage | None,
+    sleep: Callable[[float], None],
 ) -> None:
     games = load_games(games_file, today=now.date())
     # Comparison games (Phase 4) get news and daily counts only: no reviews, prices or coverage.
@@ -396,7 +424,17 @@ def _run_stages(
         run.stages["score"] = _score(run, settings, clock)
 
     with run.stage("dbt"):
-        result = dbt(["build"], settings=settings, target_path=target_root / f"run-{run.run_id}")
+        target_path = target_root / f"run-{run.run_id}"
+        result = dbt(["build"], settings=settings, target_path=target_path)
+        if not result.ok and is_transient_text(" ".join(result.failures)):
+            first = " | ".join(result.failures)[:500]
+            log.warning(
+                "dbt build met a transient database error; trying again in %.0f s",
+                DBT_RETRY_WAIT_S,
+            )
+            sleep(DBT_RETRY_WAIT_S)
+            run.stages["dbt_retried"] = first
+            result = dbt(["build"], settings=settings, target_path=target_path)
         run.stages["dbt"] = result.counts
         if not result.ok:
             raise PipelineError("dbt build failed: " + " | ".join(result.failures)[:3000])
@@ -489,7 +527,8 @@ def _effects(
             run_id=run.run_id,
             now=now,
             clock=clock,
-            deadline=run.deadline(settings.effects_budget_minutes * 60, clock),
+            budget_s=settings.effects_budget_minutes * 60,
+            night_end=run.night_end,
         )
     except Exception as error:  # the estimates lag a night; the stored ones and the site go on
         detail = f"{type(error).__name__}: {error}"

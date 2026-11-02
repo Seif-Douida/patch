@@ -2,6 +2,8 @@
 
 The free Azure SQL database pauses after 60 idle minutes. The first connection while it resumes
 fails with error 40613, so connections retry transient errors for up to ~90 seconds (spec §12).
+Every connection an engine opens does: a night's first, and one replacing a pooled connection
+that dropped mid-run (run 41, 31 Oct 2026, failed on that replacement's single attempt).
 mssql-python reports only SQL Server's message text, not the error number, so transient errors
 are recognised by Microsoft's documented wording.
 """
@@ -10,10 +12,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
 
-from sqlalchemy import Engine, create_engine
-from sqlalchemy.engine import URL
+from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.engine import URL, Dialect
 from sqlalchemy.exc import DBAPIError
 
 from patchpulse.config import Settings
@@ -28,9 +30,14 @@ _TRANSIENT_MARKERS = (
     "too many create or update operations in progress",  # 49919
     "too many operations in progress",  # 49920
     "client unable to establish connection",  # driver: the server did not answer (yet)
+    "communication link failure",  # driver: the connection dropped
 )
+MAX_WAIT_S = 90.0
 _FIRST_WAIT_S = 2.0
 _MAX_SINGLE_WAIT_S = 30.0
+# The connect hook's sleep and clock, read when it runs so tests can replace them.
+_pause: Callable[[float], None] = time.sleep
+_now: Callable[[], float] = time.monotonic
 
 
 class SupportsConnect[T](Protocol):
@@ -50,7 +57,7 @@ def make_engine(settings: Settings) -> Engine:
             "TrustServerCertificate": "yes" if settings.db_trust_cert else "no",
         },
     )
-    return create_engine(url, pool_pre_ping=True)
+    return _patient(create_engine(url, pool_pre_ping=True))
 
 
 def make_entra_engine(host: str, database: str) -> Engine:
@@ -70,30 +77,62 @@ def make_entra_engine(host: str, database: str) -> Engine:
             "TrustServerCertificate": "no",
         },
     )
-    return create_engine(url, pool_pre_ping=True)
+    return _patient(create_engine(url, pool_pre_ping=True))
+
+
+def _patient(engine: Engine) -> Engine:
+    event.listen(engine, "do_connect", _connect_patiently)
+    return engine
+
+
+def _connect_patiently(
+    dialect: Dialect, conn_rec: Any, cargs: tuple[Any, ...], cparams: dict[str, Any]
+) -> Any:
+    """SQLAlchemy's do_connect hook: open the driver's connection, waiting out transient errors."""
+    return _retry_transient(
+        lambda: dialect.loaded_dbapi.connect(*cargs, **cparams),
+        max_wait_s=MAX_WAIT_S,
+        sleep=_pause,
+        clock=_now,
+    )
 
 
 def is_transient(error: BaseException) -> bool:
-    if not isinstance(error, DBAPIError):
-        return False
-    message = str(error.orig).lower()
-    return any(marker in message for marker in _TRANSIENT_MARKERS)
+    """Whether an error is a transient Azure SQL condition: SQLAlchemy's wrapper around the
+    driver's error, or the driver's own (what the connect hook sees)."""
+    return is_transient_text(str(error.orig if isinstance(error, DBAPIError) else error))
+
+
+def is_transient_text(message: str) -> bool:
+    """Whether an error's text is one of Azure SQL's documented transient conditions."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
 
 
 def connect_with_resume_retry[T](
     engine: SupportsConnect[T],
     *,
-    max_wait_s: float = 90.0,
+    max_wait_s: float = MAX_WAIT_S,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> T:
     """Connect, retrying transient errors with capped exponential backoff for `max_wait_s`."""
+    return _retry_transient(engine.connect, max_wait_s=max_wait_s, sleep=sleep, clock=clock)
+
+
+def _retry_transient[T](
+    connect: Callable[[], T],
+    *,
+    max_wait_s: float,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+) -> T:
     started = clock()
     wait = _FIRST_WAIT_S
     while True:
         try:
-            return engine.connect()
-        except DBAPIError as error:
+            return connect()
+        except Exception as error:
             if not is_transient(error) or clock() - started + wait > max_wait_s:
                 raise
             sleep(wait)
