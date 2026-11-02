@@ -10,6 +10,8 @@ through the model's `RequestLimiter`.
 - What still fails after every attempt raises `GeminiUnavailableError`: the service is down, not
   the request wrong, so callers stop and resume later instead of reshaping the request. Only a
   refused request (4xx) or a blocked prompt raises `GeminiError`.
+- The agent's router (Phase 5) builds clients with `max_attempts=2, retry_errors=False`: one wait
+  for a per-minute limit, and an outage or a timeout raises at once so the next model is tried.
 
 Nothing this module raises, logs or prints contains the key: Google's messages are scrubbed.
 """
@@ -70,14 +72,22 @@ class GeminiClient:
         model: ModelConfig,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        max_attempts: int = MAX_ATTEMPTS,
+        retry_errors: bool = True,  # retry 5xx answers and network errors (timeouts included)
+        timeout_s: float = REQUEST_TIMEOUT_S,
     ) -> None:
         if not api_key:
             raise ValueError("a Gemini API key is required (PP_GEMINI_API_KEY in .env)")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self._api_key = api_key
         self.http = http
         self.limiter = limiter
         self.model = model
         self.sleep = sleep
+        self.max_attempts = max_attempts
+        self.retry_errors = retry_errors
+        self.timeout_s = timeout_s
 
     def __repr__(self) -> str:
         return f"GeminiClient(model={self.model.id!r})"
@@ -96,7 +106,7 @@ class GeminiClient:
         estimate = (len(system) + len(user)) // _CHARS_PER_TOKEN + expected_output_tokens
         url = f"{API_ROOT}/models/{self.model.id}:generateContent"
         last = GeminiUnavailableError(0, "no attempt made")
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, self.max_attempts + 1):
             self.limiter.acquire(estimate)
             backoff = _BACKOFF_S[min(attempt, len(_BACKOFF_S)) - 1]
             try:
@@ -104,10 +114,12 @@ class GeminiClient:
                     url,
                     json=body,
                     headers={"x-goog-api-key": self._api_key},
-                    timeout=REQUEST_TIMEOUT_S,
+                    timeout=self.timeout_s,
                 )
             except httpx2.TransportError as error:  # includes timeouts
                 last = GeminiUnavailableError(0, f"network error: {type(error).__name__}")
+                if not self.retry_errors:
+                    raise last from None
                 self._wait(attempt, backoff, last)
                 continue
             if response.status_code == httpx2.codes.OK:
@@ -126,13 +138,15 @@ class GeminiClient:
                 continue
             if response.status_code >= httpx2.codes.INTERNAL_SERVER_ERROR:
                 last = GeminiUnavailableError(response.status_code, problem.message)
+                if not self.retry_errors:
+                    raise last
                 self._wait(attempt, backoff, last)
                 continue
             raise GeminiError(response.status_code, problem.message)
         raise last
 
     def _wait(self, attempt: int, seconds: float, problem: Exception) -> None:
-        if attempt == MAX_ATTEMPTS:
+        if attempt == self.max_attempts:
             return
         log.warning(
             "%s: attempt %d failed (%s); retrying in %.0f s",

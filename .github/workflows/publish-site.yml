@@ -70,19 +70,33 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Build the site
-        working-directory: web
-        env:
-          SITE_DATA_DIR: public/data
-        run: |
-          npm ci
-          npm run build
-
       - uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The Ask page calls pp-api from the browser (its CORS policy allows this site only). The
+      # address is public, read from Azure on each run; without it the site still builds and Ask
+      # says it's unavailable.
+      - name: Find the API's address
+        id: api
+        run: |
+          fqdn=$(az containerapp show -n pp-api -g "$RG" --query properties.configuration.ingress.fqdn -o tsv 2> /dev/null || true)
+          if [ -z "$fqdn" ]; then
+            echo "::warning::pp-api wasn't found, so the site is built without Ask."
+          else
+            echo "url=https://$fqdn" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the site
+        working-directory: web
+        env:
+          SITE_DATA_DIR: public/data
+          NEXT_PUBLIC_API_URL: ${{ steps.api.outputs.url }}
+        run: |
+          npm ci
+          npm run build
 
       # No stored deployment token: read it with the OIDC identity on each run, masked at once.
       - name: Fetch the Static Web App deployment token

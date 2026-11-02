@@ -166,6 +166,10 @@ def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
         "PP_GITHUB_APP_PRIVATE_KEY",
         "PP_QDRANT_URL",
         "PP_QDRANT_API_KEY",
+        "PP_QDRANT_ASK_API_KEY",
+        "PP_GEMINI_API_KEY",
+        "PP_LANGFUSE_PUBLIC_KEY",
+        "PP_LANGFUSE_SECRET_KEY",
     ):
         assert f"secrets.{secret}" in check
         assert f'missing="$missing {secret}"' in check
@@ -191,7 +195,16 @@ def test_infra_passes_the_qdrant_secrets_to_what_if_and_deploy() -> None:
     text = read("infra.yml")
     assert text.count("PP_QDRANT_URL: ${{ secrets.PP_QDRANT_URL }}") == 3
     assert text.count("PP_QDRANT_API_KEY: ${{ secrets.PP_QDRANT_API_KEY }}") == 3
+    # pp-api's restricted key (the review's I4).
+    assert text.count("PP_QDRANT_ASK_API_KEY: ${{ secrets.PP_QDRANT_ASK_API_KEY }}") == 3
     assert "vars.PP_QDRANT" not in text
+
+
+def test_infra_passes_the_langfuse_keys_to_what_if_and_deploy() -> None:
+    # Phase 5 Task 18: the traces of the nightly reports and of Ask.
+    text = read("infra.yml")
+    assert text.count("PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}") == 3
+    assert text.count("PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}") == 3
 
 
 def test_guard_counts_both_jobs_executions() -> None:
@@ -265,6 +278,20 @@ def test_swa_token_is_fetched_at_run_time_and_masked() -> None:
     assert "secrets.AZURE_STATIC_WEB_APPS" not in read("publish-site.yml")
 
 
+def test_publish_site_builds_ask_with_the_apis_address() -> None:
+    # Phase 5 Task 20: the Ask page calls pp-api from the browser; its address is read from Azure
+    # at build time (public, not a secret), so nothing has to be kept in step by hand.
+    text = read("publish-site.yml")
+    find = step("publish-site.yml", "Find the API's address")
+    assert "az containerapp show -n pp-api" in find
+    assert "properties.configuration.ingress.fqdn" in find
+    assert "::warning::" in find  # no pp-api: the site still builds, Ask says it's unavailable
+    build = step("publish-site.yml", "Build the site")
+    assert "NEXT_PUBLIC_API_URL: ${{ steps.api.outputs.url }}" in build
+    assert text.index("uses: azure/login@") < text.index("- name: Find the API's address")
+    assert text.index("- name: Find the API's address") < text.index("- name: Build the site")
+
+
 def test_publish_site_never_puts_the_dispatch_payload_in_a_shell() -> None:
     # Whoever can send a dispatch controls client_payload; in a run: script it would be code.
     assert "client_payload" not in read("publish-site.yml")
@@ -276,3 +303,10 @@ def test_publish_site_uploads_the_prebuilt_site_only() -> None:
     assert "app_location: web/out" in deploy
     assert "skip_app_build: true" in deploy
     assert "skip_api_build: true" in deploy
+
+
+def test_infra_passes_the_gemini_key_to_what_if_and_deploy() -> None:
+    # Phase 5 (design D8): pp-nightly's reports stage; a free-tier key, kept as a GitHub secret.
+    text = read("infra.yml")
+    assert text.count("PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}") == 3
+    assert "vars.PP_GEMINI" not in text

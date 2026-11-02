@@ -7,6 +7,9 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from agent_fixtures import SAMPLE_QUOTE, sample_report
+
+from patchpulse.agent.report import Report
 from patchpulse.export.site import (
     ATTRIBUTION,
     MIN_ASPECT_F1,
@@ -67,6 +70,7 @@ def export(
     patches: list[PatchRow],
     aspects: Aspects | None = None,
     effects: Effects | None = None,
+    reports: dict[str, Report] | None = None,
 ) -> dict[str, bytes]:
     return shape_site_export(
         games,
@@ -76,6 +80,7 @@ def export(
         generated_at=GENERATED,
         aspects=aspects,
         effects=effects,
+        reports=reports,
     )
 
 
@@ -203,7 +208,7 @@ def test_export_v2_shape_is_deterministic() -> None:
 
     assert first == shuffled
     game = load(first, "games/553850.json")
-    assert game["schema_version"] == SCHEMA_VERSION == 3
+    assert game["schema_version"] == SCHEMA_VERSION == 4
     assert game["aspects"]["codes"] == list(ASPECTS)
     assert game["aspects"]["days"][0] == {
         "date": "2026-09-20",
@@ -244,7 +249,7 @@ def test_without_a_model_the_aspect_fields_are_null() -> None:
     files = export([HD2], [day(553850, D1, 3, 2)], [])
 
     index = load(files, "index.json")
-    assert index["schema_version"] == 3
+    assert index["schema_version"] == 4
     assert index["aspect_model"] is None
     assert index["games"][0]["top_complaint_30d"] is None
     assert load(files, "games/553850.json")["aspects"] is None
@@ -420,3 +425,50 @@ def test_index_names_the_default_method() -> None:
     # Without the effects input (no stored estimates read), no causal block and no estimates.
     assert load(without, "index.json")["causal"] is None
     assert [p["effect"] for p in load(without, "games/553850.json")["patches"]] == [None]
+
+
+# Schema 4 (Phase 5, design D6 and D11): each patch bundle's report, as its public copy.
+BUNDLE_PATCHES = [
+    patch(553850, date(2026, 8, 1), "Patch 1.0", patch_id="a"),
+    patch(553850, date(2026, 8, 3), "Patch 1.0.1", patch_id="b"),  # joins a's bundle
+    patch(553850, date(2026, 8, 3), "Hotfix", "hotfix", patch_id="h"),  # not a candidate
+    patch(553850, date(2026, 8, 20), "Patch 1.1", patch_id="c"),  # its own bundle, no report yet
+]
+
+
+def test_reports_are_exported_as_public_copies() -> None:
+    files = export([HD2], [], BUNDLE_PATCHES, reports={"a": sample_report("a", 14)})
+
+    content = files["reports/a.json"]
+    document = json.loads(content)
+    assert document["schema_version"] == SCHEMA_VERSION == 4
+    assert document["data_version"] == 42
+    assert document["attribution"] == ATTRIBUTION
+    report = document["report"]
+    assert (report["bundle_id"], report["horizon"]) == ("a", 14)
+    (claim,) = report["claims"]
+    assert claim["supported_by"] == 3
+    assert report["withheld"] == {"V4": 1}
+    # The stored copy's quote spans, review ids and withheld text never reach the site.
+    text = content.decode("utf-8")
+    assert SAMPLE_QUOTE not in text
+    for review_id in ("7001", "7002", "7003"):
+        assert review_id not in text
+    assert "The patch caused the drop." not in text
+    assert "quote_spans" not in text
+    assert "review_ids" not in text
+
+
+def test_patch_links_its_bundle_report() -> None:
+    reports = {"a": sample_report("a", 7), "gone": sample_report("gone", 7)}
+
+    files = export([HD2], [], BUNDLE_PATCHES, reports=reports)
+
+    links = {p["title"]: p["report"] for p in load(files, "games/553850.json")["patches"]}
+    assert links == {"Patch 1.0": "a", "Patch 1.0.1": "a", "Hotfix": None, "Patch 1.1": None}
+    # A report no patch links to (its bundle has changed since) isn't exported.
+    assert sorted(name for name in files if name.startswith("reports/")) == ["reports/a.json"]
+    assert load(files, "index.json")["reports"] == 1
+    without = export([HD2], [], BUNDLE_PATCHES)
+    assert load(without, "index.json")["reports"] == 0
+    assert [p["report"] for p in load(without, "games/553850.json")["patches"]] == [None] * 4

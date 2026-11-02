@@ -236,7 +236,7 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     for job in of_type(resources, "microsoft.app/jobs"):
         for container in job["properties"]["template"]["containers"]:
             for variable in container.get("env", []):
-                if re.search(r"PASSWORD|SALT|PRIVATE_KEY|QDRANT", variable["name"]):
+                if re.search(r"PASSWORD|SALT|_KEY|QDRANT|GEMINI", variable["name"]):
                     assert "secretRef" in variable, f"{job['name']}: {variable['name']}"
                     assert "value" not in variable, f"{job['name']}: {variable['name']}"
     # Phase 3 (design D5): the free cluster's URL is a secret too; with the key, it's the
@@ -246,6 +246,12 @@ def test_job_credentials_come_from_container_app_secrets(resources: list[dict[st
     env = {variable["name"]: variable for variable in container["env"]}
     assert env["PP_QDRANT_URL"]["secretRef"] == "qdrant-url"
     assert env["PP_QDRANT_API_KEY"]["secretRef"] == "qdrant-api-key"
+    # Phase 5 (design D8): the free-tier Gemini key for the nightly reports, and Langfuse's keys
+    # for their traces (Task 18; the host isn't a secret).
+    assert env["PP_GEMINI_API_KEY"]["secretRef"] == "gemini-api-key"
+    assert env["PP_LANGFUSE_PUBLIC_KEY"]["secretRef"] == "langfuse-public-key"
+    assert env["PP_LANGFUSE_SECRET_KEY"]["secretRef"] == "langfuse-secret-key"
+    assert env["PP_LANGFUSE_HOST"]["value"] == "https://cloud.langfuse.com"
 
 
 def test_nightly_job_publishes_with_the_github_app(resources: list[dict[str, Any]]) -> None:
@@ -298,8 +304,8 @@ def test_the_runner_ends_the_night_before_the_job_timeout(resources: list[dict[s
 
 
 def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) -> None:
-    # Design D9: backfill, scoring, indexing and the effects leave at least 8 of the job's minutes
-    # for the incremental stages, dbt, the reconciliation and the export.
+    # Design D9: backfill, scoring, indexing, the effects and the reports leave at least 8 of the
+    # job's minutes for the incremental stages, dbt, the reconciliation and the export.
     nightly, env = nightly_env(resources)
     budgets = sum(
         int(env[name])
@@ -308,6 +314,7 @@ def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) 
             "PP_SCORE_BUDGET_MINUTES",
             "PP_INDEX_BUDGET_MINUTES",
             "PP_EFFECTS_BUDGET_MINUTES",
+            "PP_REPORTS_BUDGET_MINUTES",
         )
     )
     timeout_minutes = literal_number(nightly["properties"]["configuration"]["replicaTimeout"]) / 60
@@ -383,3 +390,70 @@ def test_missing_compiler_fails_in_ci_and_skips_locally() -> None:
         require_compiler(None, ci=True)
     with pytest.raises(pytest.skip.Exception):
         require_compiler(None, ci=False)
+
+
+def test_nightly_job_has_the_reports_budget(resources: list[dict[str, Any]]) -> None:
+    # Phase 5 design D10: the reports stage writes the due reports within 3 minutes, newest first;
+    # what's left waits a night. The refill is over, so backfill gives up 5 of its 25 minutes.
+    _, env = nightly_env(resources)
+    assert env["PP_REPORTS_BUDGET_MINUTES"] == "3"
+    assert env["PP_BACKFILL_BUDGET_MINUTES"] == "20"
+
+
+def api_app(resources: list[dict[str, Any]]) -> dict[str, Any]:
+    (api,) = [a for a in of_type(resources, "microsoft.app/containerapps") if a["name"] == "pp-api"]
+    return api
+
+
+def test_api_scales_down_after_a_minute(resources: list[dict[str, Any]]) -> None:
+    # Phase 5 design D9: a question that wakes pp-api keeps it up for the scale-down wait plus the
+    # answer; a minute instead of the default five makes an isolated question about 2
+    # replica-minutes instead of 6 (and the uptime pings cheaper). Size and replicas unchanged.
+    scale = api_app(resources)["properties"]["template"]["scale"]
+    assert literal_number(scale["cooldownPeriod"]) == 60
+    assert literal_number(scale["minReplicas"]) == 0
+    assert literal_number(scale["maxReplicas"]) == 1
+
+
+def test_api_credentials_come_from_container_app_secrets(resources: list[dict[str, Any]]) -> None:
+    # Phase 5: Ask's Gemini key, the Qdrant cluster (search and the limits' counters) and
+    # Langfuse's keys (Ask's traces).
+    api = api_app(resources)
+    (container,) = api["properties"]["template"]["containers"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    for name, secret in (
+        ("PP_GEMINI_API_KEY", "gemini-api-key"),
+        ("PP_QDRANT_URL", "qdrant-url"),
+        ("PP_QDRANT_API_KEY", "qdrant-api-key"),
+        ("PP_LANGFUSE_PUBLIC_KEY", "langfuse-public-key"),
+        ("PP_LANGFUSE_SECRET_KEY", "langfuse-secret-key"),
+    ):
+        assert env[name] == {"name": name, "secretRef": secret}
+    assert env["PP_LANGFUSE_HOST"]["value"] == "https://cloud.langfuse.com"
+    for name, variable in env.items():
+        if re.search(r"KEY|QDRANT|PASSWORD|SECRET", name):
+            assert "value" not in variable, name
+    assert env["PP_ASK_DAILY_CAP"]["value"] == "15"  # until the compute per wake is measured
+    assert "PP_SITE_ORIGIN" in env
+    # Browsers may call it from the site only; Ask posts JSON.
+    cors = api["properties"]["configuration"]["ingress"]["corsPolicy"]
+    assert cors["allowedMethods"] == ["GET", "POST"]
+    assert cors["allowedHeaders"] == ["Content-Type"]
+    assert len(cors["allowedOrigins"]) == 1
+
+
+def test_api_holds_only_the_ask_key_of_the_cluster(resources: list[dict[str, Any]]) -> None:
+    # The review's I4: pp-api is public, so its Qdrant key reads the review index and writes Ask's
+    # counters only (Seif's restricted key, checked on the cluster 26 Oct); pp-nightly keeps the
+    # read-write key its index stage needs.
+    nightly, _ = nightly_env(resources)
+    secrets = {
+        "pp-api": api_app(resources)["properties"]["configuration"]["secrets"],
+        "pp-nightly": nightly["properties"]["configuration"]["secrets"],
+    }
+    keys = {app: next(s["value"] for s in found if s["name"] == "qdrant-api-key")
+            for app, found in secrets.items()}  # fmt: skip
+    assert keys == {
+        "pp-api": "[parameters('qdrantAskApiKey')]",
+        "pp-nightly": "[parameters('qdrantApiKey')]",
+    }

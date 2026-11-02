@@ -178,6 +178,12 @@ def latest_estimates(
     return [_stored(r) for r in connection.execute(_latest(*where, as_of=as_of))]
 
 
+def all_latest_estimates(connection: Connection) -> list[StoredEstimate]:
+    """The latest row of every key stored: all outcomes, samples, methods and horizons (Phase 5's
+    data bundle)."""
+    return [_stored(r) for r in connection.execute(_latest())]
+
+
 NOT_RUN = "synthetic control isn't run for this outcome or sample"
 
 

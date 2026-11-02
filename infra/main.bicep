@@ -44,13 +44,29 @@ param githubAppId string
 @secure()
 param githubAppPrivateKey string
 
-@description('URL of the free Qdrant cluster (Phase 3), from the secret PP_QDRANT_URL. Secret too: with the key, it is the only door to the cluster. It reaches only pp-nightly, as a Container Apps secret.')
+@description('URL of the free Qdrant cluster (Phase 3), from the secret PP_QDRANT_URL. Secret too: with the key, it is the only door to the cluster. It reaches pp-nightly and pp-api (Phase 5), as a Container Apps secret.')
 @secure()
 param qdrantUrl string
 
-@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches only pp-nightly, as a Container Apps secret.')
+@description('Read-write API key of that cluster, from the secret PP_QDRANT_API_KEY. It reaches pp-nightly only (its index stage writes the review index), as a Container Apps secret.')
 @secure()
 param qdrantApiKey string
+
+@description('Restricted API key of that cluster for pp-api (Phase 5 review, I4), from the secret PP_QDRANT_ASK_API_KEY: it reads the review collection and reads and writes ask_limits only, since pp-api is public.')
+@secure()
+param qdrantAskApiKey string
+
+@description('Free-tier Gemini API key for the agent (Phase 5), from the secret PP_GEMINI_API_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret. Billing stays off on its Google project.')
+@secure()
+param geminiApiKey string
+
+@description('Langfuse public key for the agent traces (Phase 5), from the secret PP_LANGFUSE_PUBLIC_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret.')
+@secure()
+param langfusePublicKey string
+
+@description('Langfuse secret key, from the secret PP_LANGFUSE_SECRET_KEY. It reaches pp-nightly and pp-api, as a Container Apps secret. The project is on the free Hobby plan.')
+@secure()
+param langfuseSecretKey string
 
 @description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
 @secure()
@@ -85,6 +101,11 @@ module containerApps 'modules/containerapps.bicep' = {
     logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
     apiImage: apiImage
     allowedOrigin: 'https://${web.outputs.defaultHostname}'
+    geminiApiKey: geminiApiKey
+    qdrantUrl: qdrantUrl
+    qdrantAskApiKey: qdrantAskApiKey
+    langfusePublicKey: langfusePublicKey
+    langfuseSecretKey: langfuseSecretKey
   }
 }
 
@@ -117,6 +138,9 @@ module jobs 'modules/jobs.bicep' = {
     githubAppPrivateKey: githubAppPrivateKey
     qdrantUrl: qdrantUrl
     qdrantApiKey: qdrantApiKey
+    geminiApiKey: geminiApiKey
+    langfusePublicKey: langfusePublicKey
+    langfuseSecretKey: langfuseSecretKey
   }
 }
 

@@ -50,6 +50,7 @@ describe("PatchAspectTables", () => {
   it("one_descriptive_table_per_treatment_patch", () => {
     render(
       <PatchAspectTables
+        appid={900001}
         aspects={september(10)}
         patches={[
           patch("2026-09-16", "Patch 1.1", true),
@@ -92,6 +93,7 @@ describe("PatchAspectTables", () => {
     };
     render(
       <PatchAspectTables
+        appid={900001}
         aspects={september(10)}
         patches={[patch("2026-09-16", "Patch 1.1", true)]}
         model={model}
@@ -109,7 +111,7 @@ describe("PatchAspectTables", () => {
 
   it("too_few_reviews_show_dashes_not_numbers", () => {
     const patches = [patch("2026-09-16", "Patch 1.1", true)];
-    render(<PatchAspectTables aspects={september(2)} patches={patches} />);
+    render(<PatchAspectTables appid={900001} aspects={september(2)} patches={patches} />);
 
     const table = screen.getByRole("table");
     const cells = within(table).getAllByRole("cell").map((c) => c.textContent);
@@ -150,6 +152,7 @@ function withEffect(date: string, title: string, effect: PatchEffect | null): Pa
 function renderPatches(patches: Patch[], discountsFrom: string | null = null) {
   render(
     <PatchAspectTables
+        appid={900001}
       aspects={september(10)}
       patches={patches}
       causal={SYNTH}
@@ -332,5 +335,18 @@ describe("PatchAspectTables estimates", () => {
 
     expect(document.querySelector(".patch-effect")).toBeNull();
     expect(screen.getAllByRole("table")).toHaveLength(2); // the descriptive tables stay
+  });
+
+  it("links_the_report_when_there_is_one", () => {
+    renderPatches([
+      { ...patch("2026-09-16", "Patch 1.1", true), report: "5001" },
+      { ...patch("2026-09-05", "Patch 1.0.1", true), report: null },
+    ]);
+
+    const [latest, earlier] = [...document.querySelectorAll("details")];
+    const link = within(latest as HTMLElement).getByRole("link", { name: "Read the report" });
+    // Next adds the trailing slash in the build (trailingSlash: true), not under Vitest.
+    expect(link.getAttribute("href")).toMatch(/^\/games\/900001\/reports\/5001\/?$/);
+    expect(within(earlier as HTMLElement).queryByRole("link", { name: /report/ })).toBeNull();
   });
 });

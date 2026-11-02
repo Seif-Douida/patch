@@ -9,9 +9,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // the page's data, so they render nothing here.
 vi.mock("@/components/GameCharts", () => ({ GameCharts: () => null }));
 
-// Site data from a night without a model (aspect fields null): schema 2, or schema 3 with its
-// causal block and a patch that isn't a treatment candidate (no estimate).
-function siteData(schema: 2 | 3): string {
+// Site data from a night without a model (aspect fields null): schema 3 with its causal block and
+// a patch that isn't a treatment candidate (no estimate), or schema 4 with no reports yet.
+function siteData(schema: 3 | 4): string {
   const dir = mkdtempSync(path.join(tmpdir(), "site-data-"));
   const header = {
     schema_version: schema,
@@ -19,7 +19,7 @@ function siteData(schema: 2 | 3): string {
     generated_at: "2026-10-14T03:30:00Z",
     attribution: "Data from Steam",
   };
-  const v3 = schema === 3;
+  const v4 = schema === 4;
   const summary = {
     appid: 900001,
     name: "Example Arena (sample data)",
@@ -36,7 +36,8 @@ function siteData(schema: 2 | 3): string {
       ...header,
       games: [summary],
       aspect_model: null,
-      ...(v3 ? { causal } : {}),
+      causal,
+      ...(v4 ? { reports: 0 } : {}),
     }),
   );
   const post = {
@@ -55,7 +56,7 @@ function siteData(schema: 2 | 3): string {
       name: summary.name,
       genres: summary.genres,
       series: [],
-      patches: [v3 ? { ...post, effect: null } : post],
+      patches: [v4 ? { ...post, effect: null, report: null } : { ...post, effect: null }],
       aspects: null,
     }),
   );
@@ -69,7 +70,7 @@ describe("GamePage", () => {
   });
 
   it("game_page_renders_without_aspects", async () => {
-    for (const schema of [2, 3] as const) {
+    for (const schema of [3, 4] as const) {
       vi.stubEnv("SITE_DATA_DIR", siteData(schema));
       vi.resetModules(); // the data folder is read when lib/data loads
       const { default: GamePage } = await import("./page");

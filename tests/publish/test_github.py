@@ -253,6 +253,29 @@ def test_publisher_publishes_then_dispatches_the_commit(
     ]
 
 
+def test_publish_branch_replaces_agent_data_without_a_dispatch(
+    github: FakeGitHub, key_pair: tuple[str, rsa.RSAPublicKey]
+) -> None:
+    # Phase 5 (design D2): the API reads the night's bundle and reports from the orphan branch
+    # `agent-data`; the site's workflow isn't started for it.
+    pem, _ = key_pair
+    publisher = GitHubPublisher(
+        app_id=APP_ID, private_key=SecretStr(pem), repo=REPO, http=github.client(), now=lambda: NOW
+    )
+    files = {"bundle.json.gz": b"\x1f\x8b", "reports.json": b"{}\n"}
+
+    publisher.publish_branch("agent-data", files, data_version=9)
+    publisher.publish_branch("agent-data", files, data_version=10)
+
+    assert github.dispatches == []
+    assert set(github.refs) == {"agent-data"}
+    commit = github.commits[github.refs["agent-data"]]
+    assert commit["parents"] == []
+    assert commit["message"] == "agent-data v10"
+    stored = {entry["path"]: github.blobs[entry["sha"]] for entry in github.trees[commit["tree"]]}
+    assert stored == files
+
+
 def test_publisher_reports_failures_as_an_issue_and_closes_it_on_success(
     github: FakeGitHub, key_pair: tuple[str, rsa.RSAPublicKey]
 ) -> None:

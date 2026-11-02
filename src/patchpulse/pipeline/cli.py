@@ -54,6 +54,10 @@ class LocalDirPublisher:
             path.write_bytes(content)
         log.info("wrote %d files (data_version %d) to %s", len(files), data_version, self.directory)
 
+    def publish_branch(self, branch: str, files: Mapping[str, bytes], *, data_version: int) -> None:
+        """The agent's data goes to a sub-folder named after the branch."""
+        LocalDirPublisher(self.directory / branch).publish(files, data_version=data_version)
+
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         log.info("run %d %s (not reported: local run)", run_id, status)
 

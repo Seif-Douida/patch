@@ -21,6 +21,9 @@ candidates:
     json_mode: true
     system_instruction: true
     use_fraction: 0.5
+  # The agent's chain (Phase 5, design D8): Phase 2's half-split ends, so each uses its whole
+  # quota. 3.1 Flash Lite's limits are from the AI Studio dashboard (Seif, 25 Oct 2026); both
+  # answered every request of the 25 Oct probe.
   gemini-3.5-flash-lite:
     id: gemini-3.5-flash-lite
     rpm: 15
@@ -28,7 +31,15 @@ candidates:
     rpd: 500
     json_mode: true
     system_instruction: true
-    use_fraction: 0.5
+    use_fraction: 1.0
+  gemini-3.1-flash-lite:
+    id: gemini-3.1-flash-lite
+    rpm: 15
+    tpm: 250000
+    rpd: 500
+    json_mode: true
+    system_instruction: true
+    use_fraction: 1.0
   # The bake-off winner's model, self-hosted on an OpenAI-style server with no rate limits
   # (ADR-020). Its address and key are PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY in .env. On gold dev
   # it tied Google's copy (macro-F1 0.890 vs 0.886; 137 of 150 label sets identical, 2026-10-12).
@@ -41,3 +52,8 @@ candidates:
 # The bake-off winner was gemma-4-31b (plan Task 9, 2026-10-12, reports/aspects/teacher-bakeoff.md).
 # Google's free tier kept failing it, so the silver set is labeled by the same model self-hosted.
 teacher: selfhosted-gemma-4-31b
+
+# The Phase 5 agent tries these in order (design D8); Gemma 4 stays out of the chain (the probe:
+# 1 of 10 answers from 31B, 26B ran to its output limit).
+agent:
+  chain: [gemini-3.5-flash-lite, gemini-3.1-flash-lite]

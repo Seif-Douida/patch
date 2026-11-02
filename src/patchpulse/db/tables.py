@@ -1,6 +1,6 @@
 """SQLAlchemy Core definitions of the tables Alembic owns, for the loaders.
 
-They mirror migrations 0001 to 0005; `test_table_definitions_match_the_migrated_schema` keeps
+They mirror migrations 0001 to 0006; `test_table_definitions_match_the_migrated_schema` keeps
 them in step. Datetime columns hold naive UTC (DATETIME2 has no time zone).
 """
 
@@ -255,5 +255,25 @@ patch_effect = Table(
     Column("fingerprint", CHAR(64), nullable=False),
     Column("version", Unicode(8), nullable=False),
     Column("computed_at", DateTime, nullable=False),
+    schema="app",
+)
+
+# Phase 5 (migration 0006): the agent's stored reports.
+report = Table(
+    "report",
+    metadata,
+    Column("bundle_id", Unicode(32), primary_key=True),
+    Column("horizon", TINYINT, primary_key=True, autoincrement=False),
+    Column("run_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("report_id", Unicode(64), nullable=False),
+    Column("scope", Unicode(16), nullable=False),
+    Column("data_version", BigInteger, nullable=False),
+    Column("fingerprint", CHAR(64), nullable=False),
+    Column("prompt_version", Unicode(16), nullable=False),
+    Column("model_ids", Unicode(400), nullable=False),
+    Column("basic", Boolean, nullable=False),
+    Column("report_json", UnicodeText, nullable=False),
+    Column("public_json", UnicodeText, nullable=False),
+    Column("created_at", DateTime, nullable=False),
     schema="app",
 )

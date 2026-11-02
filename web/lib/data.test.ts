@@ -4,9 +4,10 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { SUPPORTED_SCHEMAS, loadGame, loadIndex } from "./data";
+import { SUPPORTED_SCHEMAS, loadGame, loadIndex, loadReport } from "./data";
 
-// A site-data folder with an empty index and one game file, both at the given schema version.
+// A site-data folder with an empty index, one game file and one report, all at the given schema
+// version.
 function siteData(schema: number): string {
   const dir = mkdtempSync(path.join(tmpdir(), "site-data-"));
   const header = {
@@ -21,24 +22,31 @@ function siteData(schema: number): string {
     path.join(dir, "games", "900001.json"),
     JSON.stringify({ ...header, appid: 900001, name: "Example", genres: [], series: [], patches: [] }),
   );
+  mkdirSync(path.join(dir, "reports"));
+  writeFileSync(
+    path.join(dir, "reports", "5001.json"),
+    JSON.stringify({ ...header, report: { report_id: "5001-14d", bundle_id: "5001", horizon: 14 } }),
+  );
   return dir;
 }
 
 describe("site data", () => {
-  it("site_reads_schema_2_and_3", () => {
-    expect(SUPPORTED_SCHEMAS).toEqual([2, 3]);
-    for (const schema of [2, 3]) {
+  it("site_reads_schema_3_and_4", () => {
+    expect(SUPPORTED_SCHEMAS).toEqual([3, 4]);
+    for (const schema of [3, 4]) {
       const dir = siteData(schema);
       expect(loadIndex(dir).schema_version).toBe(schema);
       expect(loadGame(900001, dir).schema_version).toBe(schema);
     }
-    // Schema 1 predates the aspects; no site data has been at 1 since Phase 2's first night.
-    const old = siteData(1);
-    expect(() => loadIndex(old)).toThrow("site data has schema 1; this site reads 2 or 3");
-    expect(() => loadGame(900001, old)).toThrow("schema 1");
+    expect(loadReport("5001", siteData(4)).report.report_id).toBe("5001-14d");
+    // Schema 2 predates the patch estimates; the live data has been at 3 since Phase 4.
+    const old = siteData(2);
+    expect(() => loadIndex(old)).toThrow("site data has schema 2; this site reads 3 or 4");
+    expect(() => loadGame(900001, old)).toThrow("schema 2");
     // A newer exporter than this site must fail the build, not render half the data.
-    const future = siteData(4);
-    expect(() => loadIndex(future)).toThrow("site data has schema 4; this site reads 2 or 3");
-    expect(() => loadGame(900001, future)).toThrow("schema 4");
+    const future = siteData(5);
+    expect(() => loadIndex(future)).toThrow("site data has schema 5; this site reads 3 or 4");
+    expect(() => loadGame(900001, future)).toThrow("schema 5");
+    expect(() => loadReport("5001", future)).toThrow("schema 5");
   });
 });

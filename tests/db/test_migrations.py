@@ -35,6 +35,7 @@ EXPECTED_TABLES = {
     "ops.qdrant_reconciliation",
     "raw.steam_review_daily",
     "app.patch_effect",
+    "app.report",
 }
 EXPECTED_SCHEMAS = {"raw", "ops", "stg", "core", "mart", "app"}
 

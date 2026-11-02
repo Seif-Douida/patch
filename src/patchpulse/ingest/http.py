@@ -101,8 +101,10 @@ class SteamHttp:
         policy: RetryPolicy | None = None,
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
+        timeout_s: float = REQUEST_TIMEOUT_S,
     ) -> None:
         self.client = client
+        self.timeout_s = timeout_s
         self.limiter = limiter
         self.policy = policy or RetryPolicy()
         self.sleep = sleep
@@ -124,7 +126,7 @@ class SteamHttp:
                     url,
                     params=dict(params),
                     headers={"User-Agent": USER_AGENT},
-                    timeout=REQUEST_TIMEOUT_S,
+                    timeout=self.timeout_s,
                 )
             except httpx2.TransportError as error:  # includes timeouts
                 problem = type(error).__name__
