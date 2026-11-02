@@ -51,8 +51,8 @@ from numpy.typing import NDArray
 from patchpulse.causal import cli as causal_cli
 from patchpulse.config import LabSettings, SettingsError, get_lab_settings
 from patchpulse.db.engine import connect_with_resume_retry, make_entra_engine
-from patchpulse.labeling.agreement import agreement, render_agreement
-from patchpulse.labeling.audit import SEIF_LABELS_FILE
+from patchpulse.labeling.agreement import agreement, render_agreement, self_agreement
+from patchpulse.labeling.audit import RELABEL_SIZE, SEIF_LABELS_FILE, SEIF_RELABEL_FILE
 from patchpulse.labeling.bakeoff import (
     REPORT_PATH,
     choose_teacher,
@@ -292,9 +292,18 @@ def _gold_agreement(settings: LabSettings) -> int:
         )
         return 2
     report = agreement(read_labels(settings.gold_dir / CLAUDE_LABELS_FILE), seif, audit)
+    # Seif's blind re-label of 30 of his 150 (ADR-019): reported once all 30 are in.
+    relabel_path = settings.gold_dir / SEIF_RELABEL_FILE
+    relabel = read_labels(relabel_path) if relabel_path.exists() else {}
+    reliability = (
+        self_agreement(seif, relabel, list(relabel)) if len(relabel) >= RELABEL_SIZE else None
+    )
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORTS_DIR / "gold-agreement.md"
-    path.write_text(render_agreement(report), encoding="utf-8", newline="\n")
+    rendered = render_agreement(report, reliability, relabeled=len(relabel))
+    path.write_text(rendered, encoding="utf-8", newline="\n")
+    if reliability is not None:
+        log.info("Seif's re-label: kappa %s over all pairs", reliability.pooled_kappa)
     log.info(
         "agreement %s (mean kappa %s); report: %s",
         "passed" if report.passed else "FAILED",
