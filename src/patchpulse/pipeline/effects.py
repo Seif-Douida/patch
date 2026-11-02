@@ -12,7 +12,6 @@ night finds the rest by their fingerprints.
 from __future__ import annotations
 
 import logging
-import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -181,16 +180,20 @@ def run_effects(
     run_id: int,
     now: datetime,
     clock: Callable[[], float],
-    deadline: float,
+    budget_s: float,
+    night_end: float,
 ) -> EffectsOutcome:
-    """Estimate the due bundles, newest first, each in its own transaction, until `deadline` (on
-    `clock`); a bundle started before the deadline finishes. A bundle that raises is a warning
-    (effects_bundle_failed) and the rest go on: otherwise the newest one could block every older
-    bundle night after night."""
-    began = time.monotonic()
+    """Estimate the due bundles, newest first, each in its own transaction, for `budget_s` from
+    when the inputs are read, and never past `night_end` (both on `clock`); a bundle started in
+    time finishes. The read gets no budget of its own: in Azure it can take most of the 2 minutes
+    (31 Oct 2026). A bundle that raises is a warning (effects_bundle_failed) and the rest go on:
+    otherwise the newest one could block every older bundle night after night."""
+    began = clock()
     with engine.connect() as connection:
         inputs = read_inputs(connection, today=now.date())
         stored = stored_fingerprints(connection)
+    read_s = clock() - began
+    deadline = min(clock() + budget_s, night_end)
     due = bundles_to_estimate(inputs, stored)
     shortest = min(HORIZONS)
     complete = [
@@ -228,12 +231,13 @@ def run_effects(
     )
     log.info(
         "effects: %d bundles estimated, %d rows written, %d unchanged, %d left for the next "
-        "night, %d failed (%.1f s)",
+        "night, %d failed (read %.1f s, %.1f s in all)",
         outcome.estimated,
         outcome.written,
         outcome.unchanged,
         outcome.remaining,
         outcome.failed,
-        time.monotonic() - began,
+        read_s,
+        clock() - began,
     )
     return outcome

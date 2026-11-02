@@ -201,7 +201,28 @@ def marts(world: World) -> World:
 
 def night(world: World, run_id: int) -> EffectsOutcome:
     """A night with time to spare."""
-    return run_effects(world.engine, run_id=run_id, now=NOW, clock=lambda: 0.0, deadline=60.0)
+    return run_effects(
+        world.engine, run_id=run_id, now=NOW, clock=lambda: 0.0, budget_s=60.0, night_end=3_600.0
+    )
+
+
+class SlowRead:
+    """A clock the read moves: reading the inputs takes `read_s` of it (91 bundles took 46 s to
+    estimate locally, so the nights' 4-14 in 2 minutes pointed at the read, 31 Oct)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, read_s: float) -> None:
+        self.now = 0.0
+        real = effects.read_inputs
+
+        def slow(connection: Any, *, today: date) -> Any:
+            inputs = real(connection, today=today)
+            self.now += read_s
+            return inputs
+
+        monkeypatch.setattr(effects, "read_inputs", slow)
+
+    def __call__(self) -> float:
+        return self.now
 
 
 def stored(engine: Engine) -> list[Any]:
@@ -339,7 +360,9 @@ def test_budget_stops_and_the_next_night_resumes(marts: World) -> None:
     def clock() -> float:  # the night's time runs out once a bundle is stored
         return 100.0 if stored(marts.engine) else 0.0
 
-    first = run_effects(marts.engine, run_id=1, now=NOW, clock=clock, deadline=50.0)
+    first = run_effects(
+        marts.engine, run_id=1, now=NOW, clock=clock, budget_s=50.0, night_end=3_600.0
+    )
 
     assert first == EffectsOutcome(estimated=1, written=15, unchanged=0, remaining=1, failed=0)
     assert {r.bundle_id for r in stored(marts.engine)} == {B2}  # newest first
@@ -348,6 +371,34 @@ def test_budget_stops_and_the_next_night_resumes(marts: World) -> None:
 
     assert second == EffectsOutcome(estimated=1, written=30, unchanged=1, remaining=0, failed=0)
     assert {(r.bundle_id, r.run_id) for r in stored(marts.engine)} == {(B2, 1), (B1, 2)}
+
+
+def test_the_budget_starts_once_the_inputs_are_read(
+    marts: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A 5-minute read used to eat a 2-minute budget whole: the deadline was set before it.
+    caplog.set_level(logging.INFO, logger="patchpulse.pipeline")
+    clock = SlowRead(monkeypatch, read_s=300.0)
+
+    outcome = run_effects(
+        marts.engine, run_id=1, now=NOW, clock=clock, budget_s=120.0, night_end=3_600.0
+    )
+
+    assert outcome == EffectsOutcome(estimated=2, written=45, unchanged=0, remaining=0, failed=0)
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "patchpulse.pipeline.effects"]
+    assert line.endswith("0 failed (read 300.0 s, 300.0 s in all)")
+
+
+def test_the_nights_end_still_caps_the_stage(marts: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The read itself ran past the night's end: no bundle starts, both wait for the next night.
+    clock = SlowRead(monkeypatch, read_s=300.0)
+
+    outcome = run_effects(
+        marts.engine, run_id=1, now=NOW, clock=clock, budget_s=120.0, night_end=200.0
+    )
+
+    assert outcome == EffectsOutcome(estimated=0, written=0, unchanged=0, remaining=2, failed=0)
+    assert stored(marts.engine) == []
 
 
 def test_a_failing_bundle_is_a_warning_and_the_others_go_on(
