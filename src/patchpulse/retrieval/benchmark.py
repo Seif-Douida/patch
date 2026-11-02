@@ -219,7 +219,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 started = time.perf_counter()
                 embedder.embed_queries([query])
                 times.append((time.perf_counter() - started) * 1000)
-            line = f"{np.percentile(times, 50):.1f}\t{np.percentile(times, 95):.1f}"
+            # To the microsecond: a tiny test model can answer in well under 0.1 ms.
+            line = f"{np.percentile(times, 50):.3f}\t{np.percentile(times, 95):.3f}"
         print(f"{embedder.spec.name}\t{line}", flush=True)
     return 0
 
