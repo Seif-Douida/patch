@@ -1,0 +1,31 @@
+id: clair-obscur-2025-04-launch
+game: "Clair Obscur: Expedition 33"
+appid: 1903340
+window:
+  start: 2025-04-24
+  end: 2025-05-07
+question: "How did players receive Clair Obscur: Expedition 33 when it came out?"
+primary_cause: launch_performance
+secondary_causes: []
+direction: positive
+key_facts:
+  - "Clair Obscur: Expedition 33, Sandfall Interactive's first game, released on 24 April 2025."
+  - "On launch day its Steam user score was Very Positive at 93%, with more than 50,000 players at the peak."
+  - "Critics had already scored it highly, around a 92 Metacritic average at release."
+acceptable_evidence:
+  - "Sandfall's release post of 24 April 2025"
+  - "a positive share in the mid-90s on heavy launch volume"
+  - "positive reviews about the story, combat and art from release day"
+sources:
+  - url: https://steamcommunity.com/ogg/1903340/announcements/detail/499445587486179604
+    published: 2025-04-24
+    shows: "Sandfall's release announcement"
+  - url: https://www.pcgamesn.com/clair-obscur-expedition-33/steam-player-count-reception
+    published: 2025-04-24
+    shows: "a Very Positive 93% Steam user score and a 50,000+ player peak on day one"
+  - url: https://www.vg247.com/clair-obscur-expidition-33-day-one-player-count
+    published: 2025-04-25
+    shows: "a strong start with over 50,000 concurrent Steam players on day one"
+confidence: high
+researched: 2026-11-02
+notes: "A well-received launch (Seif's ruling, 2 Nov 2026: launch_performance covers good launches too, with direction positive). A launch-day crash tied to the Steam overlay was fixed the same day."

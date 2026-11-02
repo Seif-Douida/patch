@@ -1,0 +1,34 @@
+id: monster-hunter-wilds-2025-12-title-update-4
+game: "Monster Hunter Wilds"
+appid: 2246340
+window:
+  start: 2025-12-16
+  end: 2025-12-21
+question: "Why did Monster Hunter Wilds' reviews dip in mid-December 2025?"
+primary_cause: patch
+secondary_causes: []
+direction: negative
+patch:
+  date: 2025-12-16
+  name: "Free Title Update 4 (Ver. 1.040)"
+key_facts:
+  - "Free Title Update 4 (Ver. 1.040) went live on 16 December 2025 with the Elder Dragon Gogmazios and CPU and GPU optimisations."
+  - "Capcom had promised the update would improve stability and performance, with a further Steam-only patch planned for late January."
+  - "On the release day the game drew its most negative Steam reviews in a single day since early October, many saying performance was still poor."
+acceptable_evidence:
+  - "the Ver. 1.040 update notes and Capcom's performance post of 12 December 2025"
+  - "negative reviews about performance from 16 December"
+  - "the positive share dropping below 40% for several days"
+sources:
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/559139291408629867
+    published: 2025-12-12
+    shows: "Capcom's plan: TU4 optimisations, a Steam-only patch in late January, more in February"
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/559139291408631501
+    published: 2025-12-15
+    shows: "Ver. 1.040 update summary with the 16 December release time"
+  - url: https://www.thegamer.com/monster-hunter-wilds-title-update-4-complaints/
+    published: 2025-12-17
+    shows: "per SteamDB, 420 negative vs 238 positive reviews on release day, complaints about performance"
+confidence: medium
+researched: 2026-11-02
+notes: "The 28-day baseline includes an unusual high from 24 November to 1 December (Steam's Black Friday sale and Steam Awards nominations), so the drop against early December alone is smaller. Winter Sale 2025 starts 18 December. One press source."

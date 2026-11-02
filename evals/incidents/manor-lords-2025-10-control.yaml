@@ -1,0 +1,29 @@
+id: manor-lords-2025-10-control
+game: "Manor Lords"
+appid: 1363080
+window:
+  start: 2025-10-23
+  end: 2025-11-05
+question: "Did anything change in Manor Lords' reviews in late October 2025?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "The developer posted no announcement on Steam in the window; the nearest were a 35% discount post on 11 October 2025 and a development update on 23 November 2025."
+  - "No Steam seasonal sale touches the window: the Autumn Sale ended on 6 October 2025, and Steam's Black Friday sale began on 24 November 2025."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "no patch, sale or news event in the window"
+sources:
+  - url: https://store.steampowered.com/news/app/1363080
+    published: 2026-11-02
+    shows: "the game news hub; no developer announcements in the window (checked via the ISteamNews API)"
+  - url: https://web.archive.org/web/20250801033424/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2025-08-01
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+  - url: https://www.sportskeeda.com/esports/steam-autumn-sale-2025-changes-black-friday-award-nominations-other-adjustments
+    published: 2025-07-26
+    shows: "Valve's 2025 plan: Black Friday offers and Steam Awards nominations from 24 November to 1 December"
+confidence: high
+researched: 2026-11-02
+notes: "The 11 October discount's end date isn't stated; Hooded Horse's other deals run about a week. The beta update and the rise in early October sit in the 28-day baseline. No press items in the window. Our counts: 707 reviews at 81.3% vs 81.5%."

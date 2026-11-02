@@ -1,0 +1,37 @@
+id: monster-hunter-wilds-2026-01-performance-patch
+game: "Monster Hunter Wilds"
+appid: 2246340
+window:
+  start: 2026-01-28
+  end: 2026-02-03
+question: "Why did Monster Hunter Wilds' Steam reviews jump at the end of January 2026?"
+primary_cause: patch
+secondary_causes: []
+direction: positive
+patch:
+  date: 2026-01-28
+  name: "Ver. 1.040.03.01"
+key_facts:
+  - "A Steam-only patch on 28 January 2026 optimised Steam-specific processes and fixed a bug that raised CPU load and cut frame rates in the hub areas."
+  - "Capcom had announced this patch in December 2025 as part of its stability and performance plan."
+  - "Players reported large performance gains, and positive reviews poured in after the patch."
+acceptable_evidence:
+  - "the Ver. 1.040.03.01 patch notes of 28 January 2026"
+  - "positive reviews mentioning better performance after the patch"
+  - "the positive share rising from about half to about 80% on the patch day"
+sources:
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/526492547790405651
+    published: 2026-01-28
+    shows: "Capcom's patch notes for Ver. 1.040.03.01 (Steam-specific optimisation, hub CPU load bug)"
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/559139291408629867
+    published: 2025-12-12
+    shows: "Capcom's roadmap announcing the late-January Steam-only performance patch"
+  - url: https://www.destructoid.com/it-took-almost-a-year-but-monster-hunter-wilds-performance-issues-have-been-fixed-and-fans-are-in-awe-what-the-heck-did-they-do/
+    published: 2026-01-28
+    shows: "the 28 January patch fixed major PC performance issues and reviews began rising"
+  - url: https://gamewave.fr/monster-hunter-wilds/monster-hunter-wilds-libere-des-avis-mitiges-sur-steam-apres-la-mise-a-jour-d-optimisation/
+    published: 2026-02-20
+    shows: "Steam rating improved after the 28 January optimisation update"
+confidence: high
+researched: 2026-11-02
+notes: ""

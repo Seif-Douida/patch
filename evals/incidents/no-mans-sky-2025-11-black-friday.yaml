@@ -1,0 +1,31 @@
+id: no-mans-sky-2025-11-black-friday
+game: "No Man's Sky"
+appid: 275850
+window:
+  start: 2025-11-24
+  end: 2025-12-01
+question: "Why did No Man's Sky's reviews spike in late November 2025?"
+primary_cause: pricing_sale
+secondary_causes: []
+direction: positive
+key_facts:
+  - "Steam ran Black Friday offers and the Steam Awards nominations together from 24 November to 1 December 2025."
+  - "Valve's nominations badge rewarded reviewing, or updating a review of, a game you nominated."
+  - "Hello Games asked players on 24 November to nominate No Man's Sky for the Labor of Love award."
+acceptable_evidence:
+  - "the Black Friday 2025 dates in the sale calendar"
+  - "review volume about ten times normal for exactly those days, almost all positive"
+  - "no update in the window"
+sources:
+  - url: https://steamcommunity.com/ogg/593110/announcements/detail/585033008523772204
+    published: 2025-11-24
+    shows: "Valve: Steam Awards nominations open to 1 December, with a badge level for reviewing a nominated game"
+  - url: https://www.sportskeeda.com/esports/steam-autumn-sale-2025-changes-black-friday-award-nominations-other-adjustments
+    published: 2025-07-26
+    shows: "Valve's 2025 plan: Black Friday offers and Steam Awards nominations from 24 November to 1 December"
+  - url: https://steamcommunity.com/ogg/275850/announcements/detail/627816662678110801
+    published: 2025-11-24
+    shows: "Hello Games asks players to nominate No Man's Sky for Labor of Love"
+confidence: medium
+researched: 2026-11-02
+notes: "Depends on the Black Friday 2025 row being in the sale seed (branch fix/sale-calendar-black-friday); without it the agent sees no sale here. No source says whether No Man's Sky itself was discounted. Our counts: about 100 reviews a day at ~90-96% before, 600-2,400 a day at 99-100% in the window, about 100 a day at ~90% after. Seif's ruling (2 Nov 2026): Steam-event review bursts count as pricing_sale."

@@ -1,0 +1,34 @@
+id: monster-hunter-wilds-2025-09-title-update-3
+game: "Monster Hunter Wilds"
+appid: 2246340
+window:
+  start: 2025-09-29
+  end: 2025-10-05
+question: "What did players think of Monster Hunter Wilds' Title Update 3?"
+primary_cause: patch
+secondary_causes: [pricing_sale]
+direction: negative
+patch:
+  date: 2025-09-29
+  name: "Free Title Update 3 (Ver. 1.030)"
+key_facts:
+  - "Free Title Update 3 (Ver. 1.030) went live on 29 September 2025, adding the Final Fantasy XIV collaboration and Omega Planetes."
+  - "Steam reviews fell sharply after it, with players complaining that PC performance was still poor or worse after each update."
+  - "The game was on sale at the time: Steam's Autumn Sale ran from 29 September to 6 October 2025."
+acceptable_evidence:
+  - "the Ver. 1.030 update notes of 29 September 2025"
+  - "negative reviews about PC performance rising from the update day"
+  - "the positive share dropping to about a fifth for several days"
+sources:
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/544495527868236234
+    published: 2025-09-25
+    shows: "Capcom's Title Update 3 showcase with the 29 September launch date"
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/544495527868237552
+    published: 2025-10-01
+    shows: "Ver. 1.030 update summary, released 29 September 2025 at 02:30 UTC"
+  - url: https://www.pcgamer.com/games/action/monster-hunter-wilds-steam-reviews-absolutely-tank-as-players-lose-patience-with-its-technical-woes-every-time-the-game-gets-updated-my-performance-decreases/
+    published: 2025-10-06
+    shows: "Steam reviews tanking after the update over long-running performance problems"
+confidence: high
+researched: 2026-11-02
+notes: "Our patch list dates Ver. 1.030 to 1 October (when the summary was posted); the release was 29 September. The sale overlaps but the reviews fell, so the sources point to the update."

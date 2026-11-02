@@ -1,0 +1,37 @@
+id: the-witcher-3-2026-09-remastered-update
+game: "The Witcher 3: Wild Hunt"
+appid: 292030
+window:
+  start: 2026-09-29
+  end: 2026-10-05
+question: "How did players react to The Witcher 3 Remastered update?"
+primary_cause: patch
+secondary_causes: [pricing_sale]
+direction: negative
+patch:
+  date: 2026-09-29
+  name: "The Witcher 3: Wild Hunt — Remastered"
+key_facts:
+  - "The Remastered version came out on 29 September 2026 as a free upgrade for everyone who owned the game on Steam."
+  - "Launch-day negative reviews spiked, largely over rendering problems on AMD graphics cards before AMD shipped a driver."
+  - "Other complaints covered performance, a new launcher, menu changes and visual changes; CD Projekt Red shipped a hotfix on 1 October."
+acceptable_evidence:
+  - "CD Projekt Red's Remastered release posts of 28 and 29 September 2026"
+  - "negative reviews about AMD rendering, performance and the launcher from 29 September"
+  - "the positive share falling from the mid-90s to about 70%, recovering over the following two weeks"
+sources:
+  - url: https://steamcommunity.com/ogg/292030/announcements/detail/694273194214819727
+    published: 2026-09-28
+    shows: "what's new in the Remastered version, free upgrade for Steam owners"
+  - url: https://steamcommunity.com/ogg/292030/announcements/detail/694273194214819697
+    published: 2026-09-29
+    shows: "the Remastered version is available"
+  - url: https://www.pcguide.com/news/the-witcher-3-remastered-is-still-getting-negative-steam-reviews-despite-amd-gpu-fix-with-new-graphics-driver/
+    published: 2026-09-30
+    shows: "launch-day spike of negative reviews mostly from AMD rendering problems"
+  - url: https://www.thegamer.com/the-witcher-3-steam-reviews-breakdown/
+    published: 2026-10-01
+    shows: "over 1,100 negative reviews on launch day and 700 more the next, with the main complaints"
+confidence: high
+researched: 2026-11-02
+notes: "Steam's Autumn Sale 2026 started 1 October, two days in; it doesn't explain a drop. Patch 5.01 followed on 8 October."

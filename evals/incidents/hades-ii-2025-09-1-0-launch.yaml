@@ -1,0 +1,31 @@
+id: hades-ii-2025-09-1-0-launch
+game: "Hades II"
+appid: 1145350
+window:
+  start: 2025-09-25
+  end: 2025-09-28
+question: "How was Hades II's full release received in late September 2025?"
+primary_cause: launch_performance
+secondary_causes: []
+direction: positive
+key_facts:
+  - "Hades II left early access with its 1.0 release on 25 September 2025."
+  - "Critics scored it very highly, an OpenCritic average around 9.2 out of 10."
+  - "Within two days 96% of recent Steam reviews were positive and the player count peaked near 89,000."
+acceptable_evidence:
+  - "Supergiant's v1.0 release post of 25 September 2025"
+  - "review volume rising about tenfold with the positive share staying in the mid-90s"
+  - "positive reviews about the finished game from 25 September"
+sources:
+  - url: https://steamcommunity.com/ogg/1145350/announcements/detail/596285836987729006
+    published: 2025-09-25
+    shows: "Supergiant's announcement that early access is over and v1.0 is out"
+  - url: https://ixbt.games/en/news/2025/09/27/hades-2-pokoriaet-steam-polozitelnye-otzyvy-i-vysokii-onlain.html
+    published: 2025-09-27
+    shows: "96% of recent Steam reviews positive, an 89,000 player peak, OpenCritic 9.2 (citing IGN and SteamDB)"
+  - url: https://www.pcgamesn.com/hades-2/critic-review-scores-expedition-33
+    published: 2025-09-24
+    shows: "critic scores the day before 1.0 making it 2025's highest-rated PC game at the time"
+confidence: medium
+researched: 2026-11-02
+notes: "A 1.0 release after 16 months of early access, so the data has history before it; the window starts at 1.0, not at the first review. It ends the day before the Autumn Sale 2025 (29 September). The positive share barely moved (mid-90s before and after); what changed was volume. Seif's ruling (2 Nov 2026): good launches count as launch_performance with direction positive. Medium because the positive share didn't shift, so the case tests whether the agent recognises the release itself."

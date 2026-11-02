@@ -1,0 +1,34 @@
+id: helldivers-2-2026-04-exosuit-rebalance
+game: "Helldivers 2"
+appid: 553850
+window:
+  start: 2026-04-28
+  end: 2026-05-04
+question: "Why did Helldivers 2's Steam reviews crash at the end of April 2026?"
+primary_cause: patch
+secondary_causes: []
+direction: negative
+patch:
+  date: 2026-04-28
+  name: "Machinery of Oppression: 6.2.2"
+key_facts:
+  - "Patch 6.2.2 went live on 28 April 2026 with two new biomes, a major exosuit rebalance and wide enemy rebalances."
+  - "The patch nearly doubled exosuit health but also raised how hard many enemies hit vehicles, so players read the mech buff as a nerf."
+  - "On 8 May 2026 Arrowhead answered the backlash, admitting some balance changes had not been explained clearly in patch notes."
+acceptable_evidence:
+  - "the 6.2.2 patch notes of 28 April 2026"
+  - "negative reviews about balance and exosuits rising from the patch day"
+  - "the positive share falling sharply on 28-30 April, then partly recovering"
+sources:
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/541136853162525651
+    published: 2026-04-28
+    shows: "Arrowhead's 6.2.2 patch notes: new biomes, exosuit, enemy, sidearm and stratagem rebalances"
+  - url: https://cosmicbook.news/helldivers-2-update-reactions-negative-exo-experts-warbond
+    published: 2026-04-28
+    shows: "player backlash to 6.2.2 centred on the exosuit changes and enemy damage buffs"
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/686379208862073745
+    published: 2026-05-08
+    shows: "Arrowhead's response to the feedback, including unclear balance changes in patch notes"
+confidence: high
+researched: 2026-11-02
+notes: "The paid Exo Experts Warbond (announced 21 April) launched with the patch; the sources put the balance changes first. The positive share was already slipping in the week before the patch."
