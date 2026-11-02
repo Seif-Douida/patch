@@ -1,0 +1,34 @@
+id: helldivers-2-2026-10-anti-cheat
+game: "Helldivers 2"
+appid: 553850
+window:
+  start: 2026-10-20
+  end: 2026-10-25
+question: "Why did Helldivers 2's reviews collapse in late October 2026?"
+primary_cause: platform_policy
+secondary_causes: [patch]
+direction: negative
+key_facts:
+  - "On 20 October 2026 Arrowhead replaced GameGuard with Easy Anti-Cheat, delivered in update 7.2.0."
+  - "Arrowhead said the switch targets cheat mods and warned that some harmless cosmetic mods could stop working."
+  - "Negative Steam reviews arrived in the thousands from the same day, most of them about the anti-cheat breaking mods."
+acceptable_evidence:
+  - "Arrowhead's anti-cheat announcement of 20 October 2026"
+  - "negative reviews about Easy Anti-Cheat and broken mods from 20 October"
+  - "the positive share falling from the mid-80s to the teens within a day"
+sources:
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/713415392836453549
+    published: 2026-10-20
+    shows: "Arrowhead's post on the switch to Easy Anti-Cheat and its effect on mods"
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/715666559007196082
+    published: 2026-10-20
+    shows: "update 7.2.0 notes, which introduce Easy Anti-Cheat"
+  - url: https://www.pcgamer.com/games/third-person-shooter/helldivers-2-studio-warns-mods-may-break-as-it-switches-to-new-anti-cheat-and-the-negative-reviews-are-dropping-on-steam-like-hellbombs/
+    published: 2026-10-20
+    shows: "more than 1,000 negative Steam reviews in a single day after the anti-cheat switch"
+  - url: https://insider-gaming.com/helldivers-2-gets-review-bombed-after-moving-to-easy-anti-cheat/
+    published: 2026-10-29
+    shows: "recent reviews Mostly Negative, most complaining about Easy Anti-Cheat"
+confidence: high
+researched: 2026-11-02
+notes: "Category call: the anti-cheat is a non-gameplay decision delivered by a patch, and reviews complain about the anti-cheat, so platform_policy leads and patch is secondary (guide rule). 7.2.1 hotfix on 22 October fixed a crash."

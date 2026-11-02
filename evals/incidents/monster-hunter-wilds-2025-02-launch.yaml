@@ -1,0 +1,31 @@
+id: monster-hunter-wilds-2025-02-launch
+game: "Monster Hunter Wilds"
+appid: 2246340
+window:
+  start: 2025-02-28
+  end: 2025-03-12
+question: "How did Monster Hunter Wilds' launch go on Steam?"
+primary_cause: launch_performance
+secondary_causes: []
+direction: negative
+key_facts:
+  - "Monster Hunter Wilds released on Steam on 28 February 2025 and set a record concurrent player count for Capcom on PC."
+  - "Its Steam rating settled at Mixed within hours, with negative reviews mostly about poor PC performance."
+  - "Capcom posted a troubleshooting guide on launch day and acknowledged player feedback in a week-one message on 7 March."
+acceptable_evidence:
+  - "negative reviews about frame rate, stutter and crashes on PC from release day"
+  - "Capcom's launch-day troubleshooting post"
+  - "a positive share around half on the first days, recovering only slowly"
+sources:
+  - url: https://www.pcgamer.com/games/action/it-runs-awful-it-looks-awful-monster-hunter-wilds-performance-issues-put-a-dampener-on-its-record-breaking-concurrents-as-it-settles-into-an-early-mixed-rating-on-steam/
+    published: 2025-02-28
+    shows: "performance problems behind an early Mixed Steam rating despite record player numbers"
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/534343407476147388
+    published: 2025-02-28
+    shows: "Capcom's troubleshooting and known issues post on release day"
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/538847639944299806
+    published: 2025-03-07
+    shows: "Capcom's week-one message: 1.38 million concurrent players, feedback being addressed"
+confidence: high
+researched: 2026-11-02
+notes: "The window ends the day before the Spring Sale 2025 (13 March)."

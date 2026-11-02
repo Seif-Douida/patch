@@ -1,0 +1,30 @@
+id: cities-skylines-ii-2025-06-quays-piers-patch
+game: "Cities: Skylines II"
+appid: 949230
+window:
+  start: 2025-06-11
+  end: 2025-06-17
+question: "Why did Cities: Skylines II's reviews slip in mid-June 2025?"
+primary_cause: patch
+secondary_causes: []
+direction: negative
+patch:
+  date: 2025-06-11
+  name: "Quays & Piers Patch 1.3.3f1"
+key_facts:
+  - "Patch 1.3.3f1 on 11 June 2025 brought cargo fixes and free quays, piers and bridges."
+  - "Two days later the developers said many players could no longer load or play the game after the patch, and posted steps to fix it."
+acceptable_evidence:
+  - "the 1.3.3f1 patch notes of 11 June 2025"
+  - "the developers' fix guide of 13 June 2025"
+  - "negative reviews about loading failures and broken saves after the patch"
+sources:
+  - url: https://steamcommunity.com/ogg/949230/announcements/detail/542233572484844257
+    published: 2025-06-11
+    shows: "1.3.3f1 patch notes"
+  - url: https://steamcommunity.com/ogg/949230/announcements/detail/640187601178857939
+    published: 2025-06-13
+    shows: "developers acknowledge many players unable to load or play after 1.3.3f1"
+confidence: medium
+researched: 2026-11-02
+notes: "Only primary sources; no press coverage found, and Paradox forum threads report the loading freeze. A modest move on thin volume (about 450 reviews in the week, positive share mid-40s vs mid-50s before)."

@@ -1,0 +1,31 @@
+id: cities-skylines-ii-2023-10-launch
+game: "Cities: Skylines II"
+appid: 949230
+window:
+  start: 2023-10-24
+  end: 2023-11-06
+question: "How was Cities: Skylines II received when it launched?"
+primary_cause: launch_performance
+secondary_causes: []
+direction: negative
+key_facts:
+  - "Cities: Skylines II released on 24 October 2023."
+  - "Colossal Order had said before launch that the game missed its performance target, and on 25 October blamed rendering and promised patches."
+  - "Early Steam reviews were Mixed, with low frame rates even on high-end PCs the most common complaint."
+acceptable_evidence:
+  - "Colossal Order's performance post of 25 October 2023"
+  - "negative reviews about frame rate and hardware demands from release day"
+  - "a positive share around half in the first two weeks"
+sources:
+  - url: https://steamcommunity.com/ogg/949230/announcements/detail/3744239011016556922
+    published: 2023-10-25
+    shows: "Colossal Order on missing its benchmark target, rendering issues and planned patches"
+  - url: https://primagames.com/news/cities-skylines-2-performance-issues-make-it-a-natural-disaster-steam-players-agree
+    published: 2023-10-24
+    shows: "launch-day Steam reviews dominated by performance complaints"
+  - url: https://www.notebookcheck.net/Cities-Skylines-II-lands-on-Steam-welcomed-with-mixed-reviews.762104.0.html
+    published: 2023-10-25
+    shows: "about 8,500 reviews, 48% positive, mostly technical complaints"
+confidence: high
+researched: 2026-11-02
+notes: ""

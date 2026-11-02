@@ -1,0 +1,34 @@
+id: the-blood-of-dawnwalker-2026-09-launch
+game: "The Blood of Dawnwalker"
+appid: 3751260
+window:
+  start: 2026-09-02
+  end: 2026-09-15
+question: "How was The Blood of Dawnwalker received at launch?"
+primary_cause: launch_performance
+secondary_causes: []
+direction: positive
+key_facts:
+  - "The Blood of Dawnwalker, from former Witcher 3 developers, released on Steam on 3 September 2026 and topped Steam's global best-sellers."
+  - "Early reviews praised its world and day-night mechanics but criticised stuttering, frame drops and control bugs on PC."
+  - "The developers shipped hotfixes through the first week, including stability fixes, and sold a million copies within about a week."
+acceptable_evidence:
+  - "the developers' release post and hotfix notes of 3-9 September 2026"
+  - "a positive share in the 80s, with negative reviews about PC optimisation"
+  - "the share rising from the mid-70s on day one to about 90% as hotfixes landed"
+sources:
+  - url: https://steamcommunity.com/ogg/3751260/announcements/detail/667249691758428756
+    published: 2026-09-03
+    shows: "the release announcement"
+  - url: https://www.gamemeca.com/en/view.php?gid=1780028
+    published: 2026-09-03
+    shows: "top of Steam's global best-sellers; praise for the story, heavy criticism of optimisation"
+  - url: https://steamcommunity.com/ogg/3751260/announcements/detail/667249691758430584
+    published: 2026-09-09
+    shows: "hotfix 1.0.4: improved stability and quest fixes"
+  - url: https://steamcommunity.com/ogg/3751260/announcements/detail/669502126020362290
+    published: 2026-09-09
+    shows: "one million copies sold"
+confidence: high
+researched: 2026-11-02
+notes: "Reviews start on 2 September in our data (release timings across time zones). Seif's ruling (2 Nov 2026): good launches count as launch_performance with direction positive; this one mixes praise with optimisation complaints."

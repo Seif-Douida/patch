@@ -1,0 +1,29 @@
+id: cyberpunk-2077-2025-11-control
+game: "Cyberpunk 2077"
+appid: 1091500
+window:
+  start: 2025-11-10
+  end: 2025-11-23
+question: "Did anything change in Cyberpunk 2077's reviews in mid-November 2025?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "The developer posted no announcement on Steam in the window; the nearest were Patch 2.31 on 11 September 2025 and a 5th anniversary trailer on 10 December 2025."
+  - "No Steam seasonal sale touches the window: the Autumn Sale ended on 6 October 2025, and Steam's Black Friday sale began on 24 November 2025, the day after the window."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "no patch, sale or news event in the window"
+sources:
+  - url: https://store.steampowered.com/news/app/1091500
+    published: 2026-11-02
+    shows: "the game news hub; no developer announcements in the window (checked via the ISteamNews API)"
+  - url: https://web.archive.org/web/20250801033424/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2025-08-01
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+  - url: https://www.sportskeeda.com/esports/steam-autumn-sale-2025-changes-black-friday-award-nominations-other-adjustments
+    published: 2025-07-26
+    shows: "Valve's 2025 plan: Black Friday offers and Steam Awards nominations from 24 November to 1 December"
+confidence: high
+researched: 2026-11-02
+notes: "The only press items Steam's news hub carries for the window are about CD Projekt hiring for the sequel. Our counts: 2,835 reviews at 95.1% vs 95.6% in the 28 days before."

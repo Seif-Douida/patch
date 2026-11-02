@@ -1,0 +1,32 @@
+id: cities-skylines-ii-2026-09-turkish-review-bomb
+game: "Cities: Skylines II"
+appid: 949230
+window:
+  start: 2026-09-23
+  end: 2026-09-26
+question: "What happened to Cities: Skylines II's reviews in late September 2026?"
+primary_cause: off_topic
+secondary_causes: []
+direction: negative
+key_facts:
+  - "A moderator on Paradox's Discord banned a user for an Atatürk profile picture, calling him a controversial figure."
+  - "Turkish players answered by review-bombing Paradox games on Steam; a boycott call spread from about 24 September 2026."
+  - "Paradox's Hearts of Iron IV director apologised and the Discord avatar rules were rewritten."
+  - "Steam's store page for Cities: Skylines II marks a period of off-topic review activity."
+acceptable_evidence:
+  - "a burst of negative Turkish-language reviews unrelated to the game"
+  - "press coverage of the Paradox Discord controversy"
+  - "no patch or sale explaining the drop"
+sources:
+  - url: https://www.gamemeca.com/en/view.php?gid=1781123
+    published: 2026-09-29
+    shows: "the Atatürk avatar ban, the Steam review bombing of Paradox games, the apology and the rule change"
+  - url: https://tr.euronews.com/2026/09/24/unlu-oyun-platformu-ataturk-portresini-engelledi-boykot-hareketi-basladi
+    published: 2026-09-24
+    shows: "a boycott movement against Paradox starting over the Atatürk portrait ban"
+  - url: https://store.steampowered.com/app/949230/
+    published: 2026-11-02
+    shows: "the store page flags a period of off-topic review activity (checked 2 November 2026; dates not shown)"
+confidence: medium
+researched: 2026-11-02
+notes: "No source names Cities: Skylines II itself; the press covers Paradox games generally. Our counts: 680 Turkish-language reviews on 23-25 September, none positive, with almost no Turkish reviews in the month before. Patch 1.6.2f1 and Expansion Pass 2 came on 15 September, a week earlier, with no drop."

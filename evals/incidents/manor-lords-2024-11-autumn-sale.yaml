@@ -1,0 +1,34 @@
+id: manor-lords-2024-11-autumn-sale
+game: "Manor Lords"
+appid: 1363080
+window:
+  start: 2024-11-27
+  end: 2024-12-04
+question: "Why did Manor Lords' reviews jump in late November 2024?"
+primary_cause: pricing_sale
+secondary_causes: []
+direction: positive
+key_facts:
+  - "Steam's Autumn Sale ran from 27 November to 4 December 2024, with Steam Awards nominations open at the same time."
+  - "Manor Lords was 30% off in Hooded Horse's publisher sale until 4 December, at what PCGamesN called its lowest price yet."
+  - "No update came out in the window; the update previewed on 23 November arrived in January 2025."
+acceptable_evidence:
+  - "the Autumn Sale dates in the sale calendar"
+  - "review volume several times normal for exactly the sale days, almost all positive"
+  - "no patch in the window"
+sources:
+  - url: https://www.pcgamer.com/games/steam-autumn-sale-2024-live/
+    published: 2024-11-27
+    shows: "the 2024 Steam Autumn Sale is live and Steam Awards nominations are open"
+  - url: https://steamcommunity.com/ogg/1363080/announcements/detail/4470480602670302341
+    published: 2024-11-27
+    shows: "Hooded Horse: the Autumn Sale is on and Steam Awards nominations are open"
+  - url: https://steamcommunity.com/ogg/1363080/announcements/detail/4470481236622574570
+    published: 2024-12-01
+    shows: "Manor Lords 30% off in the Autumn Publisher Sale until 4 December"
+  - url: https://www.pcgamesn.com/manor-lords/hooded-horse-sale
+    published: 2024-11-28
+    shows: "Hooded Horse sale with Manor Lords at its lowest price so far"
+confidence: medium
+researched: 2026-11-02
+notes: "The cause rests on timing: no source says reviews rose because of the sale. Manor Lords is discounted most months without a burst, so the Steam Awards nominations running with the sale may be what drives the extra reviews; that mechanism is only sourced for 2025. Our counts: 30-60 reviews a day at 70-88% before, 218-796 a day at 95-97% in the window, about 80% again from 5 December."

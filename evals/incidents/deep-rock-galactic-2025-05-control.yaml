@@ -1,0 +1,26 @@
+id: deep-rock-galactic-2025-05-control
+game: "Deep Rock Galactic"
+appid: 548430
+window:
+  start: 2025-05-20
+  end: 2025-06-02
+question: "Did anything happen to Deep Rock Galactic's reviews in late May 2025?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "The developer posted no announcement on Steam in the window; the nearest were the Great Egg Hunt event on 10 April 2025 and a merchandise post on 5 June 2025."
+  - "No Steam seasonal sale touches the window: the Spring Sale ended on 20 March 2025, and the Summer Sale starts on 26 June 2025."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "no patch, sale or news event in the window"
+sources:
+  - url: https://store.steampowered.com/news/app/548430
+    published: 2026-11-02
+    shows: "the game news hub; no developer announcements in the window (checked via the ISteamNews API)"
+  - url: https://web.archive.org/web/20250214021753/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2025-02-14
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+confidence: high
+researched: 2026-11-02
+notes: "No press items in the window. Our counts: 1,080 reviews at 96.6% vs 96.4%."

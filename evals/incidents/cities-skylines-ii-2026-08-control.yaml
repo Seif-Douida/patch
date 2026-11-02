@@ -1,0 +1,26 @@
+id: cities-skylines-ii-2026-08-control
+game: "Cities: Skylines II"
+appid: 949230
+window:
+  start: 2026-08-02
+  end: 2026-08-15
+question: "Did Cities: Skylines II's reviews change in early August 2026?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "The developer's only Steam post in the window was a community blog post on 11 August 2026 about modding tools; no patch or update came out between 23 July and 20 August 2026."
+  - "No Steam seasonal sale touches the window: the Summer Sale ended on 9 July 2026, and the Autumn Sale starts on 1 October 2026."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "no patch, sale or news event in the window"
+sources:
+  - url: https://store.steampowered.com/news/app/949230
+    published: 2026-11-02
+    shows: "the game news hub; one blog post and no patch in the window (checked via the ISteamNews API)"
+  - url: https://web.archive.org/web/20260116041231/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2026-01-16
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+confidence: high
+researched: 2026-11-02
+notes: "One developer blog post in the window (11 August, about modding tools), with no game change. Our counts: 502 reviews at 73.9% vs 73.4%; daily shares are noisy at 30-50 reviews a day."

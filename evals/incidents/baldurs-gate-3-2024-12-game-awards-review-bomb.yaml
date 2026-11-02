@@ -1,0 +1,31 @@
+id: baldurs-gate-3-2024-12-game-awards-review-bomb
+game: "Baldur's Gate 3"
+appid: 1086940
+window:
+  start: 2024-12-13
+  end: 2024-12-15
+question: "What happened to Baldur's Gate 3's Steam reviews in mid-December 2024?"
+primary_cause: off_topic
+secondary_causes: []
+direction: negative
+key_facts:
+  - "At The Game Awards on 12 December 2024, Astro Bot won Game of the Year over Black Myth: Wukong."
+  - "Larian's Swen Vincke, whose Baldur's Gate 3 won the year before, presented the award with a speech some Wukong fans took as a dig."
+  - "Chinese players then left a wave of negative Steam reviews on Baldur's Gate 3 about the awards, not the game."
+acceptable_evidence:
+  - "a burst of Simplified Chinese reviews on 13-14 December about The Game Awards"
+  - "press coverage of the review bombing"
+  - "no patch or sale in the window"
+sources:
+  - url: https://mp1st.com/news/chinese-players-review-bomb-baldurs-gate-3-steam-black-myth-wukong-loses-goty
+    published: 2024-12-13
+    shows: "Chinese players review-bombing Baldur's Gate 3 after Black Myth: Wukong lost Game of the Year"
+  - url: https://thenerdstash.com/angry-chinese-players-review-bomb-baldurs-gate-3-on-steam-after-black-myth-wukong-fails-to-win-goty-2024/
+    published: 2024-12-14
+    shows: "the same, tied to Swen Vincke's speech when presenting the award"
+  - url: https://gamemag.ru/news/191810/chinese-players-review-bomb-baldurs-gate-3-steam-black-myth-wukong-loses-goty
+    published: 2024-12-16
+    shows: "the same, in Russian"
+confidence: high
+researched: 2026-11-02
+notes: "Review search holds none of this window (Baldur's Gate 3's index starts in late February 2025), so the agent can't cite reviews here. Our counts: about 3,300 Simplified Chinese reviews on 13-14 December against roughly 110 a day before. Steam's store page shows no off-topic flag for the game."

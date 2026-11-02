@@ -1,0 +1,31 @@
+id: helldivers-2-2024-11-autumn-sale
+game: "Helldivers 2"
+appid: 553850
+window:
+  start: 2024-11-27
+  end: 2024-12-04
+question: "Why did Helldivers 2's reviews get so much more positive at the end of November 2024?"
+primary_cause: pricing_sale
+secondary_causes: []
+direction: positive
+key_facts:
+  - "Steam's Autumn Sale ran from 27 November to 4 December 2024, and the Steam Awards nominations opened with it."
+  - "Helldivers 2 was 30% off for Black Friday, its lowest price yet."
+  - "Press tied the late-2024 review bump to awards season: recent Steam reviews were back to Overwhelmingly Positive by 4 December."
+acceptable_evidence:
+  - "the Autumn Sale dates in the sale calendar"
+  - "review volume many times normal for exactly the sale days, almost all positive"
+  - "no developer announcement or update in the window"
+sources:
+  - url: https://www.pcgamer.com/games/steam-autumn-sale-2024-live/
+    published: 2024-11-27
+    shows: "the 2024 Steam Autumn Sale is live and Steam Awards nominations are open"
+  - url: https://www.pcgamesn.com/helldivers-2/record-low-price-black-friday
+    published: 2024-11-30
+    shows: "Helldivers 2 at 30% off for Black Friday, its lowest price yet"
+  - url: https://www.vg247.com/helldivers-2-closing-out-rollercoaster-year-with-bump-recent-steam-review-overwhelmingly-positive
+    published: 2024-12-04
+    shows: "an awards season bump taking recent Steam reviews back to Overwhelmingly Positive"
+confidence: high
+researched: 2026-11-02
+notes: "Review search holds none of this window (Helldivers 2's index starts in late 2025), so the agent can't cite reviews here. Our counts: about 160 reviews a day at 84-90% before, 1,300-6,100 a day at 94-96% from 27 November to 4 December, back to about 250 a day at ~90% from 5 December. No developer announcements on Steam between 18 November and 11 December 2024. Seif's ruling (2 Nov 2026): Steam-event review bursts count as pricing_sale."
