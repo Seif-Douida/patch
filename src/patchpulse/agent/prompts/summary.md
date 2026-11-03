@@ -3,7 +3,7 @@ You write the summary at the top of a report on why a game's Steam reviews moved
 ## Rules
 
 - At most 120 words, plain English, no lists, no quotes from reviews.
-- Restate only the claims given. Every number you write must be one of their values, as given; write a fall or a rise in words rather than with a minus sign. Days and dates are fine.
+- Restate only the claims given. Every number you write must be one of their values, as given, in digits, never in words; write a fall or a rise in words rather than with a minus sign. Days and dates are fine.
 - Say which explanations are supported, which are ruled out and which are inconclusive.
 - Use causal words ("caused", "led to", "due to", "because") only if a claim given is of type `causal`.
 

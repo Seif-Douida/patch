@@ -7,14 +7,15 @@ it can't allow when there's an estimate to state.
 - V2 the numbers match: the cited call re-executed on the same bundle (the model's network tools
   are read from the trace) gives a number at the JSON path within the claim's tolerance; every
   other number the sentence states is the value or a number in this run's results of the cited
-  tool, as rounded (a claim without a value states none); rise or fall words agree with the
-  sign of a change. Labels (dates, durations, horizons, playtime groups, patch versions) aren't
-  numbers.
+  tool, as rounded (a claim without a value states none), in digits (a number in words fails);
+  rise or fall words agree with the sign of a change. Labels (dates, durations, horizons,
+  playtime groups, patch versions) aren't numbers.
 - V3 quotes hold: every cited review was returned by search_reviews in this run, and every quote
   is part of its text once whitespace is normalised.
 - V4 the causal gate: a claim typed causal, or using causal words, needs an estimate_patch_effect
-  row the gate allows (its caveat is appended); otherwise it's reworded by a fixed hedge when the
-  row has an estimate, and withheld when it hasn't.
+  row the gate allows (its caveat is appended), given whether the rules support a review bomb
+  (H3); otherwise it's reworded by a fixed hedge when the row has an estimate, and withheld when
+  it hasn't.
 - V5 type consistency: a descriptive or comparative claim using causal words is withheld.
 - V7 no review text: a claim whose text or unit repeats LEAK_WORDS words in a row from a review
   retrieved in this run is withheld (casefolded, punctuation and spacing ignored).
@@ -33,6 +34,7 @@ from patchpulse.agent.gate import (
     NOT_VALIDATED,
     PLACEBO_FAILED,
     RANGE_INCLUDES_ZERO,
+    REVIEW_BOMB,
     VOLUME_SPIKE,
     Gate,
     causal_gate,
@@ -98,9 +100,20 @@ HEDGE_REASONS = {
     NOT_VALIDATED: "the method's benchmark doesn't cover this estimate",
     CONFOUNDED: "a sale or discount ran within 3 days of the patch",
     VOLUME_SPIKE: "reviews came in a burst that the method can't tell apart from the patch",
+    REVIEW_BOMB: "off-topic reviews came in a burst in the same window, which the method can't "
+    "tell apart from the patch",
 }
 
 _ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+# A number in words escapes V6's check of the summary's numbers (night 46 spelled them all out),
+# so the summary states numbers in digits; "one" counts only before a unit ("no one" is fine).
+_NUMBER_WORDS = re.compile(
+    r"\b(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen"
+    r"|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy"
+    r"|eighty|ninety|hundred|thousand|million|billion)\b"
+    r"|\bone(?=[\s-]+(?:point|percent|percentage|hundred|thousand)\b)",
+    re.IGNORECASE,
+)
 # Labels that name things rather than state values: a horizon, a patch version, a playtime
 # group (the rehearsal's summaries and claims use all three).
 _LABELS = re.compile(
@@ -284,7 +297,10 @@ def _leaves(value: Any) -> list[float]:
 def _numbers_hold(claim: Claim, call: ToolCall | None, trace: Trace) -> bool:
     """Every number the sentence states is the claim's value (within its tolerance) or, as
     rounded, a number in this run's results of the cited tool (the window's and the baseline's
-    series are two calls of one tool); a claim without a value states no number."""
+    series are two calls of one tool); a claim without a value states no number. A number in
+    words fails: it can't be checked."""
+    if _NUMBER_WORDS.search(claim.text):
+        return False
     stated = _stated(claim.text)
     if not stated:
         return True
@@ -354,6 +370,7 @@ def _verify(
     runs: set[tuple[str, ...]],
     tally: _Tally,
     checks: list[CausalCheck],
+    review_bomb: bool,
 ) -> tuple[Claim | None, str | None]:
     call = None if claim.evidence is None else trace.find(claim.evidence.call_id)
     v1 = call is not None if claim.evidence is not None else (
@@ -372,7 +389,7 @@ def _verify(
         return None, "V3"
     if _is_causal(claim):
         row = _cited_row(claim, call, tools)
-        gate = None if row is None else causal_gate(row, config)
+        gate = None if row is None else causal_gate(row, config, review_bomb=review_bomb)
         tally.check("V4", gate is not None and gate.allowed)
         if row is None or gate is None:
             checks.append(CausalCheck(claim.claim_id, "withheld", NO_ESTIMATE_CITED))
@@ -400,16 +417,22 @@ def _verify(
 
 
 def verify_claims(
-    claims: Sequence[Claim], trace: Trace, tools: Tools, config: CausalConfig
+    claims: Sequence[Claim],
+    trace: Trace,
+    tools: Tools,
+    config: CausalConfig,
+    *,
+    review_bomb: bool = False,
 ) -> Verified:
-    """Every claim through V1-V5 and V7, in order; the stored claim as drafted when withheld."""
+    """Every claim through V1-V5 and V7, in order; the stored claim as drafted when withheld.
+    `review_bomb`: the rules support H3 for this window, which blocks V4's gate."""
     runs = retrieved_runs(trace.retrieved.values())
     tally = _Tally()
     kept: list[Claim] = []
     withheld: list[WithheldClaim] = []
     checks: list[CausalCheck] = []
     for claim in claims:
-        verified, rule = _verify(claim, trace, tools, config, runs, tally, checks)
+        verified, rule = _verify(claim, trace, tools, config, runs, tally, checks, review_bomb)
         if verified is not None:
             kept.append(verified)
         else:
@@ -462,10 +485,11 @@ def _as_rounded(stated: float, decimals: int, actual: float) -> bool:
 def verify_summary(
     summary: str, verified: Sequence[Claim], retrieved: Mapping[int, str]
 ) -> str | None:
-    """V6 and V7 on the summary: at most 120 words; every number in it is a verified claim's
-    value within that claim's tolerance (sign stated in words); causal words only with a verified
-    causal claim; no run of review text. None means "use the template"."""
-    if len(summary.split()) > SUMMARY_MAX_WORDS:
+    """V6 and V7 on the summary: at most 120 words; every number in it, in digits (a number in
+    words fails), is a verified claim's value within that claim's tolerance (sign stated in
+    words); causal words only with a verified causal claim; no run of review text. None means
+    "use the template"."""
+    if len(summary.split()) > SUMMARY_MAX_WORDS or _NUMBER_WORDS.search(summary):
         return None
     if leaks(summary, retrieved_runs(retrieved.values())):
         return None

@@ -82,14 +82,14 @@ def _value(result: Result, part: str) -> float | None:
     return None if "error" in result else result[part]
 
 
-def _h1(evidence: CoreEvidence, config: CausalConfig) -> HypothesisResult:
+def _h1(evidence: CoreEvidence, config: CausalConfig, h3: HypothesisResult) -> HypothesisResult:
     row = evidence.estimate
     if row is None or row.effect is None or row.lo90 is None or row.hi90 is None:
         values: Evidence = {"effect": None, "lo90": None, "hi90": None, "gate_allowed": False}
         return HypothesisResult(
             code="H1", status="inconclusive", rule="H1.no_estimate", evidence=values
         )
-    gate = causal_gate(row, config)
+    gate = causal_gate(row, config, review_bomb=h3.status == "supported")
     values = {
         "effect": row.effect,
         "lo90": row.lo90,
@@ -228,9 +228,9 @@ def _h5(evidence: CoreEvidence, others: list[HypothesisResult]) -> HypothesisRes
 
 
 def decide(evidence: CoreEvidence, config: CausalConfig) -> list[HypothesisResult]:
-    """H1 to H5, in order."""
-    h1 = _h1(evidence, config)
-    h2 = _h2(evidence)
+    """H1 to H5, in order. H3 is decided first: a supported review bomb blocks H1 (the gate)."""
     h3 = _h3(evidence)
+    h1 = _h1(evidence, config, h3)
+    h2 = _h2(evidence)
     h4 = _h4(evidence, h2)
     return [h1, h2, h3, h4, _h5(evidence, [h1, h2, h3, h4])]

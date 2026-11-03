@@ -15,6 +15,7 @@ from patchpulse.agent.gate import (
     NOT_VALIDATED,
     PLACEBO_FAILED,
     RANGE_INCLUDES_ZERO,
+    REVIEW_BOMB,
     SPIKE_CAVEAT,
     VOLUME_SPIKE,
     Gate,
@@ -100,3 +101,18 @@ def test_unknown_discounts_get_the_note() -> None:
         True, f"{SPIKE_CAVEAT} {DISCOUNTS_NOTE}", None
     )
     assert causal_gate(both, config(spike_ok=False)) == blocked(VOLUME_SPIKE)
+
+
+def test_a_review_bomb_blocks_crediting_the_patch() -> None:
+    """Seif, 3 Nov 2026: Cities: Skylines II's 1.6.2f1 report credited the patch with a drop that
+    was the Turkish review bomb a week later; with H3 supported, the estimate isn't the patch's."""
+    spike = row(flags=("volume_spike",))
+
+    assert causal_gate(row(), config(), review_bomb=True) == blocked(REVIEW_BOMB)
+    assert causal_gate(spike, config(spike_ok=True), review_bomb=True) == blocked(REVIEW_BOMB)
+    assert causal_gate(row(), config(), review_bomb=False) == ALLOWED
+    # the estimate's own conditions come first
+    assert causal_gate(row(flags=("confounded",)), config(), review_bomb=True) == blocked(
+        CONFOUNDED
+    )
+    assert causal_gate(spike, config(spike_ok=False), review_bomb=True) == blocked(VOLUME_SPIKE)
