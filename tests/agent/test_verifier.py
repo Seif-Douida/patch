@@ -14,7 +14,7 @@ import pytest
 from agent_fixtures import GAME, PATCH_DAY, estimate, game_data, make_bundle
 
 from patchpulse.agent.bundle import Bundle
-from patchpulse.agent.gate import BLOCKERS, causal_gate
+from patchpulse.agent.gate import BLOCKERS, REVIEW_BOMB, causal_gate
 from patchpulse.agent.report import Claim, DateWindow, Finding, Report, public_copy
 from patchpulse.agent.rules import CoreEvidence, decide
 from patchpulse.agent.tools import Tools, Trace
@@ -58,8 +58,10 @@ class Run:
         self.series = self.tools.sentiment_timeseries(GAME, *WINDOW, "week")
         self.trace.retrieved.update(RETRIEVED)
 
-    def verify(self, *claims: Claim) -> Any:
-        return verify_claims(list(claims), self.trace, self.tools, self.bundle.causal)
+    def verify(self, *claims: Claim, review_bomb: bool = False) -> Any:
+        return verify_claims(
+            list(claims), self.trace, self.tools, self.bundle.causal, review_bomb=review_bomb
+        )
 
 
 def claim(
@@ -179,6 +181,24 @@ def test_summary_number_no_claim_holds_fails_v6() -> None:
     assert verify_summary(bad, verified, RETRIEVED) is None
 
 
+def test_a_summary_with_numbers_in_words_fails_v6() -> None:
+    """Night 46 (3 Nov 2026): a summary spelled every number out, so V6 checked none of them."""
+    run = Run()
+    verified = run.verify(
+        claim("Performance complaints fell.", value=performance_change(run))
+    ).claims
+    plain = "Performance complaints fell; one explanation is supported and none is ruled out."
+
+    for spelled in (
+        "Performance complaints fell by twenty-nine point five three points.",
+        "Performance complaints fell by three points at horizon fourteen.",
+        "Performance complaints fell by one percent.",
+        "Performance complaints fell by a hundred reviews.",
+    ):
+        assert verify_summary(spelled, verified, RETRIEVED) is None, spelled
+    assert verify_summary(plain, verified, RETRIEVED) == plain
+
+
 # V2 on the sentence (the whole-phase review's C1): the numbers and the direction a visitor reads.
 
 
@@ -221,6 +241,18 @@ def test_a_claims_numbers_must_come_from_its_evidence() -> None:
 
     assert [c.claim_id for c in checked.claims] == ["c1"]
     assert withheld_rules(checked) == ["V2", "V2", "V2", "V2"]
+
+
+def test_a_claim_stating_a_number_in_words_fails_v2() -> None:
+    """A number in words escapes V2's sentence check as it did V6's (night 46, 3 Nov 2026)."""
+    run = Run()
+    change = performance_change(run)
+
+    spelled = run.verify(claim("Performance mentions changed by forty points.", value=change))
+    plain = run.verify(claim("No one-off: performance mentions changed.", value=change))
+
+    assert withheld_rules(spelled) == ["V2"]
+    assert withheld_rules(plain) == []
 
 
 def test_rise_and_fall_words_must_agree_with_the_change() -> None:
@@ -303,6 +335,7 @@ BLOCKED_ROWS = {
         True,
         "its",
     ),
+    "review_bomb": (estimate(7, "its", -9.0), True, "its"),  # allowed but for H3
 }
 
 
@@ -310,7 +343,8 @@ BLOCKED_ROWS = {
 def test_causal_claim_needs_the_gate(blocker: str) -> None:
     row, validated, default = BLOCKED_ROWS[blocker]
     run = Run(bundle_with(row, validated=validated, default=default))
-    gate = causal_gate(row, run.bundle.causal)
+    bomb = blocker == REVIEW_BOMB
+    gate = causal_gate(row, run.bundle.causal, review_bomb=bomb)
     assert gate.blocked_by == blocker
 
     verified = run.verify(
@@ -320,7 +354,8 @@ def test_causal_claim_needs_the_gate(blocker: str) -> None:
             value=row.effect,
             call="r1.1",
             path="horizons.7.effect",
-        )
+        ),
+        review_bomb=bomb,
     )
 
     if blocker == "no_estimate":
@@ -414,9 +449,9 @@ def test_causal_checks_record_each_outcome_and_its_cause() -> None:
 
 
 def test_hedges_never_use_causal_words() -> None:
-    for row, validated, _ in BLOCKED_ROWS.values():
+    for blocker, (row, validated, _) in BLOCKED_ROWS.items():
         config = CausalConfig("its", "e2", None, validated=validated)
-        gate = causal_gate(row, config)
+        gate = causal_gate(row, config, review_bomb=blocker == REVIEW_BOMB)
         if row.effect is not None:
             text = hedge(row, gate)
             assert not CAUSAL_LEXICON.search(text), text

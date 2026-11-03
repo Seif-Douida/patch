@@ -351,12 +351,13 @@ class _Nodes:
 
     def verify(self, state: _State) -> dict[str, Any]:
         trace, tools, config = state["trace"], state["tools"], self.deps.bundle.causal
+        bomb = any(h.code == "H3" and h.status == "supported" for h in state["hypotheses"])
         if state.get("basic"):
             claims = basic_claims(state["evidence"])
-            verified = verify_claims(claims, trace, tools, config)
+            verified = verify_claims(claims, trace, tools, config, review_bomb=bomb)
             return {"verified": verified, "findings": _basic_findings(state["evidence"], verified)}
         draft = state["draft"]
-        verified = verify_claims(draft.claims, trace, tools, config)
+        verified = verify_claims(draft.claims, trace, tools, config, review_bomb=bomb)
         findings = safe_findings(draft.findings, verified.claims, trace.retrieved)
         return {"verified": verified, "findings": findings}
 

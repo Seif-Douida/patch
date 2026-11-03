@@ -9,7 +9,9 @@ All must hold, checked in this order; `blocked_by` names the first that fails:
 4. the benchmark validated it: `validated` in config/causal.yaml, and the estimate is of what the
    benchmark measured, the positive share of all reviews (`not_validated`);
 5. no Steam sale or game discount within 3 days of the bundle's start (`confounded`);
-6. a volume spike only when the benchmark's spike verdict allows it (`volume_spike`).
+6. a volume spike only when the benchmark's spike verdict allows it (`volume_spike`);
+7. no supported review bomb (H3) in the window: the estimate can't tell it apart from the patch
+   (`review_bomb`; Seif, 3 Nov 2026, after Cities: Skylines II's 1.6.2f1 report).
 An allowed estimate on a spike window carries SPIKE_CAVEAT; one from before discounts were tracked
 carries DISCOUNTS_NOTE.
 """
@@ -31,6 +33,7 @@ PLACEBO_FAILED = "placebo_failed"
 NOT_VALIDATED = "not_validated"
 CONFOUNDED = "confounded"
 VOLUME_SPIKE = "volume_spike"
+REVIEW_BOMB = "review_bomb"
 BLOCKERS = (
     NO_ESTIMATE,
     RANGE_INCLUDES_ZERO,
@@ -38,6 +41,7 @@ BLOCKERS = (
     NOT_VALIDATED,
     CONFOUNDED,
     VOLUME_SPIKE,
+    REVIEW_BOMB,
 )
 
 SPIKE_CAVEAT = (
@@ -56,7 +60,7 @@ class Gate:
     blocked_by: str | None
 
 
-def _blocker(row: StoredEstimate, config: CausalConfig) -> str | None:
+def _blocker(row: StoredEstimate, config: CausalConfig, review_bomb: bool) -> str | None:
     if row.effect is None or row.lo90 is None or row.hi90 is None:
         return NO_ESTIMATE
     if row.lo90 <= 0 <= row.hi90:
@@ -69,11 +73,14 @@ def _blocker(row: StoredEstimate, config: CausalConfig) -> str | None:
         return CONFOUNDED
     if "volume_spike" in row.flags and not config.spike_causal_ok:
         return VOLUME_SPIKE
+    if review_bomb:
+        return REVIEW_BOMB
     return None
 
 
-def causal_gate(row: StoredEstimate, config: CausalConfig) -> Gate:
-    blocker = _blocker(row, config)
+def causal_gate(row: StoredEstimate, config: CausalConfig, *, review_bomb: bool = False) -> Gate:
+    """`review_bomb`: H3 (off-topic reviews or a review bomb) is supported for the window."""
+    blocker = _blocker(row, config, review_bomb)
     if blocker is not None:
         return Gate(allowed=False, caveat=None, blocked_by=blocker)
     caveats = [

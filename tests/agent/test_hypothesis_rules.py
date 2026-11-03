@@ -107,6 +107,22 @@ def test_h1_the_patch() -> None:
     )
 
 
+def test_h1_isnt_supported_during_a_review_bomb() -> None:
+    """Seif, 3 Nov 2026: with H3 supported the gate blocks H1 (Cities: Skylines II's 1.6.2f1
+    report credited the patch with the Turkish review bomb that came a week after it)."""
+    allowing = replace(CONFIG, spike_causal_ok=True)
+    bomb = replace(
+        QUIET, estimate=row(-14.0, -9.0, flags=("volume_spike",)), aspects=off_topic(6.0, 2.0, 10.0)
+    )
+
+    assert status(bomb, "H3", allowing) == ("supported", "H3.spike_and_off_topic")
+    assert status(bomb, "H1", allowing) == ("inconclusive", "H1.blocked.review_bomb")
+    assert status(replace(bomb, aspects=QUIET.aspects), "H1", allowing) == (
+        "supported",
+        "H1.gate_allows",
+    )
+
+
 def test_h2_a_price_change_or_sale() -> None:
     sale = period(150, 30, sale=1)
     new_players_up = replace(QUIET, near_start=sale, window=period(200, 100))  # 20% -> 50%
@@ -203,12 +219,18 @@ CONFIGS = [
 ]
 
 
+ASPECT_CASES = [QUIET.aspects, off_topic(6.0, 2.0, 10.0)]
+
+
 @pytest.mark.parametrize("config", CONFIGS)
 def test_h1_is_supported_exactly_when_the_gate_allows(config: CausalConfig) -> None:
-    for (lo, hi), (method, p), flags in itertools.product(RANGES, METHODS, FLAGS):
+    for (lo, hi), (method, p), flags, aspects in itertools.product(
+        RANGES, METHODS, FLAGS, ASPECT_CASES
+    ):
         served = row(lo, hi, method=method, p=p, flags=flags)
-        h1 = decide(replace(QUIET, estimate=served), config)[0]
-        assert (h1.status == "supported") == causal_gate(served, config).allowed, (served, config)
+        h1, _, h3, *_ = decide(replace(QUIET, estimate=served, aspects=aspects), config)
+        gate = causal_gate(served, config, review_bomb=h3.status == "supported")
+        assert (h1.status == "supported") == gate.allowed, (served, config, aspects)
 
 
 def test_rules_record_the_evidence_they_read() -> None:

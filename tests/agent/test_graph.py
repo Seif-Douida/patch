@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_fixtures import GAME, OTHER_GAME
+from agent_fixtures import GAME, OTHER_GAME, PATCH_DAY, game_data, make_bundle, other_game
 from agent_world import (
     ANSWERS,
     CHAIN,
@@ -51,6 +51,39 @@ def test_a_nightly_report_runs_every_step_without_a_scope_call(tmp_path: Path) -
     assert [(w.claim.claim_id, w.rule) for w in report.withheld_claims] == [("c4", "V2")]
     assert report.summary.startswith("Performance mentions")
     assert report.confidence == "medium"
+
+
+def spike_allowed(world: World, *, bomb: bool) -> World:
+    """The fixture's 7-day estimate (a volume spike) allowed by the benchmark's verdict; with
+    `bomb`, every negative review from the patch on also mentions off-topic matters."""
+    data = game_data()
+    if bomb:
+        data = replace(data, aspects=tuple(
+            replace(a, neg_mentions=a.neg_scored)
+            if a.aspect == "off_topic" and a.date >= PATCH_DAY else a
+            for a in data.aspects
+        ))  # fmt: skip
+    bundle = make_bundle(data, other_game())
+    causal = replace(bundle.causal, spike_causal_ok=True)
+    world.deps = replace(world.deps, bundle=replace(bundle, causal=causal))
+    return world
+
+
+def test_a_review_bomb_keeps_the_patch_from_being_credited(tmp_path: Path) -> None:
+    """Seif, 3 Nov 2026: the rules' H3 reaches the verifier's gate, so the draft's causal claim
+    is reworded when a review bomb is supported (Cities: Skylines II's 1.6.2f1 report)."""
+    plain = report_of(spike_allowed(World(tmp_path / "a", Scripted()), bomb=False).run(
+        ReportRequest.for_bundle("p1", 7)))  # fmt: skip
+    bombed = report_of(spike_allowed(World(tmp_path / "b", Scripted()), bomb=True).run(
+        ReportRequest.for_bundle("p1", 7)))  # fmt: skip
+
+    def outcome(report: Any) -> tuple[str, str, str, bool]:
+        h = {r.code: r for r in report.hypotheses}
+        (c2,) = [c for c in report.claims if c.claim_id == "c2"]
+        return h["H1"].status, h["H1"].rule, h["H3"].status, c2.reworded
+
+    assert outcome(plain) == ("supported", "H1.gate_allows", "inconclusive", False)
+    assert outcome(bombed) == ("inconclusive", "H1.blocked.review_bomb", "supported", True)
 
 
 def test_an_ask_report_scopes_then_runs(tmp_path: Path) -> None:
