@@ -3,11 +3,13 @@ a one-CPU container for a night's reviews and a half-CPU one for single queries.
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -15,6 +17,7 @@ import pytest
 from tiny_encoder import write_tiny_embedder
 
 from patchpulse.models.snapshot import Snapshot
+from patchpulse.retrieval import benchmark
 from patchpulse.retrieval.benchmark import (
     BENCH_QUERIES,
     EmbedderSpeed,
@@ -125,6 +128,24 @@ def test_the_container_side_times_each_embedder(tmp_path: Path, mode: str) -> No
     assert name == "tiny"
     assert len(numbers) == (1 if mode == "passages" else 2)
     assert all(float(n) > 0 for n in numbers)
+
+
+def test_a_query_faster_than_a_tenth_of_a_millisecond_is_not_printed_as_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # CI, 2 Nov 2026: the tiny embedder answered under 0.05 ms and the queries line read 0.0.
+    write_tiny_embedder(tmp_path / "tiny", TINY)
+    (tmp_path / "queries.json").write_text(json.dumps(BENCH_QUERIES[:10]), encoding="utf-8")
+    ticks = itertools.count()
+    monkeypatch.setattr(
+        benchmark, "time", SimpleNamespace(perf_counter=lambda: next(ticks) * 30e-6)
+    )  # every query takes 30 microseconds
+
+    assert benchmark.main(["queries", str(tmp_path / "queries.json"), str(tmp_path / "tiny")]) == 0
+
+    name, *numbers = capsys.readouterr().out.strip().splitlines()[-1].split("\t")
+    assert name == "tiny"
+    assert [float(n) for n in numbers] == [0.03, 0.03]
 
 
 def test_bench_queries_are_query_like_and_not_the_eval() -> None:
