@@ -29,7 +29,7 @@ from pathlib import Path
 import httpx2
 from sqlalchemy import Engine
 
-from patchpulse.agent.bundle import Bundle
+from patchpulse.agent.bundle import Bundle, current_bundles
 from patchpulse.agent.graph import AgentDeps, Refusal, ReportRequest, run_report
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
 from patchpulse.agent.patch_notes import agent_steam
@@ -69,13 +69,16 @@ class ReportsOutcome:
 
 def reports_file(bundle: Bundle, stored: Mapping[Key, StoredReport], *, data_version: int) -> bytes:
     """reports.json: the public copy of the report each bundle shows, made from the stored
-    report as the site export makes it, and each patch's bundle."""
+    report as the site export makes it, and each patch's bundle; tonight's bundles only."""
     patches = {
         p.patch_id: p.bundle_id for g in bundle.games for p in g.patches if p.bundle_id is not None
     }
     document = {
         "data_version": data_version,
-        "reports": {b: public_copy(row.report) for b, row in shown_reports(stored).items()},
+        "reports": {
+            b: public_copy(row.report)
+            for b, row in shown_reports(stored, current_bundles(bundle)).items()
+        },
         "patches": dict(sorted(patches.items())),
     }
     return (json.dumps(document, ensure_ascii=False) + "\n").encode("utf-8")

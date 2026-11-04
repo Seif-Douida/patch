@@ -14,7 +14,7 @@ from sqlalchemy import Engine
 
 from patchpulse.agent.graph import ReportRequest
 from patchpulse.agent.report import Report
-from patchpulse.agent.store import latest_reports
+from patchpulse.agent.store import latest_reports, write_report
 from patchpulse.config import Settings
 from patchpulse.pipeline.reports import ReportsOutcome, reports_file, run_reports
 
@@ -108,3 +108,21 @@ def test_reports_file_holds_public_copies_and_the_patch_map(
     assert SAMPLE_QUOTE not in text
     assert "7003" not in text
     assert "The patch caused the drop." not in text
+
+
+def test_reports_file_leaves_out_reports_of_vanished_bundles(
+    migrated_engine: Engine, sql_settings: Settings
+) -> None:
+    # A stored report whose bundle isn't in tonight's bundle stays stored, unpublished.
+    run(migrated_engine, sql_settings, Clock(0.0, 0.0), agent=agent())
+    with migrated_engine.begin() as connection:
+        write_report(connection, sample_report("p9", 7), fingerprint="9" * 64, run_id=99)
+    with migrated_engine.connect() as connection:
+        stored = latest_reports(connection)
+    bundle = replace(make_bundle(), data_version=61)
+
+    document = json.loads(reports_file(bundle, stored, data_version=61))
+
+    assert ("p9", 7) in stored
+    assert "p9" not in document["reports"]
+    assert "p1" in document["reports"]

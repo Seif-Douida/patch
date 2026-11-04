@@ -33,7 +33,7 @@ from patchpulse.ingest.coverage import Coverage
 from patchpulse.ingest.day_counts import DayCounts
 from patchpulse.ingest.games import Game
 from patchpulse.ingest.models import NewsItem, PriceSnapshot, RawPage, ReviewRecord
-from patchpulse.ingest.patches import CLASSIFIER_VERSION, Classification
+from patchpulse.ingest.patches import CLASSIFIER_VERSION, OFFICIAL_FEED, Classification
 
 
 def naive_utc(moment: datetime) -> datetime:
@@ -135,6 +135,18 @@ def upsert_news(connection: Connection, items: Sequence[NewsItem], *, run_id: in
         keys=("gid",),
         refresh=("title", "url", "contents", "tags", "feedlabel", "last_seen_run_id"),
     )
+
+
+def oldest_official_post(connection: Connection, appid: int) -> datetime | None:
+    """The game's earliest stored official post (where its news history is paged back from),
+    UTC; None without one. Press items don't count."""
+    news = tables.steam_news
+    oldest: datetime | None = connection.execute(
+        select(func.min(news.c.published_at)).where(
+            news.c.appid == appid, news.c.feedname == OFFICIAL_FEED
+        )
+    ).scalar_one()
+    return None if oldest is None else oldest.replace(tzinfo=UTC)
 
 
 def upsert_classifications(

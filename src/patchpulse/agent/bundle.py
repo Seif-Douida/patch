@@ -101,6 +101,12 @@ class Bundle:
     games: tuple[GameData, ...]
 
 
+def current_bundles(bundle: Bundle) -> frozenset[str]:
+    """The bundle ids of tonight's patches: a stored report outside them isn't shown (a bundle
+    before its game's history, or one whose first patch changed)."""
+    return frozenset(p.bundle_id for g in bundle.games for p in g.patches if p.bundle_id)
+
+
 def _names(*types: type) -> frozenset[str]:
     return frozenset(f.name for t in types for f in fields(t))
 

@@ -71,6 +71,7 @@ from patchpulse.ingest.games import GAMES_FILE, Game, load_games
 from patchpulse.ingest.http import SteamError, SteamHttp, SteamUnavailableError
 from patchpulse.ingest.load import (
     last_count_days,
+    oldest_official_post,
     purge_raw_pages,
     read_coverage,
     record_dq,
@@ -83,7 +84,7 @@ from patchpulse.ingest.load import (
     upsert_reviews,
     write_coverage,
 )
-from patchpulse.ingest.news import fetch_news
+from patchpulse.ingest.news import NewsFetch, fetch_news, fetch_news_history
 from patchpulse.ingest.patches import classify
 from patchpulse.ingest.prices import PriceFetch, fetch_prices
 from patchpulse.ingest.reviews import ReviewPage, StopReason, fetch_review_pages
@@ -97,6 +98,10 @@ if TYPE_CHECKING:
     from patchpulse.pipeline.reports import ReportsOutcome
 
 log = logging.getLogger("patchpulse.pipeline")
+
+# Older official posts asked for a game a night until its news reaches its backfill start: two
+# pages reach 1 Oct 2024 for every tracked game (the 4 Nov 2026 probe).
+NEWS_HISTORY_PAGES = 2
 
 RAW_RETENTION = timedelta(days=30)
 # Days a comparison game's counts may catch up a night: one request a day, so 30 games behind by
@@ -426,7 +431,7 @@ def _run_stages(
         run.stages["reviews"] = counters
 
     with run.stage("news"):
-        items_total = new_total = 0
+        news = {"items": 0, "new": 0, "history_pages": 0, "history_failed": 0}
         for game in games:
             if game.appid in run.errors:
                 continue
@@ -435,14 +440,13 @@ def _run_stages(
             except SteamError as error:
                 run.fail_game(game.appid, error)
                 continue
-            with run.engine.begin() as connection:
-                record_page(connection, fetched.raw, run_id=run.run_id)
-                new_total += upsert_news(connection, fetched.items, run_id=run.run_id)
-                upsert_classifications(
-                    connection, {i.gid: classify(i) for i in fetched.items}, run_id=run.run_id
-                )
-            items_total += len(fetched.items)
-        run.stages["news"] = {"items": items_total, "new": new_total}
+            _store_news(run, fetched, news)
+        # History after every game's latest posts: a 429 refuses the run's later requests, and
+        # it may cost history and the stages after it, never a game's latest posts.
+        for game in games:
+            if game.appid not in run.errors:
+                _news_history(run, steam, game, news)
+        run.stages["news"] = news
 
     with run.stage("prices"):
         try:
@@ -638,13 +642,17 @@ def _bundle(
     return built, dumped, record
 
 
-def _basic_shown(run: _Run) -> int | None:
-    """How many of the reports the site shows are basic; None when they can't be read."""
+def _basic_shown(run: _Run, bundle: Bundle | None) -> int | None:
+    """How many of the reports the site shows (tonight's bundles', when there's a bundle) are
+    basic; None when they can't be read."""
     try:
+        from patchpulse.agent.bundle import current_bundles
         from patchpulse.agent.store import latest_reports, shown_reports
 
+        current = None if bundle is None else current_bundles(bundle)
         with run.engine.connect() as connection:
-            return sum(r.basic for r in shown_reports(latest_reports(connection)).values())
+            stored = latest_reports(connection)
+        return sum(r.basic for r in shown_reports(stored, current).values())
     except Exception as error:
         log.warning("could not read the stored reports: %s", error)
         return None
@@ -706,7 +714,7 @@ def _reports(
                 "issue."
             ),
         )
-    elif _basic_shown(run) == 0:
+    elif _basic_shown(run, bundle) == 0:
         _resolve(
             publisher,
             title=BASIC_REPORTS,
@@ -848,6 +856,41 @@ def _resolve(publisher: Publisher, *, title: str, comment: str) -> None:
         publisher.resolve(title=title, comment=comment)
     except Exception as failure:
         log.error("could not resolve the alert %r: %s", title, failure)
+
+
+def _store_news(run: _Run, fetched: NewsFetch, counts: dict[str, int]) -> None:
+    with run.engine.begin() as connection:
+        record_page(connection, fetched.raw, run_id=run.run_id)
+        counts["new"] += upsert_news(connection, fetched.items, run_id=run.run_id)
+        upsert_classifications(
+            connection, {i.gid: classify(i) for i in fetched.items}, run_id=run.run_id
+        )
+    counts["items"] += len(fetched.items)
+
+
+def _news_history(run: _Run, steam: SteamHttp, game: Game, counts: dict[str, int]) -> None:
+    """Older official posts while the game's oldest stored one is after its backfill start (the
+    patch-history fix, 4 Nov 2026); a failed page waits for the next night, the game isn't
+    failed."""
+    with run.engine.connect() as connection:
+        oldest = oldest_official_post(connection, game.appid)
+    if oldest is None or oldest.date() < game.backfill_start:  # a start-day patch counts
+        return
+    try:
+        history = fetch_news_history(
+            steam,
+            game.appid,
+            oldest=oldest,
+            until=game.backfill_start,
+            max_pages=NEWS_HISTORY_PAGES,
+        )
+    except SteamError as error:
+        log.warning("news history for %d stopped: %s", game.appid, type(error).__name__)
+        counts["history_failed"] += 1
+        return
+    for fetched in history.fetches:
+        _store_news(run, fetched, counts)
+    counts["history_pages"] += len(history.fetches)
 
 
 def _store_prices(run: _Run, prices: PriceFetch, now: datetime) -> None:

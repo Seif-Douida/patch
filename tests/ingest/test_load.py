@@ -15,6 +15,7 @@ from patchpulse.ingest.day_counts import DayCounts
 from patchpulse.ingest.games import Game, Role
 from patchpulse.ingest.load import (
     last_count_days,
+    oldest_official_post,
     purge_raw_pages,
     read_coverage,
     record_dq,
@@ -28,7 +29,7 @@ from patchpulse.ingest.load import (
     write_coverage,
 )
 from patchpulse.ingest.models import NewsItem, PriceSnapshot, RawPage, ReviewRecord
-from patchpulse.ingest.patches import Classification, PatchType
+from patchpulse.ingest.patches import OFFICIAL_FEED, Classification, PatchType
 
 pytestmark = pytest.mark.integration
 
@@ -293,3 +294,36 @@ def test_last_count_days_take_the_later_of_raw_and_the_seed(migrated_engine: Eng
         last = last_count_days(connection)
 
     assert last == {7: date(2026, 10, 21), 8: date(2026, 10, 21), 9: date(2026, 10, 2)}
+
+
+def post(gid: str, appid: int, published: datetime, feedname: str = OFFICIAL_FEED) -> NewsItem:
+    return NewsItem(
+        gid=gid,
+        appid=appid,
+        title=f"Post {gid}",
+        url="https://example.com/p",
+        contents="",
+        published_at=published,
+        feedname=feedname,
+        feedlabel="",
+        tags=[],
+    )
+
+
+def test_oldest_official_post_ignores_press(migrated_engine: Engine) -> None:
+    # Where the nightly pages back from (the patch-history fix, 4 Nov 2026): official posts only.
+    with migrated_engine.begin() as connection:
+        upsert_news(
+            connection,
+            [
+                post("1", 553850, datetime(2025, 5, 1, 12, tzinfo=UTC)),
+                post("2", 553850, datetime(2025, 3, 1, 12, tzinfo=UTC)),
+                post("3", 553850, datetime(2024, 1, 1, 12, tzinfo=UTC), "PC Gamer"),
+                post("4", 949230, datetime(2024, 6, 1, 12, tzinfo=UTC), "PC Gamer"),
+            ],
+            run_id=1,
+        )
+
+    with migrated_engine.connect() as connection:
+        assert oldest_official_post(connection, 553850) == datetime(2025, 3, 1, 12, tzinfo=UTC)
+        assert oldest_official_post(connection, 949230) is None

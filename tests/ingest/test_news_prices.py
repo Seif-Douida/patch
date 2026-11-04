@@ -76,7 +76,8 @@ def test_news_without_tags_parses_with_an_empty_list() -> None:
     assert fetch_news(http_for(recorder), 553850).items[0].tags == []
 
 
-def test_news_request_asks_for_full_contents() -> None:
+def test_news_request_asks_for_the_official_feed_only() -> None:
+    # Press articles filled the 100 items and hid older patch posts (4 Nov 2026); nothing used them.
     recorder = Recorder(lambda _: {"appnews": {"appid": 553850, "newsitems": []}})
 
     fetch_news(http_for(recorder), 553850)
@@ -85,6 +86,17 @@ def test_news_request_asks_for_full_contents() -> None:
     assert params["appid"] == ["553850"]
     assert params["count"] == ["100"]
     assert params["maxlength"] == ["0"]
+    assert params["feeds"] == ["steam_community_announcements"]
+    assert "enddate" not in params
+
+
+def test_news_request_before_a_time_sends_unix_seconds() -> None:
+    recorder = Recorder(lambda _: {"appnews": {"appid": 553850, "newsitems": []}})
+
+    fetched = fetch_news(http_for(recorder), 553850, before=datetime(2025, 1, 1, tzinfo=UTC))
+
+    assert query(recorder.requests[0])["enddate"] == ["1735689600"]
+    assert fetched.raw.request["enddate"] == 1735689600
 
 
 def price_response(request: httpx2.Request) -> dict[str, Any]:
