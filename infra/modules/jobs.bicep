@@ -2,7 +2,8 @@
 // migrations when deploy.yml starts it. Both run the jobs image in the pp-api environment, so their
 // logs go to the same capped workspace.
 // $0 guard values are literals (ADR-017): at most 1 vCPU / 2 GiB, 45 min, no retries, one replica,
-// and one scheduled run a day. Worst case 31 x 2,700 s x 1 vCPU = 83.7k of the 180k vCPU-s grant.
+// and at most one scheduled run a day. Worst case 31 x 2,700 s x 1 vCPU = 83.7k of the 180k vCPU-s
+// grant.
 param location string
 param tags object
 param environmentId string
@@ -54,7 +55,9 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
     configuration: {
       triggerType: 'Schedule'
       scheduleTriggerConfig: {
-        cronExpression: '0 3 * * *' // 03:00 UTC, after Steam's day has closed in every timezone we read
+        // 03:00 UTC, after Steam's day has closed in every timezone we read; every other day (odd
+        // days of the month), so the free SQL allowance holds a month (ADR-017 amendment, 4 Nov 2026).
+        cronExpression: '0 3 */2 * *'
         parallelism: 1
         replicaCompletionCount: 1
       }
