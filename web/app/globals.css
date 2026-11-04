@@ -1038,6 +1038,7 @@ table {
 .claim-support {
   color: var(--ink-3);
   font-size: var(--step--1);
+  white-space: nowrap; /* "from 2,310 reviews" moves to the next line whole */
 }
 
 .claim-reworded {

@@ -2,6 +2,7 @@ import {
   CONFIDENCE_LABELS,
   EXPLANATIONS,
   STATUS_LABELS,
+  basisLine,
   fileClaims,
   formatRange,
   joinWords,
@@ -33,7 +34,7 @@ function Status({ status }: { status: Hypothesis["status"] }) {
 }
 
 function Claim({ claim }: { claim: ReportClaim }) {
-  const support = supportLine(claim.supported_by);
+  const support = basisLine(claim.based_on) ?? supportLine(claim.supported_by);
   return (
     <li className="claim">
       <span className="claim-tick" aria-hidden="true">

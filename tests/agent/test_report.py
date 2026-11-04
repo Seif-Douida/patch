@@ -133,8 +133,31 @@ def test_public_copy_drops_quotes_ids_and_withheld_text(seed: int) -> None:
     assert "caused it" not in copy
     shown = public_copy(stored)
     assert shown["withheld"] == {"V3": 2, "V7": 1}
-    assert [c["supported_by"] for c in shown["claims"]] == [3, 3, 3, 3]  # 2 cited + 1 quoted
+    assert [c["supported_by"] for c in shown["claims"]] == [None] * 4  # each cites a result
     assert "quote_spans" in stored.claims[0].model_dump()  # the stored copy keeps them
+
+
+def test_a_claims_line_is_its_figures_basis_or_its_reviews() -> None:
+    """Seif, 4 Nov: a claim citing a tool result shows how many reviews its figure was computed
+    from; "supported by" counts reviews only for a claim resting on them alone (the example
+    reviews a model attaches to a figure aren't what supports it)."""
+    figure = claim("c1", review_ids=(11,), quotes=((12, "crashes"),))
+    figure = figure.model_copy(update={"based_on": 2310})
+    estimate = claim("c2", "comparative")  # an estimate's result has no review count
+    reviews = Claim.model_validate(
+        {
+            "claim_id": "c3",
+            "text": "A player reports crashes.",
+            "claim_type": "descriptive",
+            "review_ids": [11],
+            "quote_spans": [{"review_id": 12, "text": "crashes"}],
+        }
+    )
+
+    shown = public_copy(report([figure, estimate, reviews], []))
+
+    lines = [(c["based_on"], c["supported_by"]) for c in shown["claims"]]
+    assert lines == [(2310, None), (None, None), (None, 2)]
 
 
 def test_public_copy_keeps_reworded_and_drops_findings_without_verified_claims() -> None:

@@ -295,6 +295,7 @@ REPORTS = {
                 "The positive share fell from 78.2% to 64.4% in the 14 days after the update.",
                 "comparative",
                 -13.8,
+                based_on=2310,
                 review_ids=[910001, 910002, 910003],
             ),
             _claim(
@@ -311,6 +312,7 @@ REPORTS = {
                 "Negative reviews mentioning gameplay balance rose from 18% to 41%.",
                 "comparative",
                 23.0,
+                based_on=1146,
                 quote_spans=[{"review_id": 910007, "text": "every match ends the same way now"}],
             ),
         ],
@@ -341,6 +343,7 @@ REPORTS = {
                 "comparative",
                 47.0,
                 unit="reviews",
+                based_on=1288,
                 review_ids=[920001],
             ),
             _claim(
@@ -402,6 +405,7 @@ REPORTS = {
                 "The positive share went from 61.8% in the baseline to 60.9% in the window.",
                 "comparative",
                 -0.9,
+                based_on=1904,
             )
         ],
         confidence="medium",

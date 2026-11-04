@@ -447,7 +447,7 @@ def test_reports_are_exported_as_public_copies() -> None:
     report = document["report"]
     assert (report["bundle_id"], report["horizon"]) == ("a", 14)
     (claim,) = report["claims"]
-    assert claim["supported_by"] == 3
+    assert (claim["based_on"], claim["supported_by"]) == (2310, None)  # cites a result
     assert report["withheld"] == {"V4": 1}
     # The stored copy's quote spans, review ids and withheld text never reach the site.
     text = content.decode("utf-8")

@@ -159,7 +159,10 @@ export type ReportClaim = {
   value: number | null;
   unit: string | null;
   reworded: boolean; // a causal claim the verifier rewrote with a hedge
-  supported_by: number; // reviews behind it
+  supported_by: number | null; // a claim resting on reviews alone: how many support it
+  // A claim citing a result: how many reviews its figure was computed from (null for an
+  // estimate; absent in reports exported before 4 Nov 2026).
+  based_on?: number | null;
 };
 
 export type PublicReport = {
