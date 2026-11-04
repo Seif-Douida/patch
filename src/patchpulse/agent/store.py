@@ -16,7 +16,7 @@ version. A basic report is due again the next night. Rows are append-only; reade
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -158,11 +158,15 @@ def reports_due(
     return due
 
 
-def shown_reports(stored: Mapping[Key, StoredReport]) -> dict[str, StoredReport]:
+def shown_reports(
+    stored: Mapping[Key, StoredReport], current: Collection[str] | None = None
+) -> dict[str, StoredReport]:
     """The report the site and the API show for each bundle: the 14-day one once it exists, the
-    7-day one until then (both stay stored)."""
+    7-day one until then (both stay stored). With `current`, only those bundles' (tonight's)."""
     shown: dict[str, StoredReport] = {}
     for (bundle_id, horizon), row in sorted(stored.items()):
+        if current is not None and bundle_id not in current:
+            continue
         if bundle_id not in shown or horizon > shown[bundle_id].horizon:
             shown[bundle_id] = row
     return shown

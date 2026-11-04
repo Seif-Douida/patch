@@ -81,14 +81,22 @@ def review(
     )
 
 
-def news(gid: str, title: str, feedname: str, tags: list[str]) -> NewsItem:
+def news(
+    gid: str,
+    title: str,
+    feedname: str,
+    tags: list[str],
+    *,
+    appid: int = GAME_A,
+    published_at: datetime = DAY2,
+) -> NewsItem:
     return NewsItem(
         gid=gid,
-        appid=GAME_A,
+        appid=appid,
         title=title,
         url="https://example.com",
         contents="",
-        published_at=DAY2,
+        published_at=published_at,
         feedname=feedname,
         feedlabel="",
         tags=tags,
@@ -121,7 +129,13 @@ def built(new_database: Callable[[], Settings], tmp_path_factory: pytest.TempPat
     items = [
         news("100", "Devoid of Liberty: 7.1.1", "steam_community_announcements", ["patchnotes"]),
         news("101", "Helldivers 2 gets a hotfix, says press", "PC Gamer", []),
-    ]
+        # The patch-history fix (4 Nov 2026): the day before GAME_B's history starts, and its
+        # first day (backfill_start is TODAY - 30 days for both games).
+        news("102", "Patch 1.0.9", "steam_community_announcements", ["patchnotes"],
+             appid=GAME_B, published_at=TODAY - timedelta(days=31)),
+        news("103", "Patch 1.1.0", "steam_community_announcements", ["patchnotes"],
+             appid=GAME_B, published_at=TODAY - timedelta(days=30)),
+    ]  # fmt: skip
     with admin.begin() as connection:
         provision_writer(connection, password=WRITER_PASSWORD)
         upsert_games(connection, games, run_id=1)
@@ -185,13 +199,26 @@ def test_sale_and_discount_columns_come_from_the_calendar_and_prices(built: Buil
 
 
 def test_press_items_are_not_patches(built: Built) -> None:
-    patches = built.rows("SELECT patch_id, patch_type, is_treatment_candidate FROM core.fact_patch")
-    assert [tuple(p) for p in patches] == [("100", "patch", True)]
+    patches = built.rows("SELECT patch_id, patch_type FROM core.fact_patch WHERE patch_id = '100'")
+    assert [tuple(p) for p in patches] == [("100", "patch")]
+    assert not built.rows("SELECT patch_id FROM core.fact_patch WHERE patch_id = '101'")
+
+
+def test_patches_before_the_history_are_not_candidates(built: Built) -> None:
+    # A post before the game's backfill start has no reviews to compare: listed, never a bundle.
+    patches = built.rows(
+        "SELECT patch_id, is_treatment_candidate FROM core.fact_patch ORDER BY patch_id"
+    )
+    assert [tuple(p) for p in patches] == [("100", True), ("102", False), ("103", True)]
 
 
 def test_patch_window_describes_treatment_candidates(built: Built) -> None:
-    (window,) = built.rows("SELECT patch_id, n_pre, n_post FROM mart.patch_window")
+    (window,) = built.rows(
+        "SELECT patch_id, n_pre, n_post FROM mart.patch_window WHERE patch_id = '100'"
+    )
     assert (window.patch_id, window.n_pre, window.n_post) == ("100", 3, 1)
+    windows = {r.patch_id for r in built.rows("SELECT patch_id FROM mart.patch_window")}
+    assert windows == {"100", "103"}
 
 
 def test_site_export_reads_the_marts(built: Built) -> None:

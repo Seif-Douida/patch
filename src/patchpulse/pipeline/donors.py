@@ -2,9 +2,9 @@
 printed for Seif to approve; nothing is stored.
 
 A candidate passes with a mean of at least 20 reviews a day over the last 90 days, a release
-before 3 Sep 2024 (28 days of fit window before the history starts on 1 Oct 2024), and news that
-reaches 1 Oct 2024 within the 100 items the nightly reads (so its patch dates are known). The check
-also counts, for each bundle of the tracked games' patches, how many passing candidates of the
+before 3 Sep 2024 (28 days of fit window before the history starts on 1 Oct 2024), and official
+posts that reach 1 Oct 2024 within the 100 the nightly reads (so its patch dates are known). The
+check also counts, for each bundle of the tracked games' patches, how many passing candidates of the
 same genre group had no patch of their own around it (design D6's patch rule; their daily data
 is checked later, when the history exists).
 """

@@ -16,7 +16,7 @@ import pytest
 from agent_fixtures import ESTIMATES, PATCH_DAY, SAMPLE_QUOTE, make_bundle, sample_report
 from sqlalchemy import Engine, text
 
-from patchpulse.agent.bundle import Bundle, GameData
+from patchpulse.agent.bundle import Bundle, GameData, current_bundles
 from patchpulse.agent.store import (
     StoredReport,
     latest_reports,
@@ -170,3 +170,16 @@ def test_the_site_shows_the_14_day_report_once_it_exists(migrated_engine: Engine
     write(migrated_engine, bundle, ("p1", 14), run_id=59)
     shown = shown_reports(stored(migrated_engine))
     assert {b: r.horizon for b, r in shown.items()} == {"p1": 14}
+
+
+def test_shown_reports_keep_only_current_bundles(migrated_engine: Engine) -> None:
+    # The patch-history fix (4 Nov 2026): a bundle gone from tonight's data (before its game's
+    # history, or its first patch changed) shows nothing; its rows stay stored.
+    bundle = make_bundle()
+    write(migrated_engine, bundle, ("p1", 14), run_id=52)
+    with migrated_engine.begin() as connection:
+        write_report(connection, sample_report("p9", 7), fingerprint="9" * 64, run_id=52)
+
+    assert current_bundles(bundle) == frozenset({"p0", "p1"})  # p0, and p1 with p2
+    assert set(shown_reports(stored(migrated_engine), current={"p0", "p1"})) == {"p1"}
+    assert set(shown_reports(stored(migrated_engine))) == {"p1", "p9"}

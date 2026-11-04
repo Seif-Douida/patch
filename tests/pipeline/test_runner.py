@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -1311,3 +1311,141 @@ def test_dbt_is_tried_again_only_once(env: Env) -> None:
 
     assert dbt.calls == 2
     assert sleeps.waits == [DBT_RETRY_WAIT_S]
+
+
+# The patch-history fix (4 Nov 2026): the nightly pages back to each game's start.
+
+
+def every_three_hours(env: Env, count: int = 200) -> list[tuple[str, datetime]]:
+    """Official posts for GAME_A every 3 hours back from a day ago (25.9 days in all), titled so
+    rules-v1 says `other`: the newest 100 reach 13.4 days back, short of BACKFILL_START."""
+    posts = [(f"h{i}", NOW - timedelta(days=1, hours=3 * i)) for i in range(count)]
+    for gid, at in posts:
+        env.steam.add_news(GAME_A, gid, f"Community update {gid}", at, tags=())
+    return posts
+
+
+def history_requests(env: Env) -> list[str]:
+    return [
+        url
+        for url in (str(request.url) for request in env.steam.requests)
+        if "GetNewsForApp" in url and "enddate=" in url
+    ]
+
+
+def stored_gids(env: Env, appid: int) -> set[str]:
+    return {r.gid for r in env.rows(f"SELECT gid FROM raw.steam_news WHERE appid = {appid}")}
+
+
+def news_stage(env: Env) -> dict[str, int]:
+    *_, last = env.rows("SELECT stages FROM ops.pipeline_run ORDER BY run_id")
+    stage: dict[str, int] = json.loads(last.stages)["news"]
+    return stage
+
+
+def test_news_history_pages_back_to_the_backfill_start(env: Env) -> None:
+    posts = every_three_hours(env)
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"
+    since_start = {gid for gid, at in posts if at.date() >= BACKFILL_START}
+    assert len(since_start) > 100  # more than the latest page holds
+    assert since_start <= stored_gids(env, GAME_A)
+    assert news_stage(env)["history_pages"] == 1
+    assert not [url for url in history_requests(env) if f"appid={GAME_B}" in url]
+
+
+def test_news_history_stops_once_it_reaches_the_start(env: Env) -> None:
+    every_three_hours(env)
+    env.run(dbt=ok_dbt, export=stub_export)
+    asked = len(history_requests(env))
+
+    env.run(dbt=ok_dbt, export=stub_export)
+
+    assert asked == 1
+    assert len(history_requests(env)) == asked
+    assert news_stage(env)["history_pages"] == 0
+
+
+def test_a_failing_history_page_keeps_the_night(env: Env) -> None:
+    posts = every_three_hours(env)
+    env.steam.news_history_status = 503
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"  # GAME_A wasn't failed: that fails the run
+    stored = stored_gids(env, GAME_A)
+    assert len(stored) == 100  # the latest page only (the fixture's patch post "900" is one)
+    assert "h0" in stored
+    assert not {gid for gid, at in posts if at.date() < BACKFILL_START} & stored
+    assert news_stage(env)["history_failed"] == 1
+
+    env.steam.news_history_status = None
+    env.run(dbt=ok_dbt, export=stub_export)
+
+    assert {gid for gid, at in posts if at.date() >= BACKFILL_START} <= stored_gids(env, GAME_A)
+
+
+def test_a_basic_report_of_a_vanished_bundle_doesnt_hold_the_alert(env: Env) -> None:
+    # A bundle gone from tonight's data isn't on the site, so its basic report can't keep the
+    # alert open (the patch-history fix, 4 Nov 2026).
+    reports = FakeReports(
+        [tonight(due=1, written=1, basic=1), tonight(due=1, written=1)],
+        stores=[
+            [sample_report("p1", 7, basic=True), sample_report("p9", 7, basic=True)],
+            [sample_report("p1", 7)],
+        ],
+    )
+    settings = with_gemini(env.settings)
+
+    def night() -> Any:
+        return env.run(
+            settings=settings,
+            dbt=ok_dbt,
+            export=stub_export,
+            bundle=fixture_bundle,
+            reports=reports,
+        )
+
+    night()
+    assert len(env.publisher.alerts) == 1
+
+    second = night()
+
+    ((resolved, comment),) = env.publisher.resolved
+    assert resolved == BASIC_REPORTS
+    assert f"run {second.run_id}" in comment
+
+
+def test_a_rate_limited_history_page_doesnt_fail_the_other_games(env: Env) -> None:
+    # A 429 refuses the run's later Steam requests; history comes after every game's latest
+    # posts, so it costs only history and the stages after it (the final review, 4 Nov 2026).
+    every_three_hours(env)
+    env.steam.add_news(GAME_B, "950", "Patch 2.0.1", NOW - timedelta(days=3))
+    env.steam.news_history_status = 429
+
+    result = env.run(dbt=ok_dbt, export=stub_export)
+
+    assert result.status == "succeeded"
+    assert "950" in stored_gids(env, GAME_B)
+    assert news_stage(env)["history_failed"] == 2  # GAME_B's history wasn't asked: refused
+
+
+def test_news_history_fetches_the_rest_of_the_start_day(env: Env) -> None:
+    # The latest page ends on the backfill start day at 15:00; a patch posted at 09:00 that
+    # day is a treatment candidate too, so history still asks (the final review, 4 Nov 2026).
+    for i in range(98):  # with the fixture's "900", 99 posts newer than the start day
+        env.steam.add_news(GAME_A, f"h{i}", f"Community update {i}",
+                           NOW - timedelta(days=1, hours=3 * i), tags=())  # fmt: skip
+    start = datetime.combine(BACKFILL_START, time(), UTC)
+    env.steam.add_news(
+        GAME_A, "start-15h", "Community update", start + timedelta(hours=15), tags=()
+    )
+    env.steam.add_news(GAME_A, "start-9h", "Patch 1.0.1", start + timedelta(hours=9))
+    env.steam.add_news(GAME_A, "before", "Community update", start - timedelta(hours=12), tags=())
+
+    env.run(dbt=ok_dbt, export=stub_export)
+
+    assert {"start-15h", "start-9h"} <= stored_gids(env, GAME_A)
+    assert news_stage(env)["history_pages"] == 1
