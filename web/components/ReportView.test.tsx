@@ -51,11 +51,14 @@ function report(extra: Partial<PublicReport> = {}): PublicReport {
       { title: "The sale", hypothesis: "H2", claim_ids: ["c1"] },
     ],
     claims: [
-      claim("c1", "Reviews per day doubled during the sale, from 45 to 92.", { supported_by: 3 }),
+      claim("c1", "Reviews per day doubled during the sale, from 45 to 92.", {
+        based_on: 1288,
+        supported_by: null,
+      }),
       claim("c2", "The data are consistent with the patch moving the share by about -0.6 points.", {
         claim_type: "causal",
         reworded: true,
-        supported_by: 1,
+        supported_by: null, // an estimate: no review count behind it
       }),
     ],
     withheld: {},
@@ -89,6 +92,27 @@ describe("ReportView", () => {
     );
   });
 
+  it("a_figure_says_how_many_reviews_it_came_from", () => {
+    render(<ReportView report={report()} />);
+
+    const sale = screen.getByRole("region", { name: "A price change or sale: supported" });
+    expect(within(sale).getByText("from 1,288 reviews")).toBeTruthy();
+    expect(screen.queryByText(/supported by/)).toBeNull();
+    // An estimate has no review count: no line rather than a wrong one.
+    const patch = screen.getByRole("region", { name: "The patch: inconclusive" });
+    expect(patch.querySelector(".claim-support")).toBeNull();
+  });
+
+  it("a_claim_resting_on_reviews_says_how_many_support_it", () => {
+    const quoted = claim("c3", "A player reports crashes on load.", { supported_by: 1 });
+    const figure = claim("c4", "A day's positive share.", { based_on: 1, supported_by: null });
+    const findings = [{ title: "The patch", hypothesis: "H1" as const, claim_ids: ["c3", "c4"] }];
+    render(<ReportView report={report({ claims: [quoted, figure], findings })} />);
+
+    expect(screen.getByText("supported by 1 review")).toBeTruthy();
+    expect(screen.getByText("from 1 review")).toBeTruthy();
+  });
+
   it("claims_sit_under_their_explanation", () => {
     render(<ReportView report={report()} />);
 
@@ -97,8 +121,7 @@ describe("ReportView", () => {
     expect(within(patch).getByText(/consistent with the patch/)).toBeTruthy();
     expect(within(patch).queryByText(/doubled during the sale/)).toBeNull();
     expect(within(sale).getByText(/doubled during the sale/)).toBeTruthy();
-    expect(within(sale).getByText("supported by 3 reviews")).toBeTruthy();
-    expect(within(patch).getByText("supported by 1 review")).toBeTruthy();
+    expect(within(sale).getByText("from 1,288 reviews")).toBeTruthy();
     // The patch comes before the sale, in hypothesis order; explanations without a claim get no
     // section of their own.
     expect(precedes(patch, sale)).toBe(true);

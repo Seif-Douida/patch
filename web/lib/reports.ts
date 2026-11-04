@@ -2,7 +2,7 @@
 // verifier's rules, and how the claims are filed. The agent's own titles are in
 // src/patchpulse/agent/verifier.py (HYPOTHESIS_TITLES); `long` matches them.
 
-import { formatDate } from "./series";
+import { formatCount, formatDate } from "./series";
 import type { Hypothesis, HypothesisCode, Patch, PublicReport, ReportClaim } from "./types";
 
 export const HYPOTHESIS_ORDER: readonly HypothesisCode[] = ["H1", "H2", "H3", "H4", "H5"];
@@ -56,9 +56,15 @@ export function withheldTotal(withheld: Record<string, number>): number {
   return Object.values(withheld).reduce((sum, n) => sum + n, 0);
 }
 
-/** "supported by 1 review"; nothing for a claim that cites no reviews. */
-export function supportLine(n: number): string | null {
-  if (n <= 0) return null;
+/** "from 2,310 reviews": the reviews a claim's figure was computed from. */
+export function basisLine(n: number | null | undefined): string | null {
+  if (n == null || n <= 0) return null;
+  return `from ${formatCount(n)} ${n === 1 ? "review" : "reviews"}`;
+}
+
+/** "supported by 1 review" for a claim resting on reviews alone; nothing otherwise. */
+export function supportLine(n: number | null): string | null {
+  if (n == null || n <= 0) return null;
   return `supported by ${n} ${n === 1 ? "review" : "reviews"}`;
 }
 

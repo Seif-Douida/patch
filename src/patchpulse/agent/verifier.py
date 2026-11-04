@@ -20,6 +20,9 @@ it can't allow when there's an estimate to state.
 - V7 no review text: a claim whose text or unit repeats LEAK_WORDS words in a row from a review
   retrieved in this run is withheld (casefolded, punctuation and spacing ignored).
 V6 checks the summary, written after verification, in `verify_summary`.
+
+A claim that passes and cites a tool result records how many reviews its figure was computed
+from (`review_basis`), whatever the draft said; the site shows it as "from N reviews".
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from patchpulse.agent.report import Claim, Finding, WithheldClaim
 from patchpulse.agent.rules import CoreEvidence, HypothesisResult
 from patchpulse.agent.tools import ToolCall, Tools, Trace
 from patchpulse.causal.config import CausalConfig
+from patchpulse.causal.decompose import PARTS
 from patchpulse.causal.its import POSITIVE_SHARE, VOLUME
 from patchpulse.causal.store import StoredEstimate
 
@@ -271,10 +275,16 @@ class _Tally:
         return {rule: self.passed[rule] / n for rule, n in sorted(self.applied.items())}
 
 
+def _cited_result(call: ToolCall, tools: Tools) -> Any:
+    """The cited call's result: executed again on this bundle, or as recorded for the model's
+    network tools."""
+    return call.result if call.tool in NETWORK_TOOLS else tools.rerun(call)
+
+
 def _value_matches(claim: Claim, call: ToolCall | None, tools: Tools) -> bool:
     if claim.value is None or claim.evidence is None or call is None:
         return False
-    result = call.result if call.tool in NETWORK_TOOLS else tools.rerun(call)
+    result = _cited_result(call, tools)
     try:
         actual = extract(result, claim.evidence.json_path)
     except (KeyError, IndexError, ValueError):
@@ -413,7 +423,10 @@ def _verify(
     leaked = leaks(claim.text, runs) or (claim.unit is not None and leaks(claim.unit, runs))
     if not tally.check("V7", not leaked):
         return None, "V7"
-    return claim, None
+    basis = None
+    if call is not None and claim.evidence is not None:
+        basis = review_basis(call.tool, _cited_result(call, tools), claim.evidence.json_path)
+    return claim.model_copy(update={"based_on": basis}), None
 
 
 def verify_claims(
@@ -454,6 +467,65 @@ def safe_findings(
             finding = finding.model_copy(update={"title": HYPOTHESIS_TITLES[finding.hypothesis]})
         safe.append(finding)
     return safe
+
+
+# The reviews behind each figure of the core tools' results.
+_PERIOD_FIGURES = frozenset(
+    {"reviews", "positives", "share", "lo90", "hi90", "new_players", "new_players_share"}
+)
+_ASPECT_FIGURES = {
+    "window_mentions": "window",
+    "window_share": "window",
+    "window_scored": "window",
+    "baseline_mentions": "baseline",
+    "baseline_share": "baseline",
+    "baseline_scored": "baseline",
+    "change": "both",
+    "lo90": "both",
+    "hi90": "both",
+}
+_BUCKET_FIGURES = {
+    "window_share": "window",
+    "window_reviews": "window",
+    "baseline_share": "baseline",
+    "baseline_reviews": "baseline",
+}
+_MIX_FIGURES = {"window_mix": "window", "baseline_mix": "baseline"}  # of the period's reviews
+
+
+def _periods(counts: Mapping[str, Any], which: str, count: str) -> int:
+    window, baseline = int(counts[f"window_{count}"]), int(counts[f"baseline_{count}"])
+    return {"window": window, "baseline": baseline, "both": window + baseline}[which]
+
+
+def review_basis(tool: str, result: Any, json_path: str) -> int | None:
+    """How many reviews the figure at `json_path` in a core tool's result was computed from: a
+    period's reviews for its share and counts, an aspect's scored reviews of that polarity (both
+    periods' for its change and the change's interval), the who-reviewed split's reviews (both
+    periods' for its parts). None where no review count stands behind the figure: an estimate, a
+    price field, a patch list, the model's network tools, an error."""
+    try:
+        parts = _segments(json_path)
+        leaf = parts[-1]
+        if tool in ("get_game_overview", "sentiment_timeseries"):
+            period = extract(result, ".".join(parts[:-1]))
+            return int(period["reviews"]) if leaf in _PERIOD_FIGURES else None
+        if tool == "aspect_breakdown" and len(parts) == 4 and parts[0] == "aspects":
+            side = result["aspects"][parts[1]][parts[2]]
+            which = _ASPECT_FIGURES.get(leaf)
+            return None if which is None else _periods(side, which, "scored")
+        if tool == "decompose_change":
+            if parts[0] in PARTS or (parts[0] == "intervals" and parts[1] in PARTS):
+                return _periods(result, "both", "reviews")
+            if len(parts) == 1 and leaf in ("window_reviews", "baseline_reviews"):
+                return int(result[leaf])
+            if parts[0] == "buckets" and len(parts) == 3 and leaf in _MIX_FIGURES:
+                return _periods(result, _MIX_FIGURES[leaf], "reviews")
+            if parts[0] == "buckets" and len(parts) == 3 and leaf in _BUCKET_FIGURES:
+                return _periods(result["buckets"][parts[1]], _BUCKET_FIGURES[leaf], "reviews")
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+    return None
 
 
 def _stated(text: str) -> list[tuple[float, int]]:

@@ -202,6 +202,7 @@ def sample_report(bundle_id: str = "p1", horizon: int = 7, *, basic: bool = Fals
                     "value": 19.0,
                     "unit": "pp",
                     "evidence": {"call_id": "r1.6", "json_path": "aspects.performance.change"},
+                    "based_on": 2310,
                     "review_ids": [7001, 7002],
                     "quote_spans": [{"review_id": 7003, "text": SAMPLE_QUOTE}],
                 }

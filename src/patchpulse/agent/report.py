@@ -1,10 +1,12 @@
 """The report (design D6, spec §10.4) and its two copies.
 
 The stored report (app.report) keeps everything: quote spans, review ids and the withheld claims
-with their text. The public copy (the site, /reports and /ask) keeps none of those: a claim shows
-how many reviews support it, withheld claims appear as counts by the rule that withheld them, and
-findings keep only their verified claims. The model drafts findings and claims (DRAFT_SCHEMA) and
-never the summary, the confidence or the hypotheses' statuses.
+with their text. The public copy (the site, /reports and /ask) keeps none of those: a claim citing
+a tool result shows how many reviews its figure was computed from (`based_on`, None when the
+result has no review count, as an estimate's), a claim resting on reviews alone how many support
+it (`supported_by`, None for the others), withheld claims appear as counts by the rule that
+withheld them, and findings keep only their verified claims. The model drafts findings and claims
+(DRAFT_SCHEMA) and never the summary, the confidence or the hypotheses' statuses.
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ class Claim(_Model):
     review_ids: list[int] = []
     quote_spans: list[QuoteSpan] = []
     reworded: bool = False  # rewritten by V4's hedge template
+    based_on: int | None = None  # reviews the cited figure came from; set by the verifier
 
     @model_validator(mode="before")
     @classmethod
@@ -203,7 +206,8 @@ def public_copy(report: Report) -> dict[str, Any]:
                 "value": c.value,
                 "unit": c.unit,
                 "reworded": c.reworded,
-                "supported_by": len(c.supporting_reviews),
+                "supported_by": len(c.supporting_reviews) if c.evidence is None else None,
+                "based_on": c.based_on,
             }
             for c in report.claims
         ],

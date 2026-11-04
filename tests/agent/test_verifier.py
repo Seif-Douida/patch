@@ -25,6 +25,7 @@ from patchpulse.agent.verifier import (
     CausalCheck,
     basic_claims,
     hedge,
+    review_basis,
     safe_findings,
     template_summary,
     verify_claims,
@@ -658,3 +659,120 @@ def test_a_claim_resting_on_reviews_needs_a_quote() -> None:
 
     assert [c.claim_id for c in checked.claims] == ["c2"]
     assert withheld_rules(checked) == ["V1"]
+
+
+# What a claim's figure was computed from (Seif, 4 Nov): a claim citing a tool result shows how
+# many reviews its figure came from, not how many example reviews the model attached to it.
+
+
+def test_an_aspect_change_is_based_on_both_periods_scored_reviews() -> None:
+    run = Run()
+    side = run.aspects["aspects"]["performance"]["negative"]
+
+    (kept,) = run.verify(claim("Performance complaints fell.", value=side["change"])).claims
+
+    assert kept.based_on == side["window_scored"] + side["baseline_scored"]
+
+
+def test_an_aspect_share_is_based_on_its_periods_scored_reviews() -> None:
+    run = Run()
+    side = run.aspects["aspects"]["performance"]["negative"]
+
+    def basis(figure: str) -> int | None:
+        path = f"aspects.performance.negative.{figure}"
+        return review_basis("aspect_breakdown", run.aspects, path)
+
+    assert basis("window_share") == side["window_scored"]
+    assert basis("baseline_share") == side["baseline_scored"]
+    assert side["window_scored"] != side["baseline_scored"]
+
+
+def test_a_period_figure_is_based_on_that_periods_reviews() -> None:
+    run = Run()
+    daily = run.tools.sentiment_timeseries(GAME, *WINDOW, "day")  # r1.4
+    total, first = daily["total"], daily["points"][0]
+    assert first["reviews"] != total["reviews"]
+    whole = claim("The window's positive share.", value=total["share"], unit="%", call="r1.4",
+                  path="total.share")  # fmt: skip
+    day = claim("The first day's positive share.", value=first["share"], unit="%", call="r1.4",
+                path="points[0].share", claim_id="c2")  # fmt: skip
+
+    kept = run.verify(whole, day).claims
+
+    assert [c.based_on for c in kept] == [total["reviews"], first["reviews"]]
+
+
+def test_a_who_reviewed_figure_is_based_on_the_reviews_it_splits() -> None:
+    run = Run()
+    split = run.tools.decompose_change(GAME, WINDOW, BASELINE)
+    both = split["window_reviews"] + split["baseline_reviews"]
+    bucket = next(iter(split["buckets"]))
+    counts = split["buckets"][bucket]
+
+    def basis(path: str) -> int | None:
+        return review_basis("decompose_change", split, path)
+
+    assert basis("composition") == basis("total") == both
+    assert basis("intervals.composition[0]") == both
+    assert basis(f"buckets.{bucket}.window_share") == counts["window_reviews"]
+    assert basis(f"buckets.{bucket}.baseline_share") == counts["baseline_reviews"]
+    assert basis(f"buckets.{bucket}.window_mix") == split["window_reviews"]
+
+
+def test_an_estimate_or_a_price_figure_has_no_review_basis() -> None:
+    """An estimate's result carries no review count: no line rather than a wrong one."""
+    run = Run()
+    horizon = next(iter(run.estimate["horizons"]))
+    effect = run.estimate["horizons"][horizon]["effect"]
+    estimate = claim("The positive share against the estimate.", claim_type="comparative",
+                     value=effect, call="r1.1", path=f"horizons.{horizon}.effect")  # fmt: skip
+    sale = claim("Sale days in the window.", value=run.series["total"]["sale_days"], unit=None,
+                 call="r1.3", path="total.sale_days", claim_id="c2")  # fmt: skip
+
+    kept = run.verify(estimate, sale).claims
+
+    assert [c.based_on for c in kept] == [None, None]
+
+
+def test_a_claim_resting_on_reviews_alone_has_no_review_basis() -> None:
+    run = Run()
+    quoted = claim("A player reports crashes on load.", unit=None, call=None, review_ids=(101,),
+                   quotes=((101, "crashes on load"),))  # fmt: skip
+
+    (kept,) = run.verify(quoted).claims
+
+    assert kept.based_on is None
+
+
+def test_the_verifier_sets_the_basis_whatever_the_draft_says() -> None:
+    run = Run()
+    side = run.aspects["aspects"]["performance"]["negative"]
+    drafted = claim("Performance complaints fell.", value=side["change"])
+    drafted = drafted.model_copy(update={"based_on": 999_999})
+
+    (kept,) = run.verify(drafted).claims
+
+    assert kept.based_on == side["window_scored"] + side["baseline_scored"]
+
+
+def test_a_path_or_result_without_a_count_has_no_review_basis() -> None:
+    run = Run()
+
+    assert review_basis("sentiment_timeseries", run.series, "total.nope") is None
+    error = {"error": "no game"}
+    assert review_basis("aspect_breakdown", error, "aspects.x.negative.change") is None
+    assert review_basis("list_patches", {"patches": [{"day": 1}]}, "patches[0].day") is None
+    assert review_basis("search_reviews", {"reviews": 3}, "reviews") is None
+
+
+def test_basic_claims_carry_their_review_basis() -> None:
+    run = Run()
+    evidence = core_evidence(run)
+
+    verified = run.verify(*basic_claims(evidence))
+
+    basis = {c.evidence.json_path: c.based_on for c in verified.claims if c.evidence}
+    split = evidence.decomposition
+    assert basis["total.share"] == basis["total.new_players_share"] == evidence.window["reviews"]
+    assert basis["composition"] == split["window_reviews"] + split["baseline_reviews"]
+    assert [v for path, v in basis.items() if path.startswith("horizons.")] == [None]
