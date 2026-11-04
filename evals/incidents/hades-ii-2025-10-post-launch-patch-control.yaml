@@ -1,0 +1,30 @@
+id: hades-ii-2025-10-post-launch-patch-control
+game: "Hades II"
+appid: 1145350
+window:
+  start: 2025-10-31
+  end: 2025-11-06
+question: "Did anything change in Hades II's Steam reviews in early November 2025?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "Supergiant released Post-Launch Patch 1 on 31 October 2025, adding new events around the True Ending and revising its main scenes."
+  - "The patch had been available as an opt-in preview since 23 October 2025."
+  - "No Steam seasonal sale touches the window: the Autumn Sale ended on 6 October 2025 and the Winter Sale began on 18 December 2025."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "a patch in the window with no shift in how players rated the game"
+sources:
+  - url: https://steamcommunity.com/ogg/1145350/announcements/detail/499462068471074278
+    published: 2025-10-31
+    shows: "Supergiant: Post-Launch Patch 1 notes, True Ending enhancements"
+  - url: https://steamcommunity.com/ogg/1145350/announcements/detail/505090299391902120
+    published: 2025-10-23
+    shows: "Supergiant: the Patch 1 preview opens on an opt-in branch"
+  - url: https://web.archive.org/web/20250214021753/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2025-02-14
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+confidence: high
+researched: 2026-11-04
+notes: "A control with a patch in it, five weeks after the 1.0 launch; review volume was still falling from the launch. Our counts: 1,291 reviews at 95.4% in the window vs 9,678 at 94.8% in the 28 days before; no sale in the window."

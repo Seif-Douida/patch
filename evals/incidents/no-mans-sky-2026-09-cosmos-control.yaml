@@ -1,0 +1,26 @@
+id: no-mans-sky-2026-09-cosmos-control
+game: "No Man's Sky"
+appid: 275850
+window:
+  start: 2026-09-09
+  end: 2026-09-15
+question: "Did anything change in No Man's Sky's Steam reviews in mid-September 2026?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "Hello Games released COSMOS (7.0) on 9 September 2026, calling it a complete overhaul of space, with a new star map and space hulks to salvage."
+  - "No Steam seasonal sale touches the window: the Summer Sale ended on 9 July 2026 and the Autumn Sale began on 1 October 2026."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "a major update in the window with many more reviews but no shift in how players rated the game"
+sources:
+  - url: https://steamcommunity.com/ogg/275850/announcements/detail/708906720730022721
+    published: 2026-09-09
+    shows: "Hello Games: COSMOS (7.0), a complete overhaul to space"
+  - url: https://web.archive.org/web/20260116041231/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2026-01-16
+    shows: "Valve sale calendar (archived) with the 2026 seasonal sale and fest dates"
+confidence: high
+researched: 2026-11-04
+notes: "A control with a major update in it: review volume rose about sevenfold (474 a day against 69 before) while the share held. Steam's PvE Survival Crafting Fest started on 7 September 2026; no source says whether No Man's Sky took part, and our price snapshots show no discount. Our counts: 3,318 reviews at 92.5% in the window vs 1,936 at 92.6% in the 28 days before."

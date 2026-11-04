@@ -1,0 +1,26 @@
+id: clair-obscur-2025-07-patch-1-4-control
+game: "Clair Obscur: Expedition 33"
+appid: 1903340
+window:
+  start: 2025-07-30
+  end: 2025-08-05
+question: "Did anything change in Clair Obscur: Expedition 33's Steam reviews in early August 2025?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "Sandfall released Patch v1.4.0 on 30 July 2025, adding a battle retry option and DLSS and XeSS frame generation."
+  - "No Steam seasonal sale touches the window: the Summer Sale ended on 10 July 2025 and the Autumn Sale began on 29 September 2025."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "a patch in the window with no shift in how players rated the game"
+sources:
+  - url: https://steamcommunity.com/ogg/1903340/announcements/detail/499454457318211677
+    published: 2025-07-30
+    shows: "Sandfall: Patch v1.4.0 notes, battle retry and frame generation"
+  - url: https://web.archive.org/web/20250214021753/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2025-02-14
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+confidence: high
+researched: 2026-11-04
+notes: "A control with a patch in it. The 28 days before include 9 days of the Summer Sale. Our counts: 3,440 reviews at 97.5% in the window vs 14,912 at 96.5% in the 28 days before; no sale in the window."
