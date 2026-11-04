@@ -11,7 +11,17 @@ import {
   withheldLines,
   withheldTotal,
 } from "@/lib/reports";
+import { formatDate } from "@/lib/series";
 import type { Hypothesis, PublicReport, ReportClaim } from "@/lib/types";
+
+const DAY_MS = 86_400_000;
+
+/** "The data runs only to 3 Nov 2026, so this covers 6 days. " for a window cut at the data. */
+function cutNote(report: PublicReport): string {
+  if (!report.data_ends) return "";
+  const days = (Date.parse(report.window.end) - Date.parse(report.window.start)) / DAY_MS + 1;
+  return `The data runs only to ${formatDate(report.data_ends)}, so this covers ${days} days. `;
+}
 
 /** "The patch: inconclusive" */
 function sectionTitle(hypothesis: Hypothesis): string {
@@ -74,11 +84,11 @@ function Provenance({ report }: { report: PublicReport }) {
 export function ReportView({ report }: { report: PublicReport }) {
   const { filed, unfiled } = fileClaims(report);
   const withheld = withheldLines(report.withheld);
-  const days = report.horizon ? `The ${report.horizon} days from` : "From";
+  const days = report.horizon && !report.data_ends ? `The ${report.horizon} days from` : "From";
   return (
     <article className="report">
       <p className="report-meta">
-        {days} {formatRange(report.window.start, report.window.end)}.{" "}
+        {days} {formatRange(report.window.start, report.window.end)}. {cutNote(report)}
         {CONFIDENCE_LABELS[report.confidence]}.
       </p>
 

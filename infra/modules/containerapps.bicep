@@ -139,9 +139,11 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
               value: allowedOrigin
             }
             {
-              // Ask's questions a day (design D9): 15 until the compute per wake is measured.
+              // Ask's questions a day (design D9). Measured 4 Nov 2026: an isolated question
+              // keeps a replica ~97 s (~49 vCPU-s), so ~52 a day fit under the cost guard's line
+              // after the nightly job; 45 leaves room for long nights (Seif).
               name: 'PP_ASK_DAILY_CAP'
-              value: '15'
+              value: '45'
             }
           ]
           resources: {

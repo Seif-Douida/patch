@@ -35,7 +35,7 @@ class ApiSettings(BaseSettings):
     langfuse_host: str | None = None
     # The share of Ask's runs traced (Task 18), within the month's cap on Langfuse units.
     ask_trace_sample: float = ASK_SAMPLE
-    # Ask's limits (design D9): questions per visitor an hour, and a day's questions in all. The
-    # cap stays 15 until Task 17 measures the compute per wake.
+    # Ask's limits (design D9): questions per visitor an hour, and a day's questions in all. Azure
+    # sets the measured cap (45, infra/modules/containerapps.bicep); 15 is for local runs.
     ask_per_visitor_hour: int = 3
     ask_daily_cap: int = 15
