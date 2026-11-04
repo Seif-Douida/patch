@@ -46,8 +46,9 @@ _JSON_LITERAL = re.compile(r"^\[json\('(-?[0-9.]+)'\)\]$")
 # The Container Apps free grant, per subscription per month; pp-api and the jobs share it.
 GRANT_VCPU_SECONDS = 180_000
 GRANT_GIB_SECONDS = 360_000
-# A fixed minute and hour, every day: one run a day, whatever the timeout math assumes.
-_DAILY_CRON = re.compile(r"^[0-9]{1,2} [0-9]{1,2} \* \* \*$")
+# A fixed minute and hour, every day or every other day (ADR-017 amendment, 4 Nov 2026): at most
+# one run a day, whatever the timeout math assumes.
+_AT_MOST_DAILY_CRON = re.compile(r"^[0-9]{1,2} [0-9]{1,2} (\*|\*/2) \* \*$")
 _TRIGGER_CONFIG = {
     "Schedule": "scheduleTriggerConfig",
     "Manual": "manualTriggerConfig",
@@ -202,7 +203,22 @@ def test_jobs_run_only_on_a_schedule_or_by_hand(resources: list[dict[str, Any]])
         assert "eventTriggerConfig" not in config, job["name"]
 
 
-def test_scheduled_jobs_run_once_a_day(resources: list[dict[str, Any]]) -> None:
+@pytest.mark.parametrize(
+    ("cron", "allowed"),
+    [
+        ("0 3 * * *", True),  # every day
+        ("0 3 */2 * *", True),  # every other day (ADR-017 amendment, 4 Nov 2026)
+        ("0 */12 * * *", False),  # twice a day
+        ("0 3,15 * * *", False),
+        ("*/30 3 * * *", False),
+        ("0 3 */2,15 * *", False),
+    ],
+)
+def test_the_schedule_rule_allows_at_most_one_run_a_day(cron: str, allowed: bool) -> None:
+    assert bool(_AT_MOST_DAILY_CRON.match(cron)) is allowed
+
+
+def test_scheduled_jobs_run_at_most_once_a_day(resources: list[dict[str, Any]]) -> None:
     scheduled = [
         job
         for job in of_type(resources, "microsoft.app/jobs")
@@ -211,7 +227,7 @@ def test_scheduled_jobs_run_once_a_day(resources: list[dict[str, Any]]) -> None:
     assert scheduled, "expected the nightly job"
     for job in scheduled:
         cron = trigger_config(job)["cronExpression"]
-        assert _DAILY_CRON.match(cron), f"{job['name']}: {cron!r} is not a literal daily schedule"
+        assert _AT_MOST_DAILY_CRON.match(cron), f"{job['name']}: {cron!r} runs more than daily"
 
 
 def test_worst_case_scheduled_job_usage_is_under_half_the_grant(

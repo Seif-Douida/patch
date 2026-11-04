@@ -18,7 +18,7 @@ const sans = Atkinson_Hyperlegible_Next({
 
 export const metadata: Metadata = {
   title: { default: "PatchPulse", template: "%s | PatchPulse" },
-  description: "How players' Steam reviews moved around each game's patches, updated every night.",
+  description: "How players' Steam reviews moved around each game's patches, updated every other night.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

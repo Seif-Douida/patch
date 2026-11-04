@@ -25,7 +25,7 @@ export default function Home() {
       <section className="intro">
         <h1>How players reacted to each patch</h1>
         <p>
-          PatchPulse reads every Steam review of these games each night and tracks the share that
+          PatchPulse reads every Steam review of these games every other night and tracks the share that
           recommend the game. Open a game to see that share day by day, with its patches and
           Steam sales marked.
         </p>

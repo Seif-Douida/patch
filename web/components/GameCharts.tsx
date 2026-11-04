@@ -142,7 +142,7 @@ export function GameCharts({
   }, [filled, patches, days]);
 
   if (rows.length === 0) {
-    return <p>No reviews have been collected for this game yet. They appear after the next nightly run.</p>;
+    return <p>No reviews have been collected for this game yet. They appear after the next update.</p>;
   }
 
   // Both charts get the same calendar ticks, so their dates line up.

@@ -289,7 +289,7 @@ describe("PatchAspectTables estimates", () => {
     );
     expect(lines).toEqual([
       "No estimate yet: the 7 days after the patch end on 28 Sep 2026.",
-      "No estimate yet: the nightly update hasn't reached this patch.",
+      "No estimate yet: the updates haven't reached this patch.",
       "No estimate: too few comparison games without their own patch (3 of 5 needed).",
       "No estimate: too little quiet history before the patch to check the range.",
       // An effect is never shown without its range.
