@@ -85,7 +85,7 @@ export function ReportView({ report }: { report: PublicReport }) {
       {report.basic && (
         <p className="report-basic" role="note">
           Written without the language model: none answered when this report was due, so it gives
-          the core numbers and a template summary. It is written again the next night.
+          the core numbers and a template summary. It is written again at the next update.
         </p>
       )}
 

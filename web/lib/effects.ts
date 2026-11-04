@@ -64,7 +64,7 @@ function absence(horizon: HorizonEffect | undefined): string {
     case "window_not_complete":
       return `No estimate yet: the ${horizon.days} days after the patch end on ${formatDate(horizon.ends)}.`;
     case "not_estimated_yet":
-      return "No estimate yet: the nightly update hasn't reached this patch.";
+      return "No estimate yet: the updates haven't reached this patch.";
     case "another_patch_within_14_days":
       return "No estimate: another patch came out within 14 days.";
     case null:
@@ -79,7 +79,7 @@ function fourteenDays(horizon: HorizonEffect): string | null {
     case "window_not_complete":
       return `The 14-day estimate comes after ${formatDate(horizon.ends)}.`;
     case "not_estimated_yet":
-      return "The 14-day estimate is waiting for the nightly update.";
+      return "The 14-day estimate is waiting for the next update.";
     case "another_patch_within_14_days":
       return "No 14-day estimate: another patch came out within 14 days.";
     case null:
