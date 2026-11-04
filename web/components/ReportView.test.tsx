@@ -146,6 +146,26 @@ describe("ReportView", () => {
     expect(within(plain as HTMLElement).queryByText(/Reworded/)).toBeNull();
   });
 
+  it("a_window_cut_at_the_data_says_so", () => {
+    // Ask, a few days after a patch: the week asked about runs past the last day of data.
+    const cut = report({
+      scope: "question",
+      horizon: 7,
+      window: { start: "2026-10-29", end: "2026-11-03" },
+      data_ends: "2026-11-03",
+    });
+    render(<ReportView report={cut} />);
+
+    const meta = screen.getByText(/^From 29 Oct to 3 Nov 2026\./);
+    expect(meta.textContent).toMatch(/The data runs only to 3 Nov 2026, so this covers 6 days\./);
+    expect(screen.queryByText(/The 7 days from/)).toBeNull();
+
+    cleanup();
+    render(<ReportView report={report()} />);
+    expect(screen.getByText(/^The 14 days from 2 Jul to 15 Jul 2026\./)).toBeTruthy();
+    expect(screen.queryByText(/The data runs only to/)).toBeNull();
+  });
+
   it("basic_report_says_so", () => {
     render(<ReportView report={report({ basic: true, model_ids: {} })} />);
 

@@ -7,11 +7,20 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_fixtures import GAME, OTHER_GAME, PATCH_DAY, game_data, make_bundle, other_game
+from agent_fixtures import (
+    GAME,
+    LAST,
+    OTHER_GAME,
+    PATCH_DAY,
+    game_data,
+    make_bundle,
+    other_game,
+)
 from agent_world import (
     ANSWERS,
     CHAIN,
@@ -313,3 +322,40 @@ def test_a_question_falls_back_to_the_7_day_estimate(tmp_path: Path) -> None:
     assert report.horizon == 7
     (h1,) = [h for h in report.hypotheses if h.code == "H1"]
     assert h1.rule != "H1.no_estimate"
+
+
+def past_the_data(_: str) -> dict[str, Any]:
+    return {"appid": GAME, "start": "2026-10-05", "end": "2026-10-11"}  # one day past LAST
+
+
+def test_a_window_past_the_data_stops_at_its_last_day(tmp_path: Path) -> None:
+    """Seif, 4 Nov 2026: "Did the latest patch help?" a few days after a patch asks about days the
+    data hasn't reached yet; the window stops at the last day of data, and the answer says so."""
+    model = Scripted({**ANSWERS, "scope": past_the_data})
+
+    report = report_of(World(tmp_path, model).run(ReportRequest.for_question(QUESTION, appid=GAME)))
+
+    assert (report.window.start, report.window.end) == (date(2026, 10, 5), LAST)
+    assert report.data_ends == LAST
+    assert public_copy(report)["data_ends"] == "2026-10-10"
+
+
+def test_a_window_inside_the_data_doesnt_say_where_it_ends(tmp_path: Path) -> None:
+    world = World(tmp_path, Scripted())
+
+    report = report_of(world.run(ReportRequest.for_question(QUESTION, appid=GAME)))
+
+    assert report.data_ends is None
+    assert "data_ends" not in public_copy(report)
+
+
+def test_a_window_with_under_3_days_of_data_is_refused(tmp_path: Path) -> None:
+    two_days = {"appid": GAME, "start": "2026-10-09", "end": "2026-10-15"}
+    model = Scripted({**ANSWERS, "scope": lambda _: two_days})
+
+    result = World(tmp_path, model).run(ReportRequest.for_question(QUESTION, appid=GAME))
+
+    assert isinstance(result, Refusal)
+    assert "2026-10-10" in result.reason  # where the data ends
+    assert "2026-10-11" in result.reason  # when there are 3 days to look at
+    assert model.steps == ["scope"]

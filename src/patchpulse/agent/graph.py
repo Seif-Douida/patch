@@ -74,6 +74,7 @@ MAX_MODEL_TOOL_CALLS = 8  # spec §10.1
 MIN_BASELINE_DAYS = 7
 MAX_QUESTION_CHARS = 500
 MAX_WINDOW_DAYS = 92
+MIN_CUT_DAYS = 3  # a window cut at the last day of data keeps at least this many (Seif, 4 Nov)
 MAX_REFUSAL_CHARS = 300
 UNAVAILABLE = "The analyst is unavailable right now; please try again in a few minutes."
 
@@ -224,10 +225,20 @@ class _Nodes:
         first, last = game.days[0].date, game.days[-1].date
         if window[0] > window[1]:
             return Refusal("The window asked about ends before it starts.")
-        if window[0] < first or window[1] > last:
+        if window[0] < first or window[0] > last:
             return Refusal(
                 f"The dates asked about are outside the data for {game.name} ({first} to {last})."
             )
+        data_ends = None
+        if window[1] > last:
+            # The scope model doesn't always keep a recent patch's window inside the data: the
+            # window stops at the last day, and the answer says so (Seif, 4 Nov 2026).
+            window, data_ends = (window[0], last), last
+            if days_in(window) < MIN_CUT_DAYS:
+                ready = window[0] + timedelta(days=MIN_CUT_DAYS - 1)
+                return Refusal(
+                    f"{game.name}'s data runs only to {last}; ask again once it reaches {ready}."
+                )
         if days_in(window) > MAX_WINDOW_DAYS:
             return Refusal(f"Ask about at most {MAX_WINDOW_DAYS} days at a time.")
         if (window[0] - first).days < MIN_BASELINE_DAYS:
@@ -259,6 +270,7 @@ class _Nodes:
             bundle_id=None if patch is None else patch.bundle_id,
             horizon=horizon,
             patch=patch,
+            data_ends=data_ends,
         )
 
     def _context(self, state: _State) -> list[str]:
@@ -402,6 +414,7 @@ class _Nodes:
             horizon=scope.horizon,
             question=request.question,
             window=DateWindow(start=scope.window[0], end=scope.window[1]),
+            data_ends=scope.data_ends,
             data_version=self.deps.bundle.data_version,
             model_ids=dict(state["model_ids"]),
             prompt_version=PROMPT_VERSION,

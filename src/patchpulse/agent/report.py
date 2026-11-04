@@ -138,6 +138,7 @@ class Report(_Model):
     horizon: int | None
     question: str | None
     window: DateWindow
+    data_ends: date | None = None  # a question's window cut at the game's last day of data
     data_version: int
     model_ids: dict[str, str]  # step -> the model that answered it
     prompt_version: str
@@ -184,6 +185,8 @@ def public_copy(report: Report) -> dict[str, Any]:
         "horizon": report.horizon,
         "question": report.question,
         "window": report.window.model_dump(mode="json"),
+        # Only on a cut window: nightly reports and the site's export stay as they were.
+        **({"data_ends": report.data_ends.isoformat()} if report.data_ends else {}),
         "data_version": report.data_version,
         "model_ids": dict(report.model_ids),
         "prompt_version": report.prompt_version,

@@ -170,6 +170,7 @@ export type PublicReport = {
   horizon: number | null; // 7 or 14 days
   question: string | null;
   window: { start: string; end: string };
+  data_ends?: string; // Ask only: the window was cut at the game's last day of data
   data_version: number;
   model_ids: Record<string, string>; // step -> model; empty for a basic report
   prompt_version: string;

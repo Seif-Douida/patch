@@ -28,6 +28,7 @@ class Scope:
     bundle_id: str | None
     horizon: int | None
     patch: PatchRow | None
+    data_ends: date | None = None  # set when a question's window was cut at the last day of data
 
 
 def days_in(window: tuple[date, date]) -> int:

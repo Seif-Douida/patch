@@ -46,6 +46,10 @@ _JSON_LITERAL = re.compile(r"^\[json\('(-?[0-9.]+)'\)\]$")
 # The Container Apps free grant, per subscription per month; pp-api and the jobs share it.
 GRANT_VCPU_SECONDS = 180_000
 GRANT_GIB_SECONDS = 360_000
+# Ask's daily cap (ADR-017 amendment, 4 Nov 2026): the grant under cost-guard's 80% line, less a
+# month of nights (60,000), the uptime pings to come (6,000) and deploys (1,000), over 30 days, at
+# the measured ~49 vCPU-s an isolated question keeps pp-api up: 52.
+ASK_DAILY_CAP_MAX = (GRANT_VCPU_SECONDS * 8 // 10 - 60_000 - 6_000 - 1_000) // 30 // 49
 # A fixed minute and hour, every day or every other day (ADR-017 amendment, 4 Nov 2026): at most
 # one run a day, whatever the timeout math assumes.
 _AT_MOST_DAILY_CRON = re.compile(r"^[0-9]{1,2} [0-9]{1,2} (\*|\*/2) \* \*$")
@@ -449,7 +453,7 @@ def test_api_credentials_come_from_container_app_secrets(resources: list[dict[st
     for name, variable in env.items():
         if re.search(r"KEY|QDRANT|PASSWORD|SECRET", name):
             assert "value" not in variable, name
-    assert env["PP_ASK_DAILY_CAP"]["value"] == "15"  # until the compute per wake is measured
+    assert 1 <= int(env["PP_ASK_DAILY_CAP"]["value"]) <= ASK_DAILY_CAP_MAX
     assert "PP_SITE_ORIGIN" in env
     # Browsers may call it from the site only; Ask posts JSON.
     cors = api["properties"]["configuration"]["ingress"]["corsPolicy"]
