@@ -47,9 +47,10 @@ log = logging.getLogger("patchpulse.retrieval")
 CHUNK_S = 300.0
 POLL_S = 30.0
 MAX_WAIT_S = 1_200.0
-# Shares of the node's RAM: the cluster sat at 47% with 420k points on 1 Nov (~60% projected at
-# rest when caught up); Phase 3's upload watchdog paused at ~950 MiB of 1,167 (81%).
-RESUME_BELOW = 0.65
+# Shares of the node's RAM: the cluster rests at 64% with 629k points (5 Nov), ~67% when caught
+# up; with segments capped (qdrant.MAX_SEGMENT_KB) a merge adds under 10 points, so a chunk started
+# at 70% stays under the stop line. Phase 3's upload watchdog paused at ~950 MiB of 1,167 (81%).
+RESUME_BELOW = 0.70
 STOP_ABOVE = 0.80
 LIVE_RUN_MINUTES = 50
 

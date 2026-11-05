@@ -128,11 +128,12 @@ class Answers:
 
 
 def test_the_limits_are_the_runbooks() -> None:
-    # Five minutes of upserts between checks; resume at 65% of RAM (the cluster sat at 47% with
-    # 420k points on 1 Nov, ~60% projected at rest when caught up), stop above 80% (Phase 3's
-    # upload watchdog paused at ~950 MiB of 1,167); give up after 20 minutes of waiting.
+    # Five minutes of upserts between checks; resume at 70% of RAM (the cluster rests at 64% with
+    # 629k points on 5 Nov, ~67% caught up; with segments capped at ~40k reviews a merge adds
+    # under 10 points), stop above 80% (Phase 3's upload watchdog paused at ~950 MiB of 1,167);
+    # give up after 20 minutes of waiting.
     assert (CHUNK_S, POLL_S, MAX_WAIT_S) == (300, 30, 1_200)
-    assert (RESUME_BELOW, STOP_ABOVE) == (0.65, 0.80)
+    assert (RESUME_BELOW, STOP_ABOVE) == (0.70, 0.80)
 
 
 def test_catch_up_works_in_chunks_until_caught_up(
@@ -171,7 +172,7 @@ def test_each_chunk_waits_for_a_calm_cluster(
     clock = Ticker()
     slow = Slow(qdrant, clock)
     # Optimizing, then green but still above the resume line, then calm.
-    cluster = Answers(ClusterState(memory=0.50, green=False), ClusterState(0.70, True), CALM)
+    cluster = Answers(ClusterState(memory=0.50, green=False), ClusterState(0.75, True), CALM)
 
     outcome = catch_up(
         slow,
