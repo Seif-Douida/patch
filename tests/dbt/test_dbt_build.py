@@ -296,6 +296,27 @@ def test_site_export_serves_the_stored_estimates(built: Built, tmp_path: Path) -
     assert served == [(7, "synth", -4.0, None), (14, "its", -2.5, TOO_FEW)]
 
 
+def test_a_changed_sale_calendar_reaches_past_days(built: Built) -> None:
+    # A sale added to the calendar for a past day (Black Friday 2025, 4 Nov 2026) must reach the
+    # mart, though the day has no new reviews and is older than the last 4 days. A stored flag
+    # that disagrees with the calendar stands in for the calendar changing.
+    where = f"WHERE game_key = {GAME_A} AND date_key = {date_key(DAY2)}"
+    (calendar,) = built.rows(
+        f"SELECT is_steam_sale FROM core.dim_date WHERE date_key = {date_key(DAY2)}"
+    )
+    with built.admin.begin() as connection:
+        connection.execute(
+            text(f"UPDATE mart.daily_game_sentiment SET is_sale = :stale {where}"),
+            {"stale": not calendar.is_steam_sale},
+        )
+
+    again = run_dbt(["build"], settings=built.writer, target_path=built.target)
+
+    assert again.ok, again.failures
+    (day,) = built.rows(f"SELECT is_sale, n_reviews FROM mart.daily_game_sentiment {where}")
+    assert (day.is_sale, day.n_reviews) == (calendar.is_steam_sale, 0)
+
+
 def test_reloading_an_edited_review_updates_not_duplicates(built: Built) -> None:
     # Runs last in this module: it changes the data the other tests read.
     with built.admin.begin() as connection:
