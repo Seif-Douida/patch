@@ -7,7 +7,8 @@
 -- One row per game per day, from the game's first stored review to today. Days without reviews
 -- have n_reviews = 0 and NULL shares. Incremental runs rebuild only the affected days: days with
 -- reviews seen since the previous build, days older than the game's previous first day (history
--- the backfill just added), and the last 4 days (new empty days, today's price).
+-- the backfill just added), the last 4 days (new empty days, today's price), and days whose
+-- stored sale flag differs from the calendar (a sale added for past days, like Black Friday 2025).
 
 with clock as (
     select cast(sysutcdatetime() as date) as today
@@ -48,6 +49,11 @@ affected as (
         p.first_date_key is null
         or s.date_key < p.first_date_key
         or s.[date] >= dateadd(day, -4, (select today from clock))
+    union
+    select s.game_key, s.date_key
+    from spine as s
+    inner join {{ this }} as t on t.game_key = s.game_key and t.date_key = s.date_key
+    where t.is_sale <> s.is_steam_sale
 ),
 
 days as (
