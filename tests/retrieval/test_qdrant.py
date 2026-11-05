@@ -109,6 +109,9 @@ def test_collection_matches_the_design(
     assert sparse_index is not None
     assert sparse_index.on_disk is True
     assert info.config.hnsw_config.on_disk is True
+    # Segments of at most ~40,000 reviews (60,000 KB of 384-dim float32 vectors): a merge rebuilds
+    # one small segment, not a 140k one (5 Nov 2026: Qdrant at 89% of 1 GB during a merge).
+    assert info.config.optimizer_config.max_segment_size == 60_000
     schema = {field: index.data_type for field, index in info.payload_schema.items()}
     assert schema == PAYLOAD_INDEXES
 
@@ -131,6 +134,13 @@ def test_existing_collection_with_other_settings_is_refused(
     qdrant.update_collection(other, hnsw_config=models.HnswConfigDiff(on_disk=False))
     with pytest.raises(CollectionMismatchError, match="hnsw"):
         ensure_collection(qdrant, other, 384)
+    uncapped = new_collection()
+    ensure_collection(qdrant, uncapped, 384)
+    qdrant.update_collection(
+        uncapped, optimizers_config=models.OptimizersConfigDiff(max_segment_size=200_000)
+    )
+    with pytest.raises(CollectionMismatchError, match=r"max_segment_size 200000"):
+        ensure_collection(qdrant, uncapped, 384)
     info = qdrant.get_collection(name)
     assert isinstance(info.config.params.vectors, dict)
     assert info.config.params.vectors["dense"].size == 384  # never altered

@@ -22,6 +22,10 @@ BM25_AVG_LEN = 50.0
 TIMEOUT_S = 30
 # More days than a game can have in the index, so a facet is never cut short.
 FACET_LIMIT = 100_000
+# The largest segment Qdrant builds, in its KB (1 KB per 256 float32 dimensions): ~40,000 reviews
+# of 384 dimensions. A merge rebuilds one segment in memory, and merging into a 140k one took the
+# free cluster from 64% to 89% of its 1 GB (5 Nov 2026); set on the live collection that day.
+MAX_SEGMENT_KB = 60_000
 
 # Indexed payload fields (design D2); the text, version and fingerprint are stored, not indexed.
 PAYLOAD_INDEXES: dict[str, models.PayloadSchemaType] = {
@@ -93,6 +97,7 @@ class CollectionSpec:
     quantization: models.ScalarQuantization
     hnsw: models.HnswConfigDiff
     on_disk_payload: bool
+    optimizers: models.OptimizersConfigDiff
 
 
 def make_client(url: str, api_key: SecretStr | str | None, *, grpc: bool = False) -> QdrantClient:
@@ -107,7 +112,8 @@ def make_client(url: str, api_key: SecretStr | str | None, *, grpc: bool = False
 
 
 def collection_config(dense_dim: int) -> CollectionSpec:
-    """Full dense vectors on disk with an int8 copy in RAM, BM25 with IDF, payload on disk.
+    """Full dense vectors on disk with an int8 copy in RAM, BM25 with IDF, payload on disk, and
+    segments capped at MAX_SEGMENT_KB.
 
     The BM25 index and the HNSW graph are on disk too, read through the page cache: design D9's
     fallback for the free cluster's 1 GB, taken during the upload (plan Task 17) when Qdrant's
@@ -129,6 +135,7 @@ def collection_config(dense_dim: int) -> CollectionSpec:
         ),
         hnsw=models.HnswConfigDiff(m=16, ef_construct=100, on_disk=True),
         on_disk_payload=True,
+        optimizers=models.OptimizersConfigDiff(max_segment_size=MAX_SEGMENT_KB),
     )
 
 
@@ -144,6 +151,7 @@ def ensure_collection(client: QdrantClient, name: str, dense_dim: int) -> None:
             quantization_config=spec.quantization,
             hnsw_config=spec.hnsw,
             on_disk_payload=spec.on_disk_payload,
+            optimizers_config=spec.optimizers,
         )
         for field, schema in PAYLOAD_INDEXES.items():
             client.create_payload_index(name, field, schema, wait=True)
@@ -185,6 +193,11 @@ def _differences(info: models.CollectionInfo, spec: CollectionSpec) -> list[str]
         "hnsw",
         (hnsw.m, hnsw.ef_construct, bool(hnsw.on_disk)),
         (spec.hnsw.m, spec.hnsw.ef_construct, spec.hnsw.on_disk),
+    )
+    compare(
+        "max_segment_size",
+        info.config.optimizer_config.max_segment_size,
+        spec.optimizers.max_segment_size,
     )
     schema = {field: index.data_type for field, index in info.payload_schema.items()}
     for field, expected in PAYLOAD_INDEXES.items():
