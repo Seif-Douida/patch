@@ -1,0 +1,26 @@
+id: baldurs-gate-3-2025-04-patch-8-control
+game: "Baldur's Gate 3"
+appid: 1086940
+window:
+  start: 2025-04-15
+  end: 2025-04-21
+question: "Did anything change in Baldur's Gate 3's Steam reviews in mid-April 2025?"
+primary_cause: no_change
+secondary_causes: []
+direction: none
+key_facts:
+  - "Larian released Patch 8, its final major patch for Baldur's Gate 3, on 15 April 2025, with new subclasses, photo mode and cross-play."
+  - "No Steam seasonal sale touches the window: the Spring Sale ended on 20 March 2025 and the Summer Sale began on 26 June 2025."
+acceptable_evidence:
+  - "a positive share in line with the 4 weeks before"
+  - "a large patch in the window with no shift in how players rated the game"
+sources:
+  - url: https://steamcommunity.com/ogg/1086940/announcements/detail/538849539213231623
+    published: 2025-04-15
+    shows: "Larian: Patch 8 is live, the last game patch to add new content"
+  - url: https://web.archive.org/web/20250214021753/https://partner.steamgames.com/doc/marketing/upcoming_events
+    published: 2025-02-14
+    shows: "Valve sale calendar (archived) with the seasonal sale dates"
+confidence: high
+researched: 2026-11-04
+notes: "A control with a big patch in it: the right answer is no change in the positive share, though review volume rose (about 640 a day against 260 before). Our counts: 4,473 reviews at 97.0% in the window vs 7,295 at 96.5% in the 28 days before; no sale."

@@ -1,0 +1,34 @@
+id: helldivers-2-2025-11-stability-patch
+game: "Helldivers 2"
+appid: 553850
+window:
+  start: 2025-11-04
+  end: 2025-11-10
+question: "Why did Helldivers 2's Steam reviews improve in early November 2025?"
+primary_cause: patch
+secondary_causes: []
+direction: positive
+patch:
+  date: 2025-11-04
+  name: "Into the Unjust: 4.1.1"
+key_facts:
+  - "Patch 4.1.0 on 23 October 2025 fixed over 200 bugs; Arrowhead said it had overhauled how it patches to target players' pain points."
+  - "Patch 4.1.1 on 4 November 2025 fixed several crashes, reduced frame-rate stutters during the drop-in sequence and stopped unused textures loading into memory."
+  - "By early December 2025 Arrowhead's CEO said the Steam score was trending upwards after the Into the Unjust backlash, crediting no single patch; recent reviews were back to Very Positive."
+acceptable_evidence:
+  - "the 4.1.0 and 4.1.1 patch notes"
+  - "the positive share stepping up from the mid-60s to the high 70s around 4 November"
+  - "the stability patches following the Into the Unjust backlash"
+sources:
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/687488077158942134
+    published: 2025-11-04
+    shows: "Arrowhead's 4.1.1 notes: crash fixes, fewer drop-in stutters, texture memory fix"
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/538868565209514367
+    published: 2025-10-23
+    shows: "Arrowhead's 4.1.0 notes: over 200 bugs fixed and a new approach to patching"
+  - url: https://www.gamesradar.com/games/third-person-shooter/helldivers-2-boss-says-morale-at-arrowhead-is-much-better-now-following-into-the-unjust-blowback-as-steam-score-is-trending-upwards-and-development-is-progressing/
+    published: 2025-12-05
+    shows: "updates since Into the Unjust got things back on track; recent reviews back to Very Positive"
+confidence: medium
+researched: 2026-11-04
+notes: "No source ties the rise to 4.1.1 by name, and it began on 3 November, a day before the patch (151 reviews at 74%). 4.1.0 lifted the share for a day or two only. A developer blog followed on 6 November. Our counts: 1,449 reviews at 78.7% in the window vs 8,325 at 63.5% in the 28 days before; no sale."

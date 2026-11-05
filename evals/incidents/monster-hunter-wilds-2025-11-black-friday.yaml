@@ -1,0 +1,32 @@
+id: monster-hunter-wilds-2025-11-black-friday
+game: "Monster Hunter Wilds"
+appid: 2246340
+window:
+  start: 2025-11-24
+  end: 2025-12-01
+question: "Why did Monster Hunter Wilds' Steam reviews jump in late November 2025?"
+primary_cause: pricing_sale
+secondary_causes: []
+direction: positive
+key_facts:
+  - "Steam ran Black Friday offers and the Steam Awards nominations together from 24 November to 1 December 2025."
+  - "Valve's nominations badge rewarded reviewing, or updating a review of, a game you nominated."
+  - "Capcom's last update before the window, Ver.1.030.02.02, came out on 20 November 2025."
+acceptable_evidence:
+  - "the Black Friday 2025 dates in the sale calendar"
+  - "review volume about five times normal for exactly those days, mostly positive"
+  - "the same burst across other games in the same days"
+  - "no change in the four days between Ver.1.030.02.02 and the burst"
+sources:
+  - url: https://steamcommunity.com/ogg/593110/announcements/detail/585033008523772204
+    published: 2025-11-24
+    shows: "Valve: Steam Awards nominations open to 1 December, with a badge level for reviewing a nominated game"
+  - url: https://www.sportskeeda.com/esports/steam-autumn-sale-2025-changes-black-friday-award-nominations-other-adjustments
+    published: 2025-07-26
+    shows: "Valve's 2025 plan: Black Friday offers and Steam Awards nominations from 24 November to 1 December"
+  - url: https://steamcommunity.com/ogg/2246340/announcements/detail/630069004886606184
+    published: 2025-11-20
+    shows: "Capcom's Ver.1.030.02.02 update summary, four days before the window"
+confidence: medium
+researched: 2026-11-04
+notes: "The patch four days earlier is a decoy: the jump starts on 24 November. No source says whether Monster Hunter Wilds was discounted on Steam. The same days lifted almost every tracked game (No Man's Sky about 9 times its volume, Clair Obscur 13). The Black Friday 2025 row is in the sale seed, but on 4 November 2026 the incremental daily mart had not rebuilt those days, so the agent sees no sale here until it does. Our counts: 4,843 reviews at 77.0% in the window vs 3,106 at 46.7% in the 28 days before. Seif's ruling (2 Nov 2026): Steam-event review bursts count as pricing_sale."

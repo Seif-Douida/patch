@@ -1,0 +1,34 @@
+id: helldivers-2-2025-09-into-the-unjust
+game: "Helldivers 2"
+appid: 553850
+window:
+  start: 2025-09-02
+  end: 2025-09-08
+question: "Why did Helldivers 2's Steam reviews drop in early September 2025?"
+primary_cause: patch
+secondary_causes: []
+direction: negative
+patch:
+  date: 2025-09-02
+  name: "Into the Unjust - Out Now!"
+key_facts:
+  - "Arrowhead released the Into the Unjust update on 2 September 2025, adding Hive Worlds with cave systems, new missions and new Terminid enemies."
+  - "Players met the update with complaints about crashes, stuttering and poor optimisation, on Reddit, Discord and in Steam reviews."
+  - "Three months later Arrowhead's CEO said the Steam score was trending upwards after the backlash; recent reviews had dipped to Mixed before returning to Very Positive."
+acceptable_evidence:
+  - "the Into the Unjust release notes of 2 September 2025"
+  - "negative reviews about crashes and performance rising from the update day"
+  - "the positive share falling from the mid-80s to the mid-60s on more than twice the usual review volume"
+sources:
+  - url: https://steamcommunity.com/ogg/553850/announcements/detail/516345493302805200
+    published: 2025-09-02
+    shows: "Arrowhead's Into the Unjust release notes: Hive Worlds, cave missions, new enemies, balancing and fixes"
+  - url: https://www.gosugamers.net/entertainment/news/77210-helldivers-2-into-the-unjust-update-slammed-for-performance-problems
+    published: 2025-09-03
+    shows: "the update slammed for crashes, stuttering and poor optimisation"
+  - url: https://www.gamesradar.com/games/third-person-shooter/helldivers-2-boss-says-morale-at-arrowhead-is-much-better-now-following-into-the-unjust-blowback-as-steam-score-is-trending-upwards-and-development-is-progressing/
+    published: 2025-12-05
+    shows: "Arrowhead's CEO on the Into the Unjust blowback; recent reviews had dipped to Mixed"
+confidence: high
+researched: 2026-11-04
+notes: "Our rules classify the release post as other (its title has no patch keyword), so the update has no estimate; the nearest listed posts are Patch 01.003.303 (29 August) and Hotfix 01.004.001 (4 September). The paid Dust Devils Warbond followed on 4 September. The post enters our list with the patch-history fix (first run 5 November 2026). Our counts: 7,664 reviews at 66.6% in the window vs 8,762 at 83.7% in the 28 days before; no sale."
