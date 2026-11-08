@@ -158,6 +158,10 @@ class ModelRouter:
         self._failures: dict[str, int] = {}
         self._resting_until: dict[str, datetime] = {}  # a breaker or a daily quota
         self._quota_until: dict[str, datetime] = {}  # a daily quota only
+        # How many calls found no model answering (down, timing out, resting or retired): the
+        # past-patch command tells Gemini's outages ("high demand") by its rise from a report the
+        # models answered but couldn't do, which it skips.
+        self.outages = 0
 
     def generate(
         self,
@@ -172,6 +176,7 @@ class ModelRouter:
         if self.cache.mode == "replay":
             return self._replay(step, key, schema)
         reasons: dict[str, str] = {}
+        answered = False  # a model answered (unusably) or refused the request: not an outage
         for model in self.chain:
             now = self.clock()
             resting = self._resting_until.get(model)
@@ -194,6 +199,7 @@ class ModelRouter:
                 log.warning("%s: %s's daily quota is used up; resting it", step, model)
                 continue
             except (TeacherUnavailableError, TeacherRequestError, BadAnswerError) as error:
+                answered = answered or not isinstance(error, TeacherUnavailableError)
                 reasons[model] = str(error)
                 self._fail(model, now)
                 log.warning("%s: %s failed (%s); trying the next model", step, model, error)
@@ -212,6 +218,8 @@ class ModelRouter:
             )
             return Routed(model, data, response.input_tokens, response.output_tokens, cached=False)
         summary = "; ".join(f"{m}: {r}" for m, r in reasons.items())
+        if not answered:
+            self.outages += 1
         raise AllModelsDownError(f"{step}: every model failed ({summary})")
 
     def quota_spent(self) -> bool:
@@ -219,6 +227,20 @@ class ModelRouter:
         midnight); a breaker's rest of a few minutes doesn't count."""
         now = self.clock()
         return all(now < self._quota_until.get(model, now) for model in self.chain)
+
+    def next_ready(self) -> datetime | None:
+        """When a model can next be tried: now if one isn't resting, else the end of the
+        shortest breaker rest; None when every model is retired for the day."""
+        now = self.clock()
+        ends: list[datetime] = []
+        for model in self.chain:
+            if now < self._quota_until.get(model, now):
+                continue
+            resting = self._resting_until.get(model)
+            if resting is None or resting <= now:
+                return now
+            ends.append(resting)
+        return min(ends) if ends else None
 
     def _fail(self, model: str, now: datetime) -> None:
         self._failures[model] = self._failures.get(model, 0) + 1

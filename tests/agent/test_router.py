@@ -302,6 +302,68 @@ def test_all_models_down_raises(tmp_path: Path) -> None:
     assert "review" not in message  # no prompt text in errors or logs
 
 
+def test_outages_count_every_all_models_down(tmp_path: Path) -> None:
+    # The past-patch command tells Gemini's outages ("high demand") from a broken report this way.
+    first = FakeClient(down(), down(), answer(YES))
+    second = FakeClient(down(), down())
+    models = router(tmp_path, {FIRST: first, SECOND: second})
+
+    for _ in range(2):
+        with pytest.raises(AllModelsDownError):
+            models.generate("draft", "s", "u", SCHEMA)
+
+    assert models.outages == 2
+    assert models.generate("draft", "s", "u", SCHEMA).model_id == FIRST
+    assert models.outages == 2  # a success doesn't reset the count
+
+
+def test_unusable_answers_are_not_an_outage(tmp_path: Path) -> None:
+    # Both models answering with something the step can't use is the report's problem, not an
+    # outage: the past-patch command skips that report instead of waiting an hour on it.
+    garbled = {
+        FIRST: FakeClient(answer("not json"), TeacherRequestError(400, "bad")),
+        SECOND: FakeClient(answer('{"verdict": "maybe"}'), down()),
+    }
+    models = router(tmp_path, garbled)
+
+    for _ in range(2):
+        with pytest.raises(AllModelsDownError):
+            models.generate("draft", "s", "u", SCHEMA)
+
+    assert models.outages == 0
+
+
+def test_next_ready_is_the_end_of_the_shortest_rest(tmp_path: Path) -> None:
+    clock = FakeClock(START)
+    first = FakeClient(*[down()] * 3)
+    second = FakeClient(*[answer(NO)] * 3, *[down()] * 3)
+    models = router(tmp_path, {FIRST: first, SECOND: second}, clock=clock)
+    assert models.next_ready() == START  # nothing resting
+
+    for _ in range(3):  # the first model fails three times in a row: it rests 10 minutes
+        models.generate("draft", "s", "u", SCHEMA)
+    assert models.next_ready() == START  # the second one isn't resting
+    clock.now = START + timedelta(minutes=4)
+    for _ in range(3):  # now the second one too, until 14 minutes after START
+        with pytest.raises(AllModelsDownError):
+            models.generate("draft", "s", "u", SCHEMA)
+
+    assert models.next_ready() == START + timedelta(minutes=10)
+
+
+def test_next_ready_is_none_when_every_model_is_spent_for_the_day(tmp_path: Path) -> None:
+    spent = {
+        FIRST: FakeClient(QuotaExhaustedError("daily quota")),
+        SECOND: FakeClient(QuotaExhaustedError("daily quota")),
+    }
+    models = router(tmp_path, spent)
+
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+
+    assert models.next_ready() is None
+
+
 def test_replay_answers_from_the_cache_without_a_client(tmp_path: Path) -> None:
     recorder = router(
         tmp_path, {FIRST: FakeClient(answer(YES)), SECOND: FakeClient()}, mode="record"

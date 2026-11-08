@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, insert, inspect, text
 
 from patchpulse.db import tables
 from patchpulse.ingest.coverage import Coverage
@@ -21,6 +21,7 @@ from patchpulse.ingest.load import (
     record_dq,
     record_page,
     store_day_counts,
+    stored_news_without,
     upsert_classifications,
     upsert_games,
     upsert_news,
@@ -29,7 +30,12 @@ from patchpulse.ingest.load import (
     write_coverage,
 )
 from patchpulse.ingest.models import NewsItem, PriceSnapshot, RawPage, ReviewRecord
-from patchpulse.ingest.patches import OFFICIAL_FEED, Classification, PatchType
+from patchpulse.ingest.patches import (
+    CLASSIFIER_VERSION,
+    OFFICIAL_FEED,
+    Classification,
+    PatchType,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -234,8 +240,8 @@ def test_upsert_classifications_keeps_one_row_per_item_and_version(
         "FROM raw.news_classification ORDER BY gid",
     )
     assert [tuple(r) for r in stored] == [
-        ("10", "rules-v1", "patch", True, False, 2),
-        ("11", "rules-v1", "other", False, True, 1),
+        ("10", CLASSIFIER_VERSION, "patch", True, False, 2),
+        ("11", CLASSIFIER_VERSION, "other", False, True, 1),
     ]
 
 
@@ -327,3 +333,40 @@ def test_oldest_official_post_ignores_press(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
         assert oldest_official_post(connection, 553850) == datetime(2025, 3, 1, 12, tzinfo=UTC)
         assert oldest_official_post(connection, 949230) is None
+
+
+def classified(gid: str, version: str) -> dict[str, Any]:
+    return {
+        "gid": gid,
+        "classifier_version": version,
+        "patch_type": "patch",
+        "is_treatment_candidate": True,
+        "rule": "patch_signal",
+        "ambiguous": False,
+        "run_id": 1,
+    }
+
+
+def test_stored_news_without_a_version_lists_only_unclassified(migrated_engine: Engine) -> None:
+    # A classifier version bump reclassifies every stored post once (rules-v2, 8 Nov 2026).
+    notes = post("1", 553850, datetime(2025, 5, 1, 12, tzinfo=UTC)).model_copy(
+        update={"title": "Patch 1.2.3", "tags": ["patchnotes"]}
+    )
+    press = post("2", 553850, datetime(2025, 3, 1, 12, tzinfo=UTC), "PC Gamer")
+    done = post("3", 949230, datetime(2025, 4, 1, 12, tzinfo=UTC))
+    with migrated_engine.begin() as connection:
+        upsert_news(connection, [notes, press, done], run_id=1)
+        connection.execute(
+            insert(tables.news_classification),
+            [classified(gid, "rules-v1") for gid in ("1", "2", "3")]
+            + [classified("3", "rules-v2")],
+        )
+
+    with migrated_engine.connect() as connection:
+        found = stored_news_without(connection, "rules-v2")
+
+    assert [(i.gid, i.title, i.tags, i.feedname, i.published_at) for i in found] == [
+        ("2", "Post 2", [], "PC Gamer", datetime(2025, 3, 1, 12, tzinfo=UTC)),
+        ("1", "Patch 1.2.3", ["patchnotes"], OFFICIAL_FEED, datetime(2025, 5, 1, 12, tzinfo=UTC)),
+    ]
+    assert all(i.contents == "" and i.appid == 553850 for i in found)

@@ -1,14 +1,15 @@
 """`patchpulse-agent`: the agent's commands on Seif's machine (Phase 5).
 
-    backfill-reports   Write a report for every past patch bundle that has none (design D10).
+    backfill-reports   Write every due report: missing, basic or out of date (design D10).
     acceptance         The acceptance run on the published bundle (plan Task 21, design D15).
 
 `backfill-reports` signs in to Azure SQL as the person at the keyboard (as `patchpulse-ml pull`
-does), builds the agent's bundle from the marts, and writes the missing reports newest first
-through the same graph and store as the nightly job, as one run in ops.pipeline_run. It never
-stores a basic report: when the day's Gemini quota is used up, or no model answers, it stops and a
-later run picks up where it left off (stored reports are skipped). The database stays awake while
-it runs, so it needs --yes.
+does), builds the agent's bundle from the marts, and writes the due reports newest first through
+the same graph, store and rule as the nightly job (no report, a basic one, or one whose inputs
+changed), as one run in ops.pipeline_run. It never stores a basic report. When every model fails
+(Gemini's "high demand") it waits for the next model to be ready and tries the same report again,
+giving up after an hour of outage; when the day's quota is used up it stops. A later run picks up
+where it left off (current reports are skipped). It wakes the database, so it needs --yes.
 
 `acceptance` never touches the database: it reads the bundle the night published to
 `agent-data` (or --bundle, a local file), asks 10 bundles a templated question each with every
@@ -28,7 +29,7 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -41,7 +42,7 @@ from patchpulse.agent.graph import AgentDeps, ReportRequest, run_report
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
 from patchpulse.agent.patch_notes import agent_steam
 from patchpulse.agent.report import Report
-from patchpulse.agent.router import ModelRouter, make_agent_clients
+from patchpulse.agent.router import ModelRouter, make_agent_clients, next_pacific_midnight
 from patchpulse.agent.search import ReviewSearch, open_pinned_search
 from patchpulse.agent.store import (
     latest_reports,
@@ -65,15 +66,19 @@ log = logging.getLogger("patchpulse.agent")
 
 RUN_KIND = "reports_backfill"
 QUOTA_SPENT = "the day's model quota is used up"
-NO_MODEL = "no model answered"
+OUTAGE = "Gemini didn't answer for an hour"
+# Gemini's "high demand" outages (3 Nov 2026: minutes to hours): the shortest wait before trying
+# the same report again, and how long an outage may last before the run gives up.
+OUTAGE_PAUSE_S = 60
+OUTAGE_LIMIT = timedelta(hours=1)
 PROGRESS_EVERY = 10
 ACCEPTANCE_DIR = Path("data/local/acceptance")
 ENCODER_DIR = Path("build/encoder")  # `patchpulse-ml retrieval encoder download --to build/encoder`
 BACKFILL_COST = (
-    "`backfill-reports` wakes Azure SQL and keeps it awake while it runs (about an hour for every "
-    "past patch, then the 60-minute pause delay): about 4,000-6,000 of the month's 100,000 free "
-    "vCore-s. Each report also takes about 3 Gemini free-tier requests (a day's 1,000 cover about "
-    "300). Run it again with --yes to go ahead."
+    "`backfill-reports` wakes Azure SQL and keeps it awake while it writes (about an hour for 300 "
+    "reports, then the pause delay): about 4,000-6,000 of the month's 100,000 free vCore-s. Each "
+    "report also takes about 3 Gemini free-tier requests (a day's 1,000 cover about 300). Run it "
+    "again with --yes to go ahead."
 )
 
 
@@ -83,7 +88,7 @@ class BundleBuilder(Protocol):
 
 @dataclass(frozen=True)
 class BackfillOutcome:
-    missing: int  # complete bundle horizons without a report when the run started
+    due: int  # complete bundle horizons with no report, a basic one or changed inputs
     written: int
     skipped: int  # reports that failed or came out basic with models answering; tried next run
     stopped: str | None  # why the run ended early, if it did
@@ -97,38 +102,60 @@ def backfill_reports(
     build: BundleBuilder = build_bundle,
     out: Callable[[str], None] = print,
     every: int = PROGRESS_EVERY,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> BackfillOutcome:
-    """Write the missing reports, newest first, as one run; `deps_for` gives the agent its models,
-    search and Steam for the bundle."""
+    """Write the due reports (the nightly's rule), newest first, as one run; `deps_for` gives the
+    agent its models, search and Steam for the bundle. A report that came out basic because every
+    model failed is tried again once a model is ready, for up to OUTAGE_LIMIT of outage."""
     with engine.begin() as connection:
         run_id = start_run(connection, kind=RUN_KIND, image_version=None)
     with engine.connect() as connection:
         bundle = build(connection, run_id=run_id, today=today)
         stored = latest_reports(connection)
-    missing = [key for key in reports_due(bundle, {}) if key not in stored]
-    deps = deps_for(bundle) if missing else None
+    due = reports_due(bundle, stored)
+    deps = deps_for(bundle) if due else None
     written = skipped = 0
     stopped: str | None = None
-    for done, (bundle_id, horizon) in enumerate(missing, start=1):
+    outage_since: datetime | None = None
+    for done, (bundle_id, horizon) in enumerate(due, start=1):
         if deps is None:
             break
-        try:
-            result = run_report(ReportRequest.for_bundle(bundle_id, horizon), deps)
-        except Exception as error:
-            # The type only: a message can carry the cluster's URL, a secret.
-            log.warning("%s-%dd failed: %s", bundle_id, horizon, type(error).__name__)
-            skipped += 1
-            result = None
-        if isinstance(result, Report) and result.basic:
-            if deps.router.quota_spent():
-                stopped = QUOTA_SPENT
+        router = deps.router
+        while True:
+            outages = router.outages
+            try:
+                result = run_report(ReportRequest.for_bundle(bundle_id, horizon), deps)
+            except Exception as error:
+                # The type only: a message can carry the cluster's URL, a secret.
+                log.warning("%s-%dd failed: %s", bundle_id, horizon, type(error).__name__)
+                skipped += 1
+                result = None
+            basic = isinstance(result, Report) and result.basic
+            if not basic or router.quota_spent() or router.outages == outages:
                 break
-            if not result.model_ids:
-                stopped = NO_MODEL
+            # Every model failed or rested: Gemini's outage, not this report.
+            now = router.clock()
+            outage_since = outage_since or now
+            if now - outage_since >= OUTAGE_LIMIT:
+                stopped = OUTAGE
+                break
+            ready = router.next_ready()
+            wait = float(OUTAGE_PAUSE_S)
+            if ready is not None:
+                wait = max(wait, (ready - now).total_seconds())
+            log.warning("%s-%dd: every model failed; waiting %.0f s before trying it again",
+                        bundle_id, horizon, wait)  # fmt: skip
+            sleep(wait)
+        if stopped is not None:
+            break
+        if isinstance(result, Report) and result.basic:
+            if router.quota_spent():
+                stopped = QUOTA_SPENT
                 break
             log.warning("%s: a basic report (the draft didn't hold); skipped", result.report_id)
             skipped += 1
         elif isinstance(result, Report):
+            outage_since = None
             fingerprint = report_fingerprint(report_inputs(bundle, bundle_id, horizon))
             with engine.begin() as connection:
                 written += int(
@@ -137,19 +164,28 @@ def backfill_reports(
         elif result is not None:
             log.warning("%s-%dd: refused (%s); skipped", bundle_id, horizon, result.reason)
             skipped += 1
-        if done % every == 0 and done < len(missing):
-            out(f"{done} of {len(missing)} reports done")
-        if deps.router.quota_spent():
+        if done % every == 0 and done < len(due):
+            out(f"{done} of {len(due)} reports done")
+        if router.quota_spent():
             stopped = QUOTA_SPENT
             break
-    outcome = BackfillOutcome(len(missing), written, skipped, stopped)
+    outcome = BackfillOutcome(len(due), written, skipped, stopped)
     with engine.begin() as connection:
         finish_run(connection, run_id, status="succeeded", stages=asdict(outcome), error=None)
-    summary = f"{written} of {len(missing)} missing reports written"
+    summary = f"{written} of {len(due)} due reports written"
     if stopped is None:
         out(f"{summary}." + (f" {skipped} skipped: run the command again." if skipped else ""))
+    elif stopped == QUOTA_SPENT and deps is not None:
+        reset = next_pacific_midnight(deps.router.clock()).astimezone(UTC)
+        out(
+            f"Stopped: {stopped}. {summary}; run the command again after midnight Pacific "
+            f"({reset:%H:%M} UTC) for the rest."
+        )
     else:
-        out(f"Stopped: {stopped}. {summary}; run the command again tomorrow for the rest.")
+        out(
+            f"Stopped: {stopped} (high demand). {summary}; run the command again later for the "
+            "rest."
+        )
     return outcome
 
 
@@ -280,7 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     backfill = commands.add_parser(
         "backfill-reports",
-        help="write a report for every past patch bundle without one (wakes the database)",
+        help="write every due report: missing, basic or out of date (wakes the database)",
     )
     backfill.add_argument("--yes", action="store_true", help="go ahead and wake the database")
     backfill.add_argument(

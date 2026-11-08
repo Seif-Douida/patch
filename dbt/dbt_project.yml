@@ -13,7 +13,7 @@ clean-targets: ["target"]
 
 vars:
   # The patch classifier version whose labels feed core.fact_patch.
-  classifier_version: rules-v1
+  classifier_version: rules-v2
   # Aspect taxonomy v1 in its fixed order (patchpulse.labeling.taxonomy.ASPECTS, seeds/aspects.csv):
   # the p_<code> and l_<code> columns of raw.review_aspect_score.
   aspects:
