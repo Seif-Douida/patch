@@ -77,6 +77,7 @@ from patchpulse.ingest.load import (
     record_dq,
     record_page,
     store_day_counts,
+    stored_news_without,
     upsert_classifications,
     upsert_games,
     upsert_news,
@@ -85,7 +86,7 @@ from patchpulse.ingest.load import (
     write_coverage,
 )
 from patchpulse.ingest.news import NewsFetch, fetch_news, fetch_news_history
-from patchpulse.ingest.patches import classify
+from patchpulse.ingest.patches import CLASSIFIER_VERSION, classify
 from patchpulse.ingest.prices import PriceFetch, fetch_prices
 from patchpulse.ingest.reviews import ReviewPage, StopReason, fetch_review_pages
 from patchpulse.pipeline.dbt import DbtResult, run_dbt
@@ -115,6 +116,8 @@ COUNT_DAYS_A_NIGHT = 4
 # export and publish 62 s, the index's last batch and reconciliation up to ~110 s; doubled. Phase 5
 # adds the bundle and its publish, and the last report the reports stage started (a stage that
 # straddles the night's end is the only one that overruns it).
+# Stored posts relabelled per statement batch after a classifier version bump.
+RECLASSIFY_CHUNK = 1_000
 NIGHT_SECONDS = 2_700
 NIGHT_RESERVE_S = 600
 # dbt meeting a transient Azure SQL error (one a failover or a resume can give) runs once more
@@ -432,6 +435,7 @@ def _run_stages(
 
     with run.stage("news"):
         news = {"items": 0, "new": 0, "history_pages": 0, "history_failed": 0}
+        news["reclassified"] = _reclassify(run)
         for game in games:
             if game.appid in run.errors:
                 continue
@@ -856,6 +860,22 @@ def _resolve(publisher: Publisher, *, title: str, comment: str) -> None:
         publisher.resolve(title=title, comment=comment)
     except Exception as failure:
         log.error("could not resolve the alert %r: %s", title, failure)
+
+
+def _reclassify(run: _Run) -> int:
+    """Label every stored post the current classifier hasn't: a version bump relabels the whole
+    history once (rules-v2, 8 Nov 2026). The database alone, before Steam is asked anything, so
+    a night whose news fails still has every post labelled for core.fact_patch."""
+    with run.engine.begin() as connection:
+        items = stored_news_without(connection, CLASSIFIER_VERSION)
+        for start in range(0, len(items), RECLASSIFY_CHUNK):
+            chunk = items[start : start + RECLASSIFY_CHUNK]
+            upsert_classifications(
+                connection, {i.gid: classify(i) for i in chunk}, run_id=run.run_id
+            )
+    if items:
+        log.info("reclassified %d stored news items with %s", len(items), CLASSIFIER_VERSION)
+    return len(items)
 
 
 def _store_news(run: _Run, fetched: NewsFetch, counts: dict[str, int]) -> None:

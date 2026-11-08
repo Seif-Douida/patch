@@ -33,6 +33,7 @@ from patchpulse.db.engine import make_engine
 from patchpulse.db.migrate import upgrade_to_head
 from patchpulse.export.site import AspectModel
 from patchpulse.ingest.coverage import REREAD, start_of_day
+from patchpulse.ingest.patches import CLASSIFIER_VERSION
 from patchpulse.models.artifact import record_metrics
 from patchpulse.models.s0 import save_s0, train_s0
 from patchpulse.pipeline import runner
@@ -1341,6 +1342,45 @@ def news_stage(env: Env) -> dict[str, int]:
     *_, last = env.rows("SELECT stages FROM ops.pipeline_run ORDER BY run_id")
     stage: dict[str, int] = json.loads(last.stages)["news"]
     return stage
+
+
+def test_stored_posts_are_reclassified_when_steam_is_down(env: Env) -> None:
+    # A classifier version bump (rules-v2, 8 Nov 2026) relabels every stored post once, at the
+    # stage's start and from the database alone: core.fact_patch inner-joins the current
+    # version's labels, so a post left without one would drop out of the patch list.
+    stress = "Community Update #31 - Patch 8 Stress Test - Register Now!"
+    env.steam.add_news(GAME_A, "931", stress, NOW - timedelta(days=3), tags=())
+    env.run(export=stub_export)
+    with env.engine.begin() as connection:  # as rules-v1 left them: the stress test a patch
+        connection.execute(text("DELETE FROM raw.news_classification"))
+        connection.execute(
+            text(
+                "INSERT INTO raw.news_classification (gid, classifier_version, patch_type, "
+                "is_treatment_candidate, [rule], ambiguous, run_id) "
+                "SELECT gid, 'rules-v1', 'patch', 1, 'patch_signal', 0, 1 FROM raw.steam_news"
+            )
+        )
+    env.steam.news_failing.add(GAME_A)
+
+    with pytest.raises(PipelineError, match=str(GAME_A)):
+        env.run(export=stub_export)
+
+    stored = env.rows("SELECT COUNT(*) FROM raw.steam_news")[0][0]
+    current = env.rows(
+        f"SELECT COUNT(*) FROM raw.news_classification WHERE classifier_version = "
+        f"'{CLASSIFIER_VERSION}'"
+    )[0][0]
+    assert (stored, current) == (2, 2)
+    assert news_stage(env)["reclassified"] == 2
+    candidates = {r.gid: r.is_treatment_candidate for r in env.rows(
+        "SELECT gid, is_treatment_candidate FROM core.fact_patch"
+    )}  # fmt: skip
+    assert candidates == {"900": True, "931": False}
+
+    env.steam.news_failing.clear()
+    env.run(dbt=ok_dbt, export=stub_export)
+
+    assert news_stage(env)["reclassified"] == 0
 
 
 def test_news_history_pages_back_to_the_backfill_start(env: Env) -> None:

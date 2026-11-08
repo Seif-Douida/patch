@@ -41,6 +41,8 @@ class FakeSteam:
         # status (503 down, 429 rate-limited), or `enddate` is ignored (the newest page every time).
         self.news_history_status: int | None = None
         self.ignore_enddate = False
+        # Games whose every news request answers 503 (rules-v2, 8 Nov 2026).
+        self.news_failing: set[int] = set()
 
     def add_review(self, appid: int, rid: int, created: datetime, *, voted_up: bool = True) -> None:
         stamp = int(created.timestamp())
@@ -129,6 +131,8 @@ class FakeSteam:
     def _news(self, params: dict[str, str]) -> httpx2.Response:
         """Like GetNewsForApp: newest first, `count` at most, `feeds` and `enddate` (inclusive)
         honoured when sent."""
+        if int(params["appid"]) in self.news_failing:
+            return httpx2.Response(503)
         if "enddate" in params and self.news_history_status is not None:
             return httpx2.Response(self.news_history_status)
         items = self.news.get(int(params["appid"]), [])

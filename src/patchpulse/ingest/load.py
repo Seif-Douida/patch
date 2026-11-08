@@ -149,6 +149,41 @@ def oldest_official_post(connection: Connection, appid: int) -> datetime | None:
     return None if oldest is None else oldest.replace(tzinfo=UTC)
 
 
+def stored_news_without(connection: Connection, version: str) -> list[NewsItem]:
+    """Every stored news item the classifier `version` hasn't labelled, oldest first. The
+    classifier reads titles, tags and feeds only, so bodies aren't read (`contents` is empty)."""
+    news, labels = tables.steam_news, tables.news_classification
+    labelled = select(labels.c.gid).where(labels.c.classifier_version == version)
+    rows = connection.execute(
+        select(
+            news.c.gid,
+            news.c.appid,
+            news.c.title,
+            news.c.url,
+            news.c.published_at,
+            news.c.feedname,
+            news.c.feedlabel,
+            news.c.tags,
+        )
+        .where(news.c.gid.not_in(labelled))
+        .order_by(news.c.published_at, news.c.gid)
+    )
+    return [
+        NewsItem(
+            gid=row.gid,
+            appid=row.appid,
+            title=row.title,
+            url=row.url,
+            contents="",
+            published_at=aware_utc(row.published_at),
+            feedname=row.feedname,
+            feedlabel=row.feedlabel,
+            tags=json.loads(row.tags),
+        )
+        for row in rows
+    ]
+
+
 def upsert_classifications(
     connection: Connection, classified: Mapping[str, Classification], *, run_id: int
 ) -> None:
