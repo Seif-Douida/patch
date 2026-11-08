@@ -18,6 +18,7 @@ import mlflow
 
 from patchpulse.agent.report import Report
 from patchpulse.evals.incidents import Incident
+from patchpulse.evals.judge import citation_share, claim_support, judge_metrics
 from patchpulse.evals.metrics import (
     Estimate,
     a1,
@@ -48,6 +49,8 @@ HEADLINE = (
     ("decided_share", "Explanations decided (not inconclusive)"),
     ("pre_verifier_pass_rate", "Drafted claims the verifier passed"),
     ("reworded", "Shipped claims reworded by V4"),
+    ("citation_support", "Cited reviews supporting their claim (judge)"),
+    ("figure_faithfulness", "Cited figures described correctly (judge)"),
     ("tool_error_rate", "Model tool calls with an error"),
     ("tool_repeat_rate", "Model tool calls repeating an earlier one"),
     ("patch_blame_before", "Non-patch incidents whose draft blames a patch"),
@@ -59,6 +62,9 @@ HEADLINE = (
     ("seconds_p95", "Seconds per run (p95)"),
 )
 COUNTS = ("root_cause_correct", "cause_alarms", "refusals")
+SHARE_KEYS = frozenset(
+    {"reworded", "pre_verifier_pass_rate", "citation_support", "figure_faithfulness"}
+)
 
 
 @dataclass(frozen=True)
@@ -93,7 +99,7 @@ class EvalResults:
     ablations: Mapping[str, Mapping[str, Estimate]]  # arm -> metric -> arm minus main
     a1: Mapping[str, Estimate] | None = None
     injection: Mapping[str, Estimate] | None = None
-    judge: Mapping[str, Estimate] | None = None
+    judge: Mapping[str, Estimate] | None = None  # the judge's agreement with Seif
     ci_suites: Mapping[str, float] | None = None
 
 
@@ -135,12 +141,14 @@ def build_results(
     arms: Mapping[str, Mapping[str, StoredCase]],
     info: RunInfo,
     *,
-    support: Mapping[str, Mapping[str, bool | None]] | None = None,
+    verdicts: Mapping[str, bool] | None = None,
     injection: Mapping[str, Estimate] | None = None,
     judge: Mapping[str, Estimate] | None = None,
     ci_suites: Mapping[str, float] | None = None,
 ) -> EvalResults:
-    """Everything the report shows, from the stored runs; the main arm must be there."""
+    """Everything the report shows, from the stored runs; the main arm must be there.
+    `verdicts` are the judge's, by item id: they add citation support and figure
+    faithfulness to each arm, A1, and the ablations' citation-support difference."""
     if "main" not in arms:
         raise ValueError("no stored main run: run `patchpulse-evals run --arm main` first")
     main = arms["main"]
@@ -169,19 +177,35 @@ def build_results(
     def runs(stored: Mapping[str, StoredCase]) -> dict[str, Run]:
         return {key: (by_id[key], case) for key, case in stored.items() if key in by_id}
 
+    metric_fns = dict(ABLATION_METRICS)
+    if verdicts is not None:
+        judged = verdicts
+        metric_fns["citation_support"] = lambda run: citation_share(run[1], judged)
     ablations = {
         name: {
             metric: paired_difference(runs(main), runs(stored), fn)
-            for metric, fn in ABLATION_METRICS.items()
+            for metric, fn in metric_fns.items()
         }
         for name, stored in sorted(arms.items())
         if name not in ("main", "injection")
     }
+
+    def arm_metrics(stored: Mapping[str, StoredCase]) -> dict[str, Estimate]:
+        metrics = golden_metrics(incidents, stored)
+        if verdicts is not None:
+            metrics |= judge_metrics({k: v for k, v in stored.items() if k in by_id}, verdicts)
+        return metrics
+
+    support = (
+        None
+        if verdicts is None
+        else {case_id: claim_support(case, verdicts) for case_id, case in main.items()}
+    )
     return EvalResults(
         info=info,
         cases=tuple(rows),
         arms={
-            name: golden_metrics(incidents, stored)
+            name: arm_metrics(stored)
             for name, stored in sorted(arms.items())
             if name != "injection"
         },
@@ -200,7 +224,7 @@ def _is_share(key: str) -> bool:
     return (
         key.endswith(("_rate", "_accuracy", "_share"))
         or key.startswith(("withheld.", "patch_blame", "unsupported_"))
-        or key in ("reworded", "pre_verifier_pass_rate")
+        or key in SHARE_KEYS
     )
 
 

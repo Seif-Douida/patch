@@ -41,7 +41,7 @@ INFO = RunInfo(
 
 def texty_case(case: str, arm: str = "main") -> StoredCase:
     """A run whose every free text carries the sentinel."""
-    shipped = (claim("c1", f"{SENTINEL} claim"),)
+    shipped = (claim("c1", f"{SENTINEL} claim").model_copy(update={"review_ids": [101]}),)
     withheld = (WithheldClaim(claim=claim("c2", f"{SENTINEL} withheld"), rule="V7"),)
     result = make_report(hypotheses(("H1",)), claims=shipped, withheld=withheld)
     result = result.model_copy(update={"summary": f"{SENTINEL} summary"})
@@ -59,7 +59,7 @@ def results() -> object:
         "main": {"p0": texty_case("p0"), "p1": texty_case("p1")},
         "a2": {"p0": texty_case("p0", "a2"), "p1": texty_case("p1", "a2")},
     }
-    return build_results(incidents, arms, INFO, support={"p0": {"c1": False}})
+    return build_results(incidents, arms, INFO, verdicts={"main/p0/c1/r101": False})
 
 
 def test_reports_carry_no_text() -> None:
@@ -82,6 +82,9 @@ def test_the_report_states_the_interval_caveat_and_scoring_version() -> None:
     assert "5 of 5 by construction" in markdown
     assert "No indexed reviews in the scoped window: p0, p1" in markdown
     assert "reports/causal/benchmark.md" in markdown
+    assert "| Cited reviews supporting their claim (judge) | 0.0% |" in markdown
+    assert "| Verifier on | 100.0% |" in markdown
+    assert "| a2 | citation_support | - |" in markdown
 
 
 def test_log_eval_run_logs_metrics_and_the_report(

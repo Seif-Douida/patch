@@ -92,6 +92,39 @@ def test_the_main_arm_needs_frozen_files(
     assert "freeze" in capsys.readouterr().err
 
 
+def test_the_injection_arm_needs_the_main_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    frozen_files(tmp_path)
+    freeze()
+
+    code = main(["run", "--arm", "injection"])
+
+    assert code == 2
+    assert "run --arm main" in capsys.readouterr().err
+
+
+def test_the_judge_needs_stored_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    frozen_files(tmp_path)
+    freeze()
+
+    code = main(["judge", "--arms", "main,a2"])
+
+    assert code == 2
+    assert "run --arm" in capsys.readouterr().err
+
+
+def test_the_judge_refuses_an_unknown_arm(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["judge", "--arms", "main,a9"])
+
+    assert code == 2
+    assert "a9" in capsys.readouterr().err
+
+
 def test_the_report_needs_a_stored_main_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

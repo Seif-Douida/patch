@@ -62,7 +62,8 @@ class ModelConfig(BaseModel):
 
 
 class AgentModels(BaseModel):
-    """The Phase 5 agent's model chain (design D8): tried in order, each a Gemini candidate."""
+    """A model chain, tried in order: the Phase 5 agent's (design D8, Gemini candidates only) or
+    the Phase 6 judge's (design D5)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -76,6 +77,8 @@ class TeacherModels(BaseModel):
     # The bake-off winner (plan Task 9); None until then.
     teacher: str | None = None
     agent: AgentModels | None = None
+    # Phase 6's judge (design D5): never one of the agent's models (spec §10.7).
+    judge: AgentModels | None = None
 
     @model_validator(mode="after")
     def _teacher_is_a_candidate(self) -> TeacherModels:
@@ -90,6 +93,22 @@ class TeacherModels(BaseModel):
                 raise ValueError(f"agent model {name!r} is not a candidate")
             if self.candidates[name].provider != "gemini":
                 raise ValueError(f"agent model {name!r} must be a Gemini model (free tier)")
+        return self
+
+    @model_validator(mode="after")
+    def _judge_differs_from_the_agent(self) -> TeacherModels:
+        """The judge is another model: no judge model may have the id of one of the agent's,
+        whatever its name or provider (spec §10.7)."""
+        chain = self.agent.chain if self.agent else []
+        agent_ids = {self.candidates[name].id for name in chain if name in self.candidates}
+        for name in self.judge.chain if self.judge else []:
+            if name not in self.candidates:
+                raise ValueError(f"judge model {name!r} is not a candidate")
+            if self.candidates[name].id in agent_ids:
+                raise ValueError(
+                    f"judge model {name!r} is one of the agent's models "
+                    f"({self.candidates[name].id}); the judge must be a different model"
+                )
         return self
 
 
