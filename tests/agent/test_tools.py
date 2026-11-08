@@ -5,12 +5,24 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
-from agent_fixtures import GAME, NO_SYNTH_14, OTHER_GAME, PATCH_DAY, game_data, make_bundle
+from agent_fixtures import (
+    DATA_VERSION,
+    GAME,
+    NO_SYNTH_14,
+    OTHER_GAME,
+    PATCH_DAY,
+    game_data,
+    make_bundle,
+)
 from statsmodels.stats.proportion import confint_proportions_2indep, proportion_confint
 
 from patchpulse.agent.bundle import AspectRow, BucketRow, DayRow, GameData
+from patchpulse.agent.llm_cache import ReplayCache
+from patchpulse.agent.search import SNIPPET_CHARS
 from patchpulse.agent.tools import Tools, Trace
 from patchpulse.causal.decompose import decompose
 from patchpulse.causal.store import NOT_RUN, StoredEstimate, serve
@@ -315,3 +327,64 @@ def test_tools_reject_untracked_games_and_unknown_patches() -> None:
     assert errors[8]["error"] == "granularity must be day or week, not 'month'"
     assert errors[9]["error"] == "no reviews in the baseline window"
     assert [c.result for c in trace.calls] == errors  # errors are recorded like results
+
+
+# Phase 6 plan Task 2: the two tools that leave the bundle go through the recording hook.
+
+
+class Stub:
+    """A recording hook that answers from fixed values and remembers each call."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        self.calls: list[tuple[str, dict[str, object], int]] = []
+
+    def external(self, tool: str, args: Any, data_version: int, live: Any) -> object:
+        self.calls.append((tool, dict(args), data_version))
+        return self.value
+
+
+def test_search_hits_come_through_the_external_calls() -> None:
+    long_text = "The game crashes on load. " * 40
+    stub = Stub([{"review_id": 101, "score": 0.9, "text": long_text}])
+    trace = Trace()
+    tools = Tools(make_bundle(), trace, external=stub)
+
+    result = tools.search_reviews(GAME, "crashes", (PATCH_DAY, PATCH_DAY + timedelta(days=6)))
+
+    tool, args, version = stub.calls[0]
+    assert (tool, args["mode"], args["query"], version) == (
+        "search_reviews",
+        "hybrid",
+        "crashes",
+        DATA_VERSION,
+    )
+    assert len(result["hits"][0]["snippet"]) <= SNIPPET_CHARS < len(long_text)
+    assert trace.retrieved[101] == long_text
+    assert "mode" not in trace.calls[0].args  # the prompt shows the call as production makes it
+
+
+def test_patch_notes_come_through_the_external_calls() -> None:
+    stub = Stub({"found": True, "text": "Fixed crashes on load.", "truncated": False})
+
+    result = Tools(make_bundle(), Trace(), external=stub).get_patch_notes("p1")
+
+    assert stub.calls[0][:2] == ("get_patch_notes", {"patch_id": "p1"})
+    assert (result["found"], result["notes"], result["truncated"]) == (
+        True,
+        "Fixed crashes on load.",
+        False,
+    )
+
+
+def test_an_unrecorded_search_is_a_tool_error_the_run_survives(tmp_path: Path) -> None:
+    cache = ReplayCache(tmp_path / "answers.sqlite", "replay")
+    trace = Trace()
+
+    result = Tools(make_bundle(), trace, external=cache).search_reviews(
+        GAME, "crashes", (PATCH_DAY, PATCH_DAY + timedelta(days=6))
+    )
+
+    assert result == {"error": "search_reviews wasn't recorded for this run"}
+    assert trace.calls[-1].result == result
+    assert cache.misses == ["tool:search_reviews"]

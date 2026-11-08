@@ -34,7 +34,13 @@ from agent_world import (
     scope_answer,
 )
 
-from patchpulse.agent.graph import MAX_MODEL_TOOL_CALLS, Refusal, ReportRequest
+from patchpulse.agent.graph import (
+    MAX_MODEL_TOOL_CALLS,
+    Refusal,
+    ReportRequest,
+    run_recorded,
+    run_report,
+)
 from patchpulse.agent.prompts import PROMPT_VERSION
 from patchpulse.agent.report import ModelUse, public_copy
 
@@ -359,3 +365,102 @@ def test_a_window_with_under_3_days_of_data_is_refused(tmp_path: Path) -> None:
     assert "2026-10-10" in result.reason  # where the data ends
     assert "2026-10-11" in result.reason  # when there are 3 days to look at
     assert model.steps == ["scope"]
+
+
+# Phase 6 plan Task 2: the recording hook, the causal switch and run records.
+
+QUESTION = "Why did Helldivers 2 reviews drop after patch 1.1.0?"
+
+
+def recorded_deps(world: World, **changes: Any) -> Any:
+    """The world's deps with the router's cache as the tools' recording hook."""
+    return replace(world.deps, external=world.router.cache, **changes)
+
+
+def test_a_recorded_run_replays_without_qdrant_steam_or_a_model(tmp_path: Path) -> None:
+    recording = World(tmp_path, Scripted(), mode="record")
+    recorded = report_of(
+        run_report(ReportRequest.for_question(QUESTION, appid=GAME), recorded_deps(recording))
+    )
+
+    replaying = World(tmp_path, Down(), mode="replay")
+    deps = recorded_deps(replaying, search=None, steam=None)
+    replayed = report_of(run_report(ReportRequest.for_question(QUESTION, appid=GAME), deps))
+
+    timing = {"usage", "seconds"}
+    assert replayed.model_dump(exclude=timing) == recorded.model_dump(exclude=timing)
+    assert replaying.router.cache.misses == []
+    assert recording.qdrant.calls > 0
+    assert recording.steam_requests > 0
+    assert replaying.qdrant.calls == 0
+    assert replaying.steam_requests == 0
+
+
+def test_a_draft_miss_degrades_to_a_basic_report_and_is_named(tmp_path: Path) -> None:
+    # Only the scope answer is recorded: every other step's client fails while recording.
+    World(tmp_path, Scripted({"scope": scope_answer}), mode="record").run(
+        ReportRequest.for_question(QUESTION, appid=GAME)
+    )
+
+    replaying = World(tmp_path, Down(), mode="replay")
+    record = run_recorded(
+        ReportRequest.for_question(QUESTION, appid=GAME), recorded_deps(replaying)
+    )
+
+    report = report_of(record.result)
+    assert report.basic
+    assert "model:gather" in replaying.router.cache.misses
+    assert [h.code for h in record.hypotheses] == ["H1", "H2", "H3", "H4", "H5"]
+
+
+def test_run_recorded_keeps_the_draft_raw_summary_and_trace(tmp_path: Path) -> None:
+    unsupported = "Performance mentions among negative reviews moved 99 points."
+    model = Scripted({**ANSWERS, "summary": lambda _: {"summary": unsupported}})
+
+    record = run_recorded(
+        ReportRequest.for_question(QUESTION, appid=GAME), World(tmp_path, model).deps
+    )
+
+    report = report_of(record.result)
+    assert record.draft is not None
+    assert len(record.draft.claims) == 4
+    assert record.raw_summary == unsupported  # as the model wrote it, before V6 replaced it
+    assert "99" not in report.summary
+    assert record.window == WINDOW
+    assert record.hypotheses == report.hypotheses
+    assert any(c.tool == "search_reviews" for c in record.trace.calls)
+    assert not record.basic
+
+
+def test_a_refusal_keeps_its_trace_and_no_window(tmp_path: Path) -> None:
+    model = Scripted({"scope": lambda _: {"refusal": "That isn't about a game's reviews."}})
+
+    record = run_recorded(
+        ReportRequest.for_question("What is the weather?"), World(tmp_path, model).deps
+    )
+
+    assert isinstance(record.result, Refusal)
+    assert (record.window, record.hypotheses, record.draft, record.raw_summary) == (
+        None,
+        [],
+        None,
+        None,
+    )
+
+
+def test_without_the_causal_tool_h1_has_no_estimate(tmp_path: Path) -> None:
+    model = Scripted({
+        "scope": scope_answer,
+        "gather": lambda _: {"calls": []},
+        "draft": lambda _: {"findings": [], "claims": []},
+        "summary": lambda _: {"summary": "Nothing stands out."},
+    })  # fmt: skip
+    world = World(tmp_path, model)
+
+    record = run_recorded(
+        ReportRequest.for_question(QUESTION, appid=GAME), replace(world.deps, causal_tool=False)
+    )
+
+    h1 = next(h for h in record.hypotheses if h.code == "H1")
+    assert h1.rule == "H1.no_estimate"
+    assert all(c.tool != "estimate_patch_effect" for c in record.trace.calls)

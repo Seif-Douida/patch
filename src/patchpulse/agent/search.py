@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import SecretStr
 
@@ -22,6 +22,8 @@ from patchpulse.retrieval.search import Hit, QueryEmbedder, SearchFilters, searc
 SNIPPET_CHARS = 400
 DEFAULT_HITS = 8
 MAX_HITS = 10
+# Production searches hybrid; Phase 6's ablation A2 searches the dense vectors alone.
+SearchMode = Literal["hybrid", "dense"]
 QUERY_LANGUAGE = "english"  # the model writes its queries in English (reports are in English)
 # Hours at review -> the playtime buckets (fact_review.playtime_bucket) at or above it.
 PLAYTIME_FLOORS: dict[int, tuple[str, ...]] = {
@@ -87,6 +89,7 @@ def find_reviews(
     language: str | None = None,
     min_playtime: float | None = None,
     k: int = DEFAULT_HITS,
+    mode: SearchMode = "hybrid",
 ) -> list[Hit]:
     """The best `k` reviews (capped at MAX_HITS) for `query`, by score then review id (rank
     fusion gives ties, which the cluster returns in any order); ValueError names a filter the
@@ -119,6 +122,7 @@ def find_reviews(
         appid=appid,
         language=QUERY_LANGUAGE,
         filters=filters,
+        mode=mode,
         k=max(1, min(k, MAX_HITS)),
     )
     return sorted(hits, key=lambda hit: (-hit.score, hit.review_id))

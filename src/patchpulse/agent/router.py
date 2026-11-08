@@ -8,6 +8,11 @@ daily-quota refusal retires the model until midnight Pacific, when Google resets
 three failures in a row skip a model for ten minutes. With every model failing, AllModelsDownError,
 and the caller writes a basic report. Logs and errors name the step, the model and the reason,
 never the prompt.
+
+The cache's `replay` mode answers only from the file: a miss raises ModelNotRecordedError, an
+AllModelsDownError, so the graph degrades it as it would an outage (a refusal, a basic report, the
+template summary), and the cache names it in `misses`. In `fill` mode a recorded answer is used
+and anything else is asked and recorded (Phase 6's live runs).
 """
 
 from __future__ import annotations
@@ -51,6 +56,11 @@ class ModelClient(Protocol):
 
 class AllModelsDownError(RuntimeError):
     """Every model in the chain failed or is resting; the message lists why, per model."""
+
+
+class ModelNotRecordedError(AllModelsDownError, ReplayMissError):
+    """Replay found no recorded answer: the graph handles it as an outage, and the cache names
+    the step in its misses. Never counted in the router's outages."""
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,10 @@ class ModelRouter:
         key = prompt_hash(system, user, schema)
         if self.cache.mode == "replay":
             return self._replay(step, key, schema)
+        if self.cache.mode == "fill":
+            recorded = self._recorded(key, schema)
+            if recorded is not None:
+                return recorded
         reasons: dict[str, str] = {}
         answered = False  # a model answered (unusably) or refused the request: not an outage
         for model in self.chain:
@@ -250,7 +264,8 @@ class ModelRouter:
             log.warning("%s failed %d times in a row; skipping it for a while", model,
                         self.breaker_failures)  # fmt: skip
 
-    def _replay(self, step: str, key: str, schema: Mapping[str, Any]) -> Routed:
+    def _recorded(self, key: str, schema: Mapping[str, Any]) -> Routed | None:
+        """The first chain model's recorded answer that still parses, if any."""
         for model in self.chain:
             cached = self.cache.get(model, key)
             if cached is None:
@@ -261,7 +276,14 @@ class ModelRouter:
             except BadAnswerError:
                 continue
             return Routed(model, data, cached.input_tokens, cached.output_tokens, cached=True)
-        raise ReplayMissError(f"{step}: no recorded answer for this prompt")
+        return None
+
+    def _replay(self, step: str, key: str, schema: Mapping[str, Any]) -> Routed:
+        recorded = self._recorded(key, schema)
+        if recorded is None:
+            self.cache.misses.append(f"model:{step}")
+            raise ModelNotRecordedError(f"{step}: no recorded answer for this prompt")
+        return recorded
 
 
 def make_agent_clients(

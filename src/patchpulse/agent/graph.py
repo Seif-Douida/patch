@@ -53,8 +53,8 @@ from patchpulse.agent.report import (
 )
 from patchpulse.agent.router import AllModelsDownError, ModelRouter
 from patchpulse.agent.rules import CoreEvidence, HypothesisResult, decide
-from patchpulse.agent.search import ReviewSearch
-from patchpulse.agent.tools import ModelCall, ToolCall, Tools, Trace
+from patchpulse.agent.search import ReviewSearch, SearchMode
+from patchpulse.agent.tools import ExternalCalls, ModelCall, ToolCall, Tools, Trace
 from patchpulse.agent.tracing import NoTracer, Observer, Tracer
 from patchpulse.agent.untrusted import wrap_patch_notes, wrap_question, wrap_reviews
 from patchpulse.agent.verifier import (
@@ -107,11 +107,33 @@ class Refusal:
 
 @dataclass(frozen=True)
 class AgentDeps:
+    """What a run reads. The last three are Phase 6's hooks, inert by default: `external` records
+    or replays the two tools that leave the bundle, `search_mode` is A2's dense search and
+    `causal_tool=False` is A3 (no estimate_patch_effect)."""
+
     bundle: Bundle
     router: ModelRouter
     search: ReviewSearch | None = None
     steam: SteamHttp | None = None
     tracer: Tracer = field(default_factory=NoTracer)
+    external: ExternalCalls | None = None
+    search_mode: SearchMode = "hybrid"
+    causal_tool: bool = True
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One run as Phase 6's evals keep it: the result, the scoped window, the explanations'
+    statuses, the model's draft and its summary before V6 and V7, and the trace (tool and model
+    calls, and the full text of every review retrieved, so it never leaves data/local)."""
+
+    result: Report | Refusal
+    window: tuple[date, date] | None
+    hypotheses: list[HypothesisResult]
+    draft: Draft | None
+    raw_summary: str | None
+    trace: Trace
+    basic: bool
 
 
 class _State(TypedDict, total=False):
@@ -129,6 +151,7 @@ class _State(TypedDict, total=False):
     verified: Verified
     findings: list[Finding]
     summary: str
+    raw_summary: str  # the model's summary before V6 and V7
     summary_passed: bool | None
     report: Report
     started: float  # time.monotonic() when the run began
@@ -321,7 +344,8 @@ class _Nodes:
         return {"scope": placed}
 
     def core_evidence(self, state: _State) -> dict[str, Any]:
-        return {"evidence": core_evidence(state["tools"], state["scope"])}
+        evidence = core_evidence(state["tools"], state["scope"], causal_tool=self.deps.causal_tool)
+        return {"evidence": evidence}
 
     def rules(self, state: _State) -> dict[str, Any]:
         return {"hypotheses": decide(state["evidence"], self.deps.bundle.causal)}
@@ -391,10 +415,11 @@ class _Nodes:
             data = self._ask(state, "summary", "\n".join(lines))
         except AllModelsDownError:
             return {"summary": template, "summary_passed": None}
-        checked = verify_summary(str(data["summary"]), verified.claims, state["trace"].retrieved)
+        raw = str(data["summary"])
+        checked = verify_summary(raw, verified.claims, state["trace"].retrieved)
         if checked is None:
-            return {"summary": template, "summary_passed": False}
-        return {"summary": checked, "summary_passed": True}
+            return {"summary": template, "raw_summary": raw, "summary_passed": False}
+        return {"summary": checked, "raw_summary": raw, "summary_passed": True}
 
     def finalize(self, state: _State) -> dict[str, Any]:
         request, scope, verified = state["request"], state["scope"], state["verified"]
@@ -522,6 +547,11 @@ def _traced(name: str, step: _Step) -> _Step:
 
 def run_report(request: ReportRequest, deps: AgentDeps) -> Report | Refusal:
     """One report, on the deps' bundle for every call."""
+    return run_recorded(request, deps).result
+
+
+def run_recorded(request: ReportRequest, deps: AgentDeps) -> RunRecord:
+    """One report, as `run_report` writes it, with what Phase 6's evals score besides it."""
     run = _hash(
         request.bundle_id,
         request.horizon,
@@ -531,7 +561,15 @@ def run_report(request: ReportRequest, deps: AgentDeps) -> Report | Refusal:
     )
     trace = Trace(run=run[:6])
     observer = deps.tracer.start(request, data_version=deps.bundle.data_version)
-    tools = Tools(deps.bundle, trace, search=deps.search, steam=deps.steam, observer=observer)
+    tools = Tools(
+        deps.bundle,
+        trace,
+        search=deps.search,
+        steam=deps.steam,
+        observer=observer,
+        external=deps.external,
+        search_mode=deps.search_mode,
+    )
     state: _State = {
         "request": request,
         "trace": trace,
@@ -547,4 +585,13 @@ def run_report(request: ReportRequest, deps: AgentDeps) -> Report | Refusal:
         raise
     result: Report | Refusal = final["refusal"] if "refusal" in final else final["report"]
     observer.finish(result)
-    return result
+    scope = final.get("scope")
+    return RunRecord(
+        result=result,
+        window=None if scope is None else scope.window,
+        hypotheses=list(final.get("hypotheses", [])),
+        draft=final.get("draft"),
+        raw_summary=final.get("raw_summary"),
+        trace=trace,
+        basic=bool(final.get("basic")),
+    )

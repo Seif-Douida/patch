@@ -55,8 +55,10 @@ def bundle_scope(bundle: Bundle, bundle_id: str, horizon: int) -> Scope:
     raise ValueError(f"no bundle {bundle_id} in the data")
 
 
-def core_evidence(tools: Tools, scope: Scope) -> CoreEvidence:
-    """The core tool calls, recorded in the tools' trace, and what the rules read from them."""
+def core_evidence(tools: Tools, scope: Scope, *, causal_tool: bool = True) -> CoreEvidence:
+    """The core tool calls, recorded in the tools' trace, and what the rules read from them.
+    `causal_tool=False` leaves out estimate_patch_effect (Phase 6's ablation A3), so H1 has no
+    estimate."""
     appid, window, baseline = scope.appid, scope.window, scope.baseline
     ids: dict[str, str] = {}
 
@@ -81,7 +83,7 @@ def core_evidence(tools: Tools, scope: Scope) -> CoreEvidence:
     split = tools.decompose_change(appid, window, baseline)
     last("decomposition")
     row = None
-    if scope.bundle_id is not None:
+    if scope.bundle_id is not None and causal_tool:
         tools.estimate_patch_effect(scope.bundle_id)
         last("estimate")
         served = tools.estimate_rows(tools.trace.calls[-1])

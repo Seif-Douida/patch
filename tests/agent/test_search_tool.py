@@ -264,3 +264,20 @@ def test_tied_hits_come_back_in_one_order() -> None:
     orders = [[h["review_id"] for h in result["hits"]] for result in results]
 
     assert orders == [[1, 2, 3], [1, 2, 3]]
+
+
+def test_find_reviews_passes_the_mode() -> None:
+    """A2's dense arm (Phase 6 plan Task 2): one dense query, no fusion of two prefetches."""
+    client = FakeQdrant([(101, 0.9, "Crashes on load.")])
+    tools = Tools(
+        make_bundle(),
+        Trace(),
+        search=ReviewSearch(client, "reviews", FakeEmbedder()),
+        search_mode="dense",
+    )
+
+    tools.search_reviews(GAME, "crashes", WINDOW)
+
+    call = client.calls[0]
+    assert call["using"] == "dense"
+    assert "prefetch" not in call

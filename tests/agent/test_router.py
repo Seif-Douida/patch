@@ -394,6 +394,37 @@ def test_record_then_replay_is_identical(tmp_path: Path) -> None:
     assert replayed.model_id == SECOND
 
 
+def test_a_replay_miss_is_an_outage_the_graph_can_handle(tmp_path: Path) -> None:
+    """The graph turns an outage into a refusal, a basic report or the template summary, so a
+    replay miss degrades the same way, named in the cache's misses and never counted as an
+    outage (Phase 6 plan Task 1)."""
+    replayer = router(tmp_path, {}, mode="replay")
+
+    with pytest.raises(AllModelsDownError) as raised:
+        replayer.generate("draft", "s", "u", SCHEMA)
+
+    assert isinstance(raised.value, ReplayMissError)
+    assert replayer.cache.misses == ["model:draft"]
+    assert replayer.outages == 0
+
+
+def test_fill_mode_asks_only_unrecorded_prompts(tmp_path: Path) -> None:
+    router(tmp_path, {FIRST: FakeClient(answer(YES)), SECOND: FakeClient()}, mode="fill").generate(
+        "draft", "s", "recorded", SCHEMA
+    )
+    first = FakeClient(answer(NO))
+    filler = router(tmp_path, {FIRST: first, SECOND: FakeClient()}, mode="fill")
+
+    recorded = filler.generate("draft", "s", "recorded", SCHEMA)
+    new = filler.generate("draft", "s", "new", SCHEMA)
+    replayed = router(tmp_path, {}, mode="replay").generate("draft", "s", "new", SCHEMA)
+
+    assert first.calls == 1
+    assert (recorded.cached, recorded.data) == (True, {"verdict": "yes", "score": 0.5})
+    assert (new.cached, new.data) == (False, {"verdict": "no"})
+    assert replayed.data == {"verdict": "no"}
+
+
 def test_live_mode_neither_reads_nor_writes(tmp_path: Path) -> None:
     router(
         tmp_path, {FIRST: FakeClient(answer(YES)), SECOND: FakeClient()}, mode="record"
