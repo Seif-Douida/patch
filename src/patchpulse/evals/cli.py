@@ -13,10 +13,14 @@
 - `keygen`: a new eval bundle key (Seif runs it; the key goes to .env and a GitHub secret).
 - `bundle --version N`: build the encrypted eval bundle CI replays, pin it in
   evals/thresholds.yaml, and print Seif's release command.
-- `smoke --bundle FILE --out JSON`: open the pinned eval bundle (PP_EVAL_BUNDLE_KEY) and run
-  every check from it with no model, Azure or cluster: what `eval-gate` runs.
-- `gate --pr JSON [--base JSON] --comment MD`: compare with main's baseline; exits 1 on a
-  breach, after writing the comment.
+- `pin [--thresholds YAML]`: print the pinned eval bundle's version, or `none`; a pin it can't
+  read exits 2. `eval-gate` reads its pins with it.
+- `smoke --bundle FILE --out JSON`: check the datasets against the freeze, open the pinned eval
+  bundle (PP_EVAL_BUNDLE_KEY) and run every check from it with no model, Azure or cluster: what
+  `eval-gate` runs.
+- `gate --pr JSON [--base JSON] [--thresholds YAML] --comment MD`: compare with main's baseline
+  by main's tolerances (--thresholds; default the checkout's); exits 1 on a breach, after
+  writing the comment.
 - `report`: write reports/evals/<date>.md and .json from the stored runs and the judge's
   cached verdicts (`--mlflow` logs it).
 
@@ -68,7 +72,7 @@ from patchpulse.evals.data import (
     read_data_pin,
 )
 from patchpulse.evals.frozen import FROZEN_FILE, freeze, require_frozen
-from patchpulse.evals.gate import compare, read_thresholds, render_comment
+from patchpulse.evals.gate import changed_tolerances, compare, read_thresholds, render_comment
 from patchpulse.evals.incidents import load_incidents
 from patchpulse.evals.injection import (
     InjectionCase,
@@ -328,6 +332,7 @@ def _bundle(version: int, *, encoder_dir: Path) -> int:
             f"eval bundle v{pinned.version} is pinned already (a release can't change): "
             f"build v{pinned.version + 1}"
         )
+    frozen = require_frozen()  # the runs were recorded against these datasets
     pin = read_data_pin()
     load_pinned_bundle(pin)  # checks the data bundle's hash
     runs = {arm: runs_dir(arm) for arm in ("main", "injection")}
@@ -352,6 +357,7 @@ def _bundle(version: int, *, encoder_dir: Path) -> int:
             settings.gold_dir / SAMPLE_FILE, settings.gold_dir / CLAUDE_LABELS_FILE, snapshot
         ),
         commit=_commit(),
+        frozen=frozen,
     )
     built = build_bundle(version, key=settings.eval_bundle_key.get_secret_value(), sources=sources)
     write_bundle_pin(version, built.sha256)
@@ -377,11 +383,14 @@ def _smoke(bundle: Path, out: Path, *, qdrant_url: str, champion: Path) -> int:
     pin = read_bundle_pin()
     if pin is None:
         raise ValueError(f"no eval bundle is pinned in {THRESHOLDS_PATH}: nothing to smoke")
+    frozen = require_frozen()  # a PR can't score the runs against edited datasets (Final M1)
     folder = open_bundle(
         bundle, settings.eval_bundle_key.get_secret_value(), expected_sha256=pin.sha256
     )
     try:
-        metrics = run_smoke(folder, commit=_commit(), qdrant_url=qdrant_url, champion_dir=champion)
+        metrics = run_smoke(
+            folder, commit=_commit(), frozen=frozen, qdrant_url=qdrant_url, champion_dir=champion
+        )
     finally:
         shutil.rmtree(folder, ignore_errors=True)  # it holds review text
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -399,10 +408,19 @@ def _read_metrics(path: Path) -> SmokeMetrics:
     return SmokeMetrics.from_json(json.loads(path.read_text(encoding="utf-8")))
 
 
-def _gate(pr: Path, base: Path | None, comment: Path) -> int:
+def _pin(thresholds: Path) -> int:
+    pinned = read_bundle_pin(thresholds)
+    print("none" if pinned is None else pinned.version)
+    return 0
+
+
+def _gate(pr: Path, base: Path | None, comment: Path, thresholds: Path) -> int:
+    """By main's tolerances (`thresholds`); the comment names the ones the PR changes."""
+    tolerances = read_thresholds(thresholds)
+    own = read_thresholds() if THRESHOLDS_PATH.is_file() else tolerances
     baseline = _read_metrics(base) if base is not None and base.is_file() else None
-    result = compare(_read_metrics(pr), baseline, read_thresholds())
-    text = render_comment(result)
+    result = compare(_read_metrics(pr), baseline, tolerances)
+    text = render_comment(result, changed_tolerances=changed_tolerances(own, tolerances))
     comment.parent.mkdir(parents=True, exist_ok=True)
     comment.write_text(text, encoding="utf-8", newline="\n")
     print(text.splitlines()[0].removeprefix("## "))
@@ -492,6 +510,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=ENCODER_DIR,
         help=f"the pinned review encoder (default {ENCODER_DIR})",
     )
+    pinned = commands.add_parser("pin", help="print the pinned eval bundle's version, or none")
+    pinned.add_argument("--thresholds", type=Path, default=THRESHOLDS_PATH,
+                        help=f"the file to read (default {THRESHOLDS_PATH})")  # fmt: skip
     smoke = commands.add_parser("smoke", help="every check from the pinned eval bundle (CI)")
     smoke.add_argument("--bundle", type=Path, required=True, help="the eval bundle file")
     smoke.add_argument("--out", type=Path, required=True, help="where to write the metrics JSON")
@@ -502,6 +523,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     gate = commands.add_parser("gate", help="compare a PR's smoke metrics with main's baseline")
     gate.add_argument("--pr", type=Path, required=True, help="the PR's metrics JSON")
     gate.add_argument("--base", type=Path, help="main's baseline metrics JSON, if there is one")
+    gate.add_argument("--thresholds", type=Path, default=THRESHOLDS_PATH,
+                      help=f"main's thresholds file (default {THRESHOLDS_PATH})")  # fmt: skip
     gate.add_argument("--comment", type=Path, required=True, help="where to write the comment")
     commands.add_parser("label-sample", help="draw and export the judge's calibration sample")
     commands.add_parser("kappa", help=f"the judge's agreement with Seif ({AGREEMENT_PATH})")
@@ -524,8 +547,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _bundle(args.version, encoder_dir=args.encoder_dir)
         if args.command == "smoke":
             return _smoke(args.bundle, args.out, qdrant_url=args.qdrant_url, champion=args.champion)
+        if args.command == "pin":
+            return _pin(args.thresholds)
         if args.command == "gate":
-            return _gate(args.pr, args.base, args.comment)
+            return _gate(args.pr, args.base, args.comment, args.thresholds)
         if args.command == "label-sample":
             return _label_sample()
         if args.command == "kappa":

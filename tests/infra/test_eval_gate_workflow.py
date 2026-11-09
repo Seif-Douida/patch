@@ -10,6 +10,13 @@ from typing import Any
 
 import yaml
 
+from patchpulse.evals.bundle import THRESHOLDS_PATH
+from patchpulse.evals.frozen import FROZEN_FILE, INJECTION_FILE, RUBRIC_FILE
+from patchpulse.evals.incidents import INCIDENTS_DIR
+from patchpulse.evals.retrieval_suite import QUERIES_PATH
+from patchpulse.labeling.teachers import MODELS_FILE
+from patchpulse.retrieval.judging import JUDGMENTS_PATH
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
@@ -143,3 +150,66 @@ def test_the_comment_is_posted_before_the_check_fails() -> None:
     assert "--edit-last" in step("Comment on the PR")["run"]
     assert "steps.gate.outcome == 'failure'" in fail["if"]
     assert "exit 1" in fail["run"]
+
+
+def test_every_file_the_smoke_reads_counts_as_a_relevant_change() -> None:
+    """A PR that changes only the smoke's inputs still runs the gate (Final review M2)."""
+    relevant = step("Relevant changes")["run"]
+    (pattern,) = re.findall(r"pattern='([^']+)'", relevant)
+    read_by_the_smoke = [
+        QUERIES_PATH,
+        JUDGMENTS_PATH,
+        THRESHOLDS_PATH,
+        FROZEN_FILE,
+        INJECTION_FILE,
+        RUBRIC_FILE,
+        INCIDENTS_DIR / "a-case.yaml",
+        MODELS_FILE,
+        Path("src/patchpulse/evals/smoke.py"),
+        Path("pyproject.toml"),
+        Path("uv.lock"),
+        Path(".github/workflows/eval-gate.yml"),
+    ]
+
+    missed = [p.as_posix() for p in read_by_the_smoke if not re.search(pattern, p.as_posix())]
+
+    assert missed == []
+
+
+def test_a_failed_diff_fails_the_check_instead_of_skipping_it() -> None:
+    """A git error must never read as "nothing relevant changed" (Final review M6)."""
+    relevant = step("Relevant changes")["run"]
+
+    assert not re.search(r"git diff[^\n]*\|", relevant)  # a pipe hides git's exit status
+    assert re.search(r"if ! changed=\$\(git diff --name-only [^\n]*\); then", relevant)
+    assert "::error::" in relevant
+    assert "exit 1" in relevant
+
+
+def test_the_pins_are_read_by_the_evals_cli() -> None:
+    """Not by sed: a hand-edited pin is read or refused, never skipped (Final review M6)."""
+    text = (WORKFLOWS / "eval-gate.yml").read_text(encoding="utf-8")
+    sync = next(i for i, s in enumerate(steps()) if s.get("run") == "uv sync --locked")
+    uv = next(i for i, s in enumerate(steps()) if s.get("uses", "").startswith("astral-sh/"))
+
+    assert "sed " not in text
+    assert "uv run --locked patchpulse-evals pin)" in step("Pinned bundle")["run"]
+    assert (
+        "patchpulse-evals pin --thresholds build/evals/base-thresholds.yaml"
+        in (step("Main's baseline")["run"])
+    )
+    assert index("Relevant changes") < uv < sync < index("Pinned bundle")
+    for setup in steps()[uv : sync + 1]:
+        assert setup["if"] == "steps.relevant.outputs.run == 'true'", setup
+
+
+def test_the_gate_judges_by_mains_tolerances() -> None:
+    """The PR's own thresholds.yaml could loosen them (Final review M1)."""
+    baseline = step("Main's baseline")["run"]
+    gate_step = step("Gate")["run"]
+
+    assert (
+        'git show "origin/$BASE_REF:evals/thresholds.yaml" > build/evals/base-thresholds.yaml'
+    ) in baseline
+    assert 'git rev-parse --verify "origin/$BASE_REF"' in baseline  # a missing base fails
+    assert "--thresholds build/evals/base-thresholds.yaml" in gate_step

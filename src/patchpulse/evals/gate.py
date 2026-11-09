@@ -1,12 +1,14 @@
 """The eval gate (Phase 6 design D11, spec §13): a PR's smoke metrics against `main`'s newest
-baseline, with the tolerances in evals/thresholds.yaml.
+baseline, with `main`'s tolerances in evals/thresholds.yaml (a PR's own apply once it merges).
 
 A metric breaches when it moves past its tolerance. A verifier regression is a claim `main`'s
 verifier withheld that the PR's ships or rewords, or one it reworded that the PR's ships as-is, on
 the same recorded draft: a case recorded again since the baseline has other claims under the same
 ids, so it's listed, not compared. Every case must replay, with or without a baseline; without
-one (before `main`'s first run with a bundle) the other rows are reported, not gated. The PR
-comment holds numbers, case and claim ids and step names: no text.
+one (before `main`'s first run with a bundle) the other rows are reported, not gated. A PR whose
+frozen datasets (evals/frozen.sha256) differ from the baseline's fails: it would be measured
+against other incidents, markers, rubric or scoring rule (Final review M1). The PR comment holds
+numbers, digests, case and claim ids and step names: no text.
 """
 
 from __future__ import annotations
@@ -31,7 +33,9 @@ LABELS = {
     "ndcg_at_10": "NDCG@10 (pool)",
     "macro_f1": "Macro-F1 (gold test)",
     "unreplayed_cases": "Unreplayed cases",
+    "frozen_datasets": "Frozen datasets",
 }
+DIGEST_SHOWN = 12
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,11 @@ class Thresholds:
     ndcg_at_10: float = -0.02
     macro_f1: float = -0.02
     unreplayed_cases: int = 0  # absolute
+
+
+def changed_tolerances(pr: Thresholds, base: Thresholds) -> tuple[str, ...]:
+    """The tolerances a PR's thresholds.yaml changes from `main`'s, in the file's order."""
+    return tuple(f.name for f in fields(Thresholds) if getattr(pr, f.name) != getattr(base, f.name))
 
 
 def read_thresholds(path: Path = THRESHOLDS_PATH) -> Thresholds:
@@ -58,8 +67,8 @@ def read_thresholds(path: Path = THRESHOLDS_PATH) -> Thresholds:
 @dataclass(frozen=True)
 class GateRow:
     metric: str
-    base: float | None
-    pr: float | None
+    base: float | str | None
+    pr: float | str | None
     allowed: str
     ok: bool | None  # None: reported, not gated
 
@@ -159,20 +168,31 @@ def compare(pr: SmokeMetrics, base: SmokeMetrics | None, thresholds: Thresholds)
             len(pr.unreplayed) <= thresholds.unreplayed_cases,  # absolute, baseline or not
         )
     )
+    base_frozen = None if base is None else base.frozen
+    rows.append(
+        GateRow(
+            "frozen_datasets",
+            None if base_frozen is None else base_frozen[:DIGEST_SHOWN],
+            None if pr.frozen is None else pr.frozen[:DIGEST_SHOWN],
+            "same as main",
+            None if base_frozen is None else pr.frozen == base_frozen,
+        )
+    )
     breaches = tuple(row.metric for row in rows if row.ok is False)
     return GateResult(
         tuple(rows), breaches, dict(pr.unreplayed), regressions, rerecorded, gated, pr, base
     )
 
 
-def _shown(value: float | None) -> str:
+def _shown(value: float | str | None) -> str:
     if value is None:
         return "-"
     return f"{value:.3f}" if isinstance(value, float) else str(value)
 
 
-def render_comment(result: GateResult) -> str:
-    """The PR comment: numbers, case and claim ids, and step names only."""
+def render_comment(result: GateResult, *, changed_tolerances: Sequence[str] = ()) -> str:
+    """The PR comment: numbers, digests, case and claim ids, and step names only.
+    `changed_tolerances`: the ones the PR's thresholds.yaml changes from `main`'s."""
     count = len(result.breaches)
     if count:
         verdict = (
@@ -194,6 +214,20 @@ def render_comment(result: GateResult) -> str:
         mark = "-" if row.ok is None else "pass" if row.ok else "FAIL"
         lines.append(f"| {LABELS[row.metric]} | {_shown(row.base)} | {_shown(row.pr)} | "
                      f"{row.allowed} | {mark} |")  # fmt: skip
+    if "frozen_datasets" in result.breaches:
+        lines += [
+            "",
+            "This PR changes the frozen eval datasets (evals/frozen.sha256: incidents, injection "
+            "set, rubric or scoring rule) since main's baseline, so its numbers aren't comparable. "
+            "Changing them is a ledgered ruling, a new freeze and a re-run; merge it only on "
+            "purpose, and main's next run records a new baseline.",
+        ]
+    if changed_tolerances:
+        lines += [
+            "",
+            "This PR changes the tolerances in evals/thresholds.yaml "
+            f"({', '.join(changed_tolerances)}): main's apply until it merges.",
+        ]
     if result.regressions:
         shipped = ", ".join(result.regressions)
         lines += [

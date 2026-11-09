@@ -5,7 +5,8 @@ name: eval-gate
 # baseline. It never calls a model, Azure or the Qdrant cluster: the bundle holds every recorded
 # answer, and a throwaway Qdrant container holds the retrieval pool. The only secret is the
 # bundle's key. Without a relevant change, a pinned bundle or the key (a fork's PR), it passes
-# without running, so a required check never waits.
+# without running, so a required check never waits; a diff or a pin it can't read fails it. A PR
+# is judged by main's tolerances, and fails if it changes the frozen eval datasets.
 on:
   pull_request:
   push:
@@ -50,20 +51,41 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pattern='^(src/|config/|evals/|models/|pyproject\.toml$|uv\.lock$|\.github/workflows/eval-gate\.yml$)'
-          if git diff --name-only "origin/$BASE_REF...HEAD" | grep -Eq "$pattern"; then
+          # Every file the smoke reads from the checkout (tests/infra/test_eval_gate_workflow.py).
+          pattern='^(src/|config/|evals/|models/|data/retrieval/|pyproject\.toml$|uv\.lock$|\.github/workflows/eval-gate\.yml$)'
+          # Listed first: piped into grep, a git error would read as "nothing relevant changed".
+          if ! changed=$(git diff --name-only "origin/$BASE_REF...HEAD"); then
+            echo "::error::Couldn't list this PR's changes against $BASE_REF."
+            exit 1
+          fi
+          if grep -Eq "$pattern" <<< "$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::No change the evals measure: the gate passes without running."
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - uses: astral-sh/setup-uv@v10.2.0
+        if: steps.relevant.outputs.run == 'true'
+        with:
+          version: "0.12.19"
+          enable-cache: true
+
+      # mssql-python's documented Linux requirements, as in ci.yml (the package imports them).
+      - name: Install SQL driver libraries
+        if: steps.relevant.outputs.run == 'true'
+        run: sudo apt-get install -y --no-install-recommends libltdl7 libkrb5-3 libgssapi-krb5-2
+
+      - if: steps.relevant.outputs.run == 'true'
+        run: uv sync --locked
+
       - name: Pinned bundle
         id: pin
         if: steps.relevant.outputs.run == 'true'
         run: |
-          version=$(sed -n '/^bundle:/,/^[^ ]/s/^  version: *\([0-9][0-9]*\) *$/\1/p' evals/thresholds.yaml)
-          if [ -z "$version" ]; then
+          # The evals' own YAML reader: a pin it can't read fails the check, never skips it.
+          version=$(uv run --locked patchpulse-evals pin)
+          if [ "$version" = "none" ]; then
             echo "::notice::No eval bundle is pinned (evals/thresholds.yaml): the gate passes without running."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -83,20 +105,6 @@ jobs:
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - uses: astral-sh/setup-uv@v10.2.0
-        if: steps.key.outputs.run == 'true'
-        with:
-          version: "0.12.19"
-          enable-cache: true
-
-      # mssql-python's documented Linux requirements, as in ci.yml (the package imports them).
-      - name: Install SQL driver libraries
-        if: steps.key.outputs.run == 'true'
-        run: sudo apt-get install -y --no-install-recommends libltdl7 libkrb5-3 libgssapi-krb5-2
-
-      - if: steps.key.outputs.run == 'true'
-        run: uv sync --locked
 
       - name: Start Qdrant
         if: steps.key.outputs.run == 'true'
@@ -157,8 +165,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.base_ref }}
         run: |
-          base_pin=$(git show "origin/$BASE_REF:evals/thresholds.yaml" 2>/dev/null \
-            | sed -n '/^bundle:/,/^[^ ]/s/^  version: *\([0-9][0-9]*\) *$/\1/p' || true)
+          # Main's thresholds file: its pin decides whether a missing baseline fails, and its
+          # tolerances judge this PR (the PR's own apply once it merges).
+          git rev-parse --verify "origin/$BASE_REF" > /dev/null
+          mkdir -p build/evals
+          base_pin=none
+          if git cat-file -e "origin/$BASE_REF:evals/thresholds.yaml" 2> /dev/null; then
+            git show "origin/$BASE_REF:evals/thresholds.yaml" > build/evals/base-thresholds.yaml
+            base_pin=$(uv run --locked patchpulse-evals pin --thresholds build/evals/base-thresholds.yaml)
+          fi
           found=""
           runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow eval-gate.yml --branch main \
             --status success --limit 20 --json databaseId,event \
@@ -172,7 +187,7 @@ jobs:
           done
           if [ -n "$found" ]; then
             echo "Baseline from main's run $found."
-          elif [ -n "$base_pin" ]; then
+          elif [ "$base_pin" != "none" ]; then
             echo "::error::$BASE_REF pins eval bundle v$base_pin but no baseline was found (expired, or main's run hasn't finished): run \`gh workflow run eval-gate.yml --ref main\`, then re-run this check."
             exit 1
           else
@@ -184,12 +199,15 @@ jobs:
         if: steps.key.outputs.run == 'true' && github.event_name == 'pull_request'
         continue-on-error: true
         run: |
-          base=()
+          args=(--pr build/evals/metrics.json --comment build/evals/comment.md)
           if [ -f build/evals/base/metrics.json ]; then
-            base=(--base build/evals/base/metrics.json)
+            args+=(--base build/evals/base/metrics.json)
           fi
-          uv run --locked patchpulse-evals gate --pr build/evals/metrics.json "${base[@]}" \
-            --comment build/evals/comment.md
+          # Main's tolerances: a PR can't loosen the ones it is judged by.
+          if [ -f build/evals/base-thresholds.yaml ]; then
+            args+=(--thresholds build/evals/base-thresholds.yaml)
+          fi
+          uv run --locked patchpulse-evals gate "${args[@]}"
 
       - name: Comment on the PR
         if: steps.key.outputs.run == 'true' && github.event_name == 'pull_request'

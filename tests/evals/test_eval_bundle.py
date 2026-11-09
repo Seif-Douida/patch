@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -83,7 +84,8 @@ def test_a_bundle_round_trips(tmp_path: Path) -> None:
 
 
 def test_the_manifest_records_versions_and_hashes(tmp_path: Path) -> None:
-    built = build_bundle(1, key=KEY, sources=sources(tmp_path), out_dir=tmp_path / "build")
+    given = replace(sources(tmp_path), frozen="e" * 64)
+    built = build_bundle(1, key=KEY, sources=given, out_dir=tmp_path / "build")
     folder = open_bundle(built.path, KEY, expected_sha256=built.sha256, into=tmp_path / "open")
 
     manifest = json.loads((folder / "manifest.json").read_text("utf-8"))
@@ -93,6 +95,7 @@ def test_the_manifest_records_versions_and_hashes(tmp_path: Path) -> None:
     assert manifest["data_version"] == 60
     assert manifest["scoring_version"] == SCORING_VERSION
     assert manifest["prompt_version"] == PROMPT_VERSION
+    assert manifest["frozen"] == "e" * 64  # what the runs were recorded against (Final M1)
     assert manifest["commit"] == "abc1234"
     assert manifest["counts"] == {"main": 1, "injection": 1, "pool": 2, "gold_test": 1}
     assert manifest["created"].endswith("+00:00")
@@ -184,3 +187,43 @@ def test_the_pin_is_written_into_the_thresholds_file(tmp_path: Path) -> None:
     text = path.read_text("utf-8")
     assert text.startswith("# The gate's pins.\nbundle:\n")
     assert text.endswith("# Tolerances.\nmacro_f1: -0.02\n")
+
+
+SHA = "a" * 64
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [
+        f'bundle:\n  version: "3"\n  sha256: {SHA}\n',  # a quoted version
+        f"bundle: {{version: 3, sha256: {SHA}}}\n",  # flow style
+    ],
+)
+def test_a_hand_edited_pin_still_reads(tmp_path: Path, pin: str) -> None:
+    """The gate reads the pin with this parser, not sed (Final review M6)."""
+    path = tmp_path / "thresholds.yaml"
+    path.write_text(pin, encoding="utf-8")
+
+    found = read_bundle_pin(path)
+
+    assert found is not None
+    assert (found.version, found.sha256) == (3, SHA)
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [
+        "bundle: 3\n",
+        f"bundle:\n  sha256: {SHA}\n",
+        f"bundle:\n  version: three\n  sha256: {SHA}\n",
+        f"bundle:\n  version: true\n  sha256: {SHA}\n",
+        f"bundle:\n  version: 0\n  sha256: {SHA}\n",
+    ],
+)
+def test_a_malformed_pin_is_refused(tmp_path: Path, pin: str) -> None:
+    """A pin the gate can't read must fail the check, never skip it (Final review M6)."""
+    path = tmp_path / "thresholds.yaml"
+    path.write_text(pin, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"thresholds\.yaml: bundle"):
+        read_bundle_pin(path)

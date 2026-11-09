@@ -73,10 +73,11 @@ def test_freeze_records_and_require_frozen_names_changes(
     monkeypatch.chdir(tmp_path)
     frozen_files(tmp_path)
 
-    freeze()
-    require_frozen()
+    digest = freeze()
+    unchanged = require_frozen()
     (tmp_path / "evals" / "incidents" / "a.yaml").write_text("id: b\n", encoding="utf-8")
 
+    assert unchanged == digest  # what the smoke records for the gate (Final review M1)
     assert "scoring_version" in FROZEN_FILE.read_text(encoding="utf-8")
     with pytest.raises(ValueError, match=r"a\.yaml"):
         require_frozen()
@@ -224,3 +225,100 @@ def test_the_report_needs_a_stored_main_run(
 
     assert code == 2
     assert "run --arm main" in capsys.readouterr().err
+
+
+def test_pin_prints_the_pinned_version_or_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What eval-gate reads the pins with (Final review M6)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "thresholds.yaml").write_text("bundle: null\n", encoding="utf-8")
+    (tmp_path / "base.yaml").write_text(
+        f"bundle: {{version: 4, sha256: {'a' * 64}}}\n", encoding="utf-8"
+    )
+
+    unpinned = main(["pin"])
+    unpinned_out = capsys.readouterr().out
+    pinned = main(["pin", "--thresholds", "base.yaml"])
+
+    assert (unpinned, unpinned_out) == (0, "none\n")
+    assert (pinned, capsys.readouterr().out) == (0, "4\n")
+
+
+def test_pin_refuses_a_malformed_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "thresholds.yaml").write_text("bundle: 4\n", encoding="utf-8")
+
+    code = main(["pin"])
+
+    assert code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "thresholds.yaml: bundle" in output.err
+
+
+def test_smoke_refuses_datasets_changed_since_the_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A PR can't score the recorded runs against edited incidents or markers (Final M1)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_EVAL_BUNDLE_KEY", KEY)
+    frozen_files(tmp_path)
+    freeze()
+    (tmp_path / "evals" / "incidents" / "a.yaml").write_text("id: b\n", encoding="utf-8")
+    (tmp_path / "evals" / "thresholds.yaml").write_text(
+        f"bundle:\n  version: 1\n  sha256: {'a' * 64}\n", encoding="utf-8"
+    )
+    (tmp_path / "eval-bundle-v1.bin").write_bytes(b"PPEVAL1")
+
+    code = main(["smoke", "--bundle", "eval-bundle-v1.bin", "--out", "metrics.json"])
+
+    assert code == 2
+    assert "frozen eval datasets changed" in capsys.readouterr().err
+    assert not (tmp_path / "metrics.json").exists()
+
+
+def test_the_bundle_command_needs_frozen_datasets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_EVAL_BUNDLE_KEY", KEY)
+    frozen_files(tmp_path)
+    (tmp_path / "evals" / "thresholds.yaml").write_text("bundle: null\n", encoding="utf-8")
+
+    code = main(["bundle", "--version", "1"])
+
+    assert code == 2
+    assert "patchpulse-evals freeze" in capsys.readouterr().err
+
+
+def test_the_gate_judges_by_mains_tolerances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A PR that loosens its own tolerances is still judged by main's (Final review M1)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "thresholds.yaml").write_text(
+        "bundle: null\ntolerances:\n  root_cause_correct: -5\n", encoding="utf-8"
+    )
+    (tmp_path / "main.yaml").write_text(
+        "bundle: null\ntolerances:\n  root_cause_correct: -1\n", encoding="utf-8"
+    )
+    base, worse = tmp_path / "base.json", tmp_path / "pr.json"
+    base.write_text(json.dumps(smoke_metrics().to_json()), encoding="utf-8")
+    worse.write_text(json.dumps(smoke_metrics(root_cause_correct=17).to_json()), encoding="utf-8")
+    gate = ["gate", "--pr", str(worse), "--base", str(base), "--comment", "comment.md"]
+
+    by_main = main([*gate, "--thresholds", "main.yaml"])
+    comment = (tmp_path / "comment.md").read_text(encoding="utf-8")
+    by_the_pr = main(gate)
+
+    assert by_main == 1
+    assert "| Golden incidents right | 20 | 17 | -1 | FAIL |" in comment
+    assert "This PR changes the tolerances in evals/thresholds.yaml (root_cause_correct)" in comment
+    assert by_the_pr == 0  # the checkout's own tolerances, as before
+    capsys.readouterr()

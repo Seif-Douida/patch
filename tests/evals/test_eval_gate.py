@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 from eval_fixtures import smoke_metrics
 
-from patchpulse.evals.gate import Thresholds, compare, read_thresholds, render_comment
+from patchpulse.evals.gate import (
+    Thresholds,
+    changed_tolerances,
+    compare,
+    read_thresholds,
+    render_comment,
+)
 from patchpulse.evals.smoke import SmokeMetrics
 
 REPO = Path(__file__).resolve().parents[2]
@@ -47,6 +53,7 @@ def test_equal_metrics_pass() -> None:
             {"verifier": {"hd2-a": {"c1": "shipped", "c2": "shipped", "c3": "reworded"}}},
         ),
         ("unreplayed_cases", {"unreplayed": {"hd2-a": ["model:draft"]}}),
+        ("frozen_datasets", {"frozen": "e" * 64}),
     ],
 )
 def test_each_threshold_breached_by_one_fails(metric: str, changes: dict[str, object]) -> None:
@@ -159,3 +166,39 @@ def test_the_comment_holds_numbers_and_ids_only() -> None:
     assert "Judge (replayed, reported only): citation support 0.900" in comment
     assert "bundle v1" in comment
     assert "failed" in comment.splitlines()[0]
+
+
+def test_a_pr_that_changes_the_frozen_datasets_fails_and_says_why() -> None:
+    """A PR can't change what it is measured against: incidents, injection markers, the rubric
+    or the scoring rule (Final review M1)."""
+    result = compare(smoke_metrics(frozen="b" * 64), smoke_metrics(frozen="a" * 64), Thresholds())
+
+    comment = render_comment(result)
+
+    assert result.breaches == ("frozen_datasets",)
+    assert "| Frozen datasets | aaaaaaaaaaaa | bbbbbbbbbbbb | same as main | FAIL |" in comment
+    assert "evals/frozen.sha256" in comment
+    assert "a new freeze" in comment
+
+
+def test_a_baseline_without_a_freeze_digest_is_not_compared_on_it() -> None:
+    result = compare(smoke_metrics(), smoke_metrics(frozen=None), Thresholds())
+
+    frozen = next(row for row in result.rows if row.metric == "frozen_datasets")
+    assert frozen.ok is None
+    assert result.passed
+
+
+def test_the_comment_names_tolerances_the_pr_changes() -> None:
+    """Main's tolerances judge the PR; the PR's own apply once it merges (Final review M1)."""
+    result = compare(smoke_metrics(), smoke_metrics(), Thresholds())
+    changed = changed_tolerances(Thresholds(root_cause_correct=-5, macro_f1=-0.1), Thresholds())
+
+    comment = render_comment(result, changed_tolerances=changed)
+
+    assert changed == ("root_cause_correct", "macro_f1")
+    assert (
+        "This PR changes the tolerances in evals/thresholds.yaml (root_cause_correct, macro_f1): "
+        "main's apply until it merges."
+    ) in comment
+    assert "changes the tolerances" not in render_comment(result)

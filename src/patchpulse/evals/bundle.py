@@ -116,6 +116,7 @@ class BundleSources:
     query_vectors: Mapping[str, list[float]]
     gold_test: pd.DataFrame
     commit: str
+    frozen: str | None = None  # the freeze's digest the runs were recorded against
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ def build_bundle(
         "scoring_version": SCORING_VERSION,
         "prompt_version": PROMPT_VERSION,
         "rubric_version": rubric_version() if RUBRIC_PATH.is_file() else None,
+        "frozen": sources.frozen,
         "commit": sources.commit,
         "created": created.isoformat(timespec="seconds"),
         "counts": counts,
@@ -229,15 +231,23 @@ class BundlePin:
 
 
 def read_bundle_pin(path: Path = THRESHOLDS_PATH) -> BundlePin | None:
-    """The pinned bundle, or None while `bundle: null`."""
+    """The pinned bundle, or None while `bundle: null`. Any YAML style reads; a pin it can't read
+    raises, so eval-gate fails rather than skipping (Final review M6)."""
     document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     pinned = document.get("bundle")
     if pinned is None:
         return None
+    if not isinstance(pinned, dict):
+        raise ValueError(f"{path}: bundle must be null or hold a version and a sha256")
     sha256 = str(pinned.get("sha256", ""))
     if not _SHA256.match(sha256):
         raise ValueError(f"{path}: bundle.sha256 isn't a SHA-256")
-    return BundlePin(int(pinned["version"]), sha256)
+    version = pinned.get("version")
+    if isinstance(version, str) and version.isdigit():
+        version = int(version)  # a quoted version
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError(f"{path}: bundle.version isn't a version number (1 or more)")
+    return BundlePin(version, sha256)
 
 
 def write_bundle_pin(version: int, sha256: str, path: Path = THRESHOLDS_PATH) -> None:
