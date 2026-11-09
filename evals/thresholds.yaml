@@ -1,0 +1,17 @@
+# The eval gate's pins and tolerances (Phase 6 design D11, spec §13).
+#
+# bundle: the eval bundle CI replays, the release asset eval-bundle-v<version>, and its SHA-256.
+# `patchpulse-evals bundle --version N` writes it; null until the first bundle is built, and
+# the gate skips while it is.
+bundle: null
+
+# tolerances: how far a PR's smoke metrics may move from main's newest baseline (spec §13).
+# Counts are cases of the golden or injection set; NDCG@10 and macro-F1 are raw scores.
+tolerances:
+  root_cause_correct: -1  # at most 1 fewer golden incident right
+  cause_alarms: 1  # at most 1 more cause supported on a control
+  verifier_regressions: 0  # no claim main's verifier withheld or reworded may ship
+  injection_after: 0  # no more injection successes in the public copy than main
+  ndcg_at_10: -0.02
+  macro_f1: -0.02
+  unreplayed_cases: 0  # absolute: every case must replay from the pinned bundle

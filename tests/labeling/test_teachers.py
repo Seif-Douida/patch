@@ -111,3 +111,57 @@ def test_a_gemini_model_still_needs_its_free_tier_limits(tmp_path: Path) -> None
 
     with pytest.raises(ModelConfigError, match="rpd"):
         load_model_config(path)
+
+
+JUDGED = """
+candidates:
+  flash:
+    id: gemini-3.5-flash-lite
+    rpm: 15
+    tpm: 250000
+    rpd: 500
+    json_mode: true
+    system_instruction: true
+  gemma:
+    id: gemma-4-31b-it
+    rpm: 30
+    tpm: 16000
+    rpd: 14400
+    json_mode: true
+    system_instruction: true
+  server-flash:
+    provider: openai_compat
+    id: gemini-3.5-flash-lite
+    json_mode: true
+    system_instruction: true
+agent:
+  chain: [flash]
+judge:
+  chain: [gemma]
+"""
+
+
+@pytest.mark.parametrize("judge", ["flash", "server-flash"])
+def test_the_judge_differs_from_the_agent(tmp_path: Path, judge: str) -> None:
+    """Spec §10.7: the judge is a different model, under any name or provider."""
+    path = tmp_path / "models.yaml"
+    path.write_text(JUDGED.replace("chain: [gemma]", f"chain: [gemma, {judge}]"), "utf-8")
+
+    with pytest.raises(ModelConfigError, match=r"judge model .* the agent's models"):
+        load_model_config(path)
+
+
+def test_a_judge_chain_names_candidates_only(tmp_path: Path) -> None:
+    path = tmp_path / "models.yaml"
+    path.write_text(JUDGED.replace("chain: [gemma]", "chain: [gemma-9]"), encoding="utf-8")
+
+    with pytest.raises(ModelConfigError, match=r"judge model 'gemma-9' is not a candidate"):
+        load_model_config(path)
+
+
+def test_the_models_file_has_a_judge() -> None:
+    config = load_model_config(REPO / MODELS_FILE)
+
+    assert config.judge is not None
+    assert config.judge.chain == ["selfhosted-gemma-4-31b", "gemma-4-31b"]
+    assert config.candidates["gemma-4-31b"].id == "gemma-4-31b-it"

@@ -1,5 +1,5 @@
-"""Seif's labeling app (design D3): the blind audit, then the blind re-label two weeks later; and
-Phase 3's blind relevance audit (design D7).
+"""Seif's labeling app (design D3): the blind audit, then the blind re-label two weeks later;
+Phase 3's blind relevance audit (design D7); and Phase 6's blind judge audit (design D5).
 
 Run it with:
 
@@ -12,10 +12,15 @@ language, thumbs and text only: never the split, the patch proximity, or anyone 
 The relevance audit shows one query and one review at a time: keys 0, 1 and 2 pick the grade, U
 marks it unsure, Enter saves and moves on (`retrieval.audit.RelevanceAuditSession`). It never shows
 the judges' grade, the rank or the system that found the review.
+
+The judge audit shows one claim and its evidence at a time: 1 supported, 0 not supported, U
+unsure, Enter saves and moves on (`evals.judge_audit.JudgeAuditSession`). It never shows the
+judge's verdict, the arm or whether the claim shipped.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +28,8 @@ import pandas as pd
 import streamlit as st
 
 from patchpulse.config import get_lab_settings
+from patchpulse.evals import judge_audit
+from patchpulse.evals.judge import RUBRIC_PATH, rubric_version
 from patchpulse.labeling.audit import (
     NOTES_FILE,
     SEIF_LABELS_FILE,
@@ -51,8 +58,14 @@ MODES = (
     "Audit (150 reviews)",
     "Re-label (30 reviews, 14+ days later)",
     "Relevance audit (300 pairs)",
+    "Judge audit (60 items)",
 )
 GRADE_LABELS = {0: "0  not relevant", 1: "1  partly relevant", 2: "2  relevant"}
+JUDGE_LABELS = {1: "1  supported", 0: "0  not supported"}
+JUDGE_QUESTIONS = {
+    "citation": "Does the review support the claim?",
+    "figure": "Does the claim describe the figure correctly?",
+}
 
 
 def _session(mode: str) -> AuditSession:
@@ -116,11 +129,75 @@ def _relevance_audit() -> None:
         st.rerun()
 
 
+def _evidence(view: judge_audit.AuditView) -> None:
+    """A review as written, in a box that scrolls; a figure as indented JSON."""
+    if view.kind == "figure":
+        st.caption("The figure the claim cites: the tool, its periods, the value and its holder.")
+        st.code(json.dumps(json.loads(view.evidence), indent=2), language="json")
+        return
+    st.caption("The review the claim cites, as the agent saw it (cleaned, first 400 characters).")
+    st.container(height=230, border=True).markdown(as_plain_text(view.evidence))
+
+
+def _judge_audit() -> None:
+    try:
+        views = judge_audit.read_audit(judge_audit.AUDIT_PATH)
+        version = rubric_version(RUBRIC_PATH)
+    except (ValueError, FileNotFoundError, KeyError) as error:
+        st.sidebar.warning(
+            f"The judge audit isn't ready ({error}): run `patchpulse-evals label-sample` first."
+        )
+        return
+    session = judge_audit.JudgeAuditSession(views, judge_audit.LABELS_PATH, rubric_version=version)
+    done, total = session.progress()
+    st.sidebar.progress(done / total if total else 1.0, text=f"{done} of {total} labeled")
+    with st.sidebar.expander("The judge's rubric", expanded=False):
+        st.markdown(RUBRIC_PATH.read_text(encoding="utf-8"))
+
+    view = session.next_item()
+    if view is None:
+        st.success("The judge audit is complete. Thank you. Close the tab whenever you like.")
+        return
+    st.subheader(JUDGE_QUESTIONS[view.kind])
+    st.markdown(f"**Claim:** {as_plain_text(view.claim_text)}")
+    _evidence(view)
+
+    position = done + 1
+    label_key, unsure_key = f"judge-label-{position}", f"judge-unsure-{position}"
+    chosen = st.session_state.get(label_key)
+    for column, (label, text) in zip(st.columns(2), JUDGE_LABELS.items(), strict=True):
+        if column.button(
+            text,
+            key=f"{label_key}-{label}",
+            shortcut=str(label),
+            width="stretch",
+            type="primary" if chosen == label else "secondary",
+        ):
+            st.session_state[label_key] = label
+            st.rerun()
+    unsure = bool(st.session_state.get(unsure_key, False))
+    if st.button(
+        "Unsure",
+        key=f"{unsure_key}-button",
+        shortcut="u",
+        type="primary" if unsure else "secondary",
+    ):
+        st.session_state[unsure_key] = not unsure
+        st.rerun()
+    saved = st.button("Save and next", type="primary", shortcut="enter", disabled=chosen is None)
+    if saved and chosen is not None:
+        session.save(view.item_id, int(chosen), unsure=unsure)
+        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="PatchPulse labeling", layout="centered")
     mode = st.sidebar.radio("Session", MODES)
     if mode == MODES[2]:
         _relevance_audit()
+        return
+    if mode == MODES[3]:
+        _judge_audit()
         return
     try:
         session = _session(mode)

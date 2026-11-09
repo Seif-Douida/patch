@@ -30,11 +30,16 @@ def _clean(text: str) -> str:
     return _LOOK_ALIKE.sub("&lt;", text)
 
 
+def review_snippet(text: str) -> str:
+    """What the model sees of one review: cleaned, then cut to SNIPPET_CHARS."""
+    return snippet(_clean(text))
+
+
 def wrap_reviews(reviews: Iterable[tuple[int, str]]) -> str:
     """Review snippets (id, text), each cleaned, cut to SNIPPET_CHARS and tagged."""
     lines = [DATA_NOT_INSTRUCTIONS]
     for review_id, text in reviews:
-        lines.append(f'<review id="{int(review_id)}">{snippet(_clean(text))}</review>')
+        lines.append(f'<review id="{int(review_id)}">{review_snippet(text)}</review>')
     return "\n".join(lines)
 
 

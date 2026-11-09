@@ -57,3 +57,8 @@ teacher: selfhosted-gemma-4-31b
 # 1 of 10 answers from 31B, 26B ran to its output limit).
 agent:
   chain: [gemini-3.5-flash-lite, gemini-3.1-flash-lite]
+
+# The Phase 6 judge (design D5, spec §10.7): Gemma 4 31B, a different model from the agent's.
+# The self-hosted copy first (no rate limit), then Google's free one.
+judge:
+  chain: [selfhosted-gemma-4-31b, gemma-4-31b]

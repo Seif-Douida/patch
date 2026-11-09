@@ -2,7 +2,10 @@
 compact JSON-able summaries.
 
 Every call is recorded in the run's Trace as a ToolCall (its id, the tool, its JSON-able args and
-its result) and `Tools.rerun` re-executes a recorded call on the same bundle, for V2. A call that
+its result) and `Tools.rerun` re-executes a recorded call on the same bundle, for V2. The two tools
+that leave the bundle (review search and patch notes) reach Qdrant and Steam through `external`
+when one is given: Phase 6's record/replay cache, which records or replays what they returned
+(design D2). A call that
 can't be answered (an untracked game, an unknown patch, a bad range) returns `{"error": ...}`,
 recorded like any result. Shares, intervals and effects are in percent or percentage points,
 rounded to 2 places; intervals are 90%. Phase 4's `serve` and `decompose` are reused as they are.
@@ -11,15 +14,22 @@ rounded to 2 places; intervals are 90%. Phase 4's `serve` and `decompose` are re
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from math import sqrt
-from typing import Any
+from typing import Any, Protocol
 
 from patchpulse.agent.bundle import Bundle, GameData
+from patchpulse.agent.llm_cache import ToolNotRecordedError
 from patchpulse.agent.patch_notes import fetch_patch_notes
-from patchpulse.agent.search import DEFAULT_HITS, ReviewSearch, find_reviews, snippet
+from patchpulse.agent.search import (
+    DEFAULT_HITS,
+    ReviewSearch,
+    SearchMode,
+    find_reviews,
+    snippet,
+)
 from patchpulse.agent.tracing import Observer
 from patchpulse.causal.decompose import BUCKETS, PARTS, decompose
 from patchpulse.causal.its import POSITIVE_SHARE
@@ -36,6 +46,16 @@ Result = dict[str, Any]
 
 class ToolError(ValueError):
     """A call the tool can't answer; its message becomes the recorded result."""
+
+
+class ExternalCalls(Protocol):
+    """Where the tools that leave the bundle get their answers (Phase 6's record/replay cache):
+    `live()` makes the real call, and its result must be JSON-able. Raises ToolNotRecordedError
+    when a replay has no recorded result."""
+
+    def external(
+        self, tool: str, args: Mapping[str, Any], data_version: int, live: Callable[[], Any]
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -132,12 +152,16 @@ class Tools:
         search: ReviewSearch | None = None,
         steam: SteamHttp | None = None,
         observer: Observer | None = None,
+        external: ExternalCalls | None = None,
+        search_mode: SearchMode = "hybrid",
     ) -> None:
         self.bundle = bundle
         self.trace = trace
         self._observer = observer or Observer()
         self._search = search
         self._steam = steam
+        self._external = external
+        self._search_mode: SearchMode = search_mode
         self._games = {g.appid: g for g in bundle.games}
         self._patches = {p.patch_id: (g, p) for g in bundle.games for p in g.patches}
         self._runners: dict[str, Callable[[dict[str, Any]], Result]] = {
@@ -261,37 +285,57 @@ class Tools:
 
     # The implementations, on JSON-able args.
 
+    def _through(self, tool: str, args: Mapping[str, Any], live: Callable[[], Any]) -> Any:
+        """A call that leaves the bundle, through the recording hook when there is one."""
+        if self._external is None:
+            return live()
+        try:
+            return self._external.external(tool, args, self.bundle.data_version, live)
+        except ToolNotRecordedError as error:
+            raise ToolError(f"{tool} wasn't recorded for this run") from error
+
     def _search_reviews(self, args: dict[str, Any]) -> Result:
         game = self._game(args["appid"])
         window = _window(args["window"])
-        if self._search is None:
-            raise ToolError("review search isn't available in this run")
-        try:
-            hits = find_reviews(
-                self._search,
-                appid=game.appid,
-                query=args["query"],
-                window=window,
-                as_of_run_id=self.bundle.data_version,
-                voted_up=args["voted_up"],
-                aspect=args["aspect"],
-                language=args["language"],
-                min_playtime=args["min_playtime"],
-                k=args["k"],
-            )
-        except ValueError as error:  # a filter the index can't apply
-            raise ToolError(str(error)) from error
-        except Exception as error:  # the cluster unreachable or refusing: the run goes on
-            # The error's type only: a message can carry the cluster's URL, a secret.
-            raise ToolError(f"review search failed ({type(error).__name__})") from error
+
+        def live() -> list[dict[str, Any]]:
+            if self._search is None:
+                raise ToolError("review search isn't available in this run")
+            try:
+                hits = find_reviews(
+                    self._search,
+                    appid=game.appid,
+                    query=args["query"],
+                    window=window,
+                    as_of_run_id=self.bundle.data_version,
+                    voted_up=args["voted_up"],
+                    aspect=args["aspect"],
+                    language=args["language"],
+                    min_playtime=args["min_playtime"],
+                    k=args["k"],
+                    mode=self._search_mode,
+                )
+            except ValueError as error:  # a filter the index can't apply
+                raise ToolError(str(error)) from error
+            except Exception as error:  # the cluster unreachable or refusing: the run goes on
+                # The error's type only: a message can carry the cluster's URL, a secret.
+                raise ToolError(f"review search failed ({type(error).__name__})") from error
+            return [{"review_id": h.review_id, "score": h.score, "text": h.text} for h in hits]
+
+        # The mode is part of what a recording is of (A2), not of the call the prompt shows.
+        hits = self._through("search_reviews", {**args, "mode": self._search_mode}, live)
         for hit in hits:
-            self.trace.retrieved[hit.review_id] = hit.text
+            self.trace.retrieved[int(hit["review_id"])] = str(hit["text"])
         return {
             "appid": game.appid,
             "query": args["query"],
             "window": args["window"],
             "hits": [
-                {"review_id": h.review_id, "score": round(h.score, 4), "snippet": snippet(h.text)}
+                {
+                    "review_id": int(h["review_id"]),
+                    "score": round(float(h["score"]), 4),
+                    "snippet": snippet(str(h["text"])),
+                }
                 for h in hits
             ],
         }
@@ -301,21 +345,26 @@ class Tools:
         if found is None:
             raise ToolError(f"no patch {args['patch_id']} in the data")
         game, patch = found
-        if self._steam is None:
-            raise ToolError("patch notes aren't available in this run")
-        try:
-            notes = fetch_patch_notes(
-                self._steam, appid=game.appid, gid=patch.gid, published_at=patch.published_at
-            )
-        except SteamError as error:
-            raise ToolError("Steam's news service didn't answer") from error
+
+        def live() -> dict[str, Any]:
+            if self._steam is None:
+                raise ToolError("patch notes aren't available in this run")
+            try:
+                notes = fetch_patch_notes(
+                    self._steam, appid=game.appid, gid=patch.gid, published_at=patch.published_at
+                )
+            except SteamError as error:
+                raise ToolError("Steam's news service didn't answer") from error
+            return {"found": notes.found, "text": notes.text, "truncated": notes.truncated}
+
+        notes = self._through("get_patch_notes", args, live)
         return {
             "patch_id": patch.patch_id,
             "title": patch.title,
             "day": _iso(patch.day),
-            "found": notes.found,
-            "notes": notes.text,
-            "truncated": notes.truncated,
+            "found": notes["found"],
+            "notes": notes["text"],
+            "truncated": notes["truncated"],
         }
 
     def _game(self, appid: int) -> GameData:
