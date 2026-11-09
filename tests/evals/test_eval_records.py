@@ -3,6 +3,7 @@ the record the scoring reads, review text and all, so it never leaves data/local
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -77,3 +78,27 @@ def test_records_refuse_a_folder_outside_data_local(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="data/local"):
         save_case(stored, tmp_path / "elsewhere" / "c1.json")
+
+
+def test_a_run_that_no_longer_fits_fails_without_its_text(tmp_path: Path) -> None:
+    """A later schema change makes old runs fail to load; the error (printed, and in CI's public
+    log) names where, never the text (Final review C1)."""
+    model = Scripted({**ANSWERS, "summary": lambda _: {"summary": "SENTINEL-TEXT summary"}})
+    record = run_recorded(
+        ReportRequest.for_question(QUESTION, appid=GAME), World(tmp_path, model).deps
+    )
+    stored = StoredCase.from_record(
+        record, case="c1", arm="main", data_version=52, misses=[], indexed_reviews=None
+    )
+    document = json.loads(stored.model_dump_json())
+    claim = document["report"]["claims"][0]
+    claim["added_later"] = "SENTINEL-TEXT extra"  # a field this code doesn't know
+    del claim["claim_type"]  # a field it needs: the error shows the claim around it
+    path = runs(tmp_path) / "c1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(document).replace("A negative review", "SENTINEL-TEXT"), "utf-8")
+
+    with pytest.raises(ValueError, match="claim_type") as caught:
+        load_case(path)
+
+    assert "SENTINEL-TEXT" not in str(caught.value)

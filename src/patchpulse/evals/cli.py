@@ -10,6 +10,13 @@
   runs it: Claude never sends review text to the self-hosted server (ADR-020).
 - `label-sample`: draw Seif's blind calibration sample and export it for the labeling app.
 - `kappa`: the judge's agreement with Seif's labels, to reports/evals/judge-agreement.md.
+- `keygen`: a new eval bundle key (Seif runs it; the key goes to .env and a GitHub secret).
+- `bundle --version N`: build the encrypted eval bundle CI replays, pin it in
+  evals/thresholds.yaml, and print Seif's release command.
+- `smoke --bundle FILE --out JSON`: open the pinned eval bundle (PP_EVAL_BUNDLE_KEY) and run
+  every check from it with no model, Azure or cluster: what `eval-gate` runs.
+- `gate --pr JSON [--base JSON] --comment MD`: compare with main's baseline; exits 1 on a
+  breach, after writing the comment.
 - `report`: write reports/evals/<date>.md and .json from the stored runs and the judge's
   cached verdicts (`--mlflow` logs it).
 
@@ -19,6 +26,7 @@ Logging is configured as `patchpulse-agent`'s, so the Qdrant cluster's URL never
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import subprocess
@@ -43,8 +51,24 @@ from patchpulse.api.bundle_source import http_fetch
 from patchpulse.api.settings import AGENT_DATA_URL
 from patchpulse.config import get_lab_settings
 from patchpulse.evals.arms import ARMS, Arm
-from patchpulse.evals.data import DATA_PIN, fetch_data, load_pinned_bundle, read_data_pin
+from patchpulse.evals.bundle import (
+    THRESHOLDS_PATH,
+    BundleSources,
+    build_bundle,
+    keygen,
+    open_bundle,
+    read_bundle_pin,
+    write_bundle_pin,
+)
+from patchpulse.evals.data import (
+    DATA_PIN,
+    data_file,
+    fetch_data,
+    load_pinned_bundle,
+    read_data_pin,
+)
 from patchpulse.evals.frozen import FROZEN_FILE, freeze, require_frozen
+from patchpulse.evals.gate import compare, read_thresholds, render_comment
 from patchpulse.evals.incidents import load_incidents
 from patchpulse.evals.injection import (
     InjectionCase,
@@ -71,10 +95,11 @@ from patchpulse.evals.judge import (
     rubric_version,
 )
 from patchpulse.evals.judge_audit import LABELS_PATH, export_audit, read_labels
-from patchpulse.evals.records import CACHE_FILE, EVALS_DATA, StoredCase, load_arm
+from patchpulse.evals.records import CACHE_FILE, EVALS_DATA, StoredCase, load_arm, runs_dir
 from patchpulse.evals.report import RunInfo, build_results, log_eval_run, write_report
 from patchpulse.evals.runner import ArmOutcome, Case, make_router, run_arm
 from patchpulse.evals.scoring import SCORING_VERSION
+from patchpulse.evals.smoke import CHAMPION_DIR, LOCAL_QDRANT, SmokeMetrics, run_smoke
 from patchpulse.ingest.http import RateLimiter
 from patchpulse.labeling.limits import USAGE_FILE
 from patchpulse.labeling.teachers import load_model_config
@@ -91,7 +116,7 @@ def _now() -> datetime:
 def outcome_line(arm: Arm, outcome: ArmOutcome, reset: datetime | None) -> str:
     line = (
         f"{arm.name}: {outcome.recorded} recorded, {outcome.already} already there, "
-        f"{len(outcome.missed)} with misses"
+        f"{len(outcome.missed)} with misses, not saved"
     )
     if outcome.missed:
         line += f" ({', '.join(sorted(outcome.missed))})"
@@ -146,6 +171,12 @@ def exposure_line(cases: list[InjectionCase]) -> str:
 
 
 def _run(arm: Arm, *, wanted: str | None, mode: CacheMode, encoder_dir: Path) -> int:
+    settings = get_lab_settings()
+    if mode != "replay" and (settings.qdrant_url is None or not encoder_dir.is_dir()):
+        raise ValueError(
+            f"a live run needs review search: PP_QDRANT_URL and the pinned encoder in "
+            f"{encoder_dir} (`patchpulse-ml retrieval encoder download --to {encoder_dir}`)"
+        )
     if arm.name in ("main", "injection") and mode != "replay":
         require_frozen()  # the graded runs read only frozen datasets
     injection: list[InjectionCase] = []
@@ -154,7 +185,6 @@ def _run(arm: Arm, *, wanted: str | None, mode: CacheMode, encoder_dir: Path) ->
     else:
         cases = _cases(wanted)
     bundle = load_pinned_bundle(read_data_pin())
-    settings = get_lab_settings()
     with ExitStack() as stack:
         cache = ReplayCache(EVALS_DATA / CACHE_FILE, mode)
         clients: dict[str, Any] = {}
@@ -174,14 +204,11 @@ def _run(arm: Arm, *, wanted: str | None, mode: CacheMode, encoder_dir: Path) ->
                     sleep=time.sleep,
                 )
             )
-            if settings.qdrant_url is not None and encoder_dir.is_dir():
+            if settings.qdrant_url is not None:  # checked above
                 search = open_pinned_search(
                     settings.qdrant_url, settings.qdrant_api_key, encoder_dir
                 )
                 stack.callback(search.client.close)
-            else:
-                log.warning("no review search (PP_QDRANT_URL or %s missing): runs cite no reviews",
-                            encoder_dir)  # fmt: skip
             steam = agent_steam(stack.enter_context(httpx2.Client()), RateLimiter())
         router = make_router(arm, clients, cache, clock=_now)
         outcome = run_arm(
@@ -271,6 +298,117 @@ def _kappa() -> int:
     return 0
 
 
+def _bundle(version: int, *, encoder_dir: Path) -> int:
+    """Build eval bundle v<version> from local files (no database), pin it, print the upload."""
+    # Here, not at the top: the encoder, the snapshot and the judgments are this command's only.
+    import pandas as pd
+
+    from patchpulse.evals.classification_suite import export_gold_test
+    from patchpulse.evals.retrieval_suite import (
+        QUERIES_PATH,
+        export_pool,
+        export_query_vectors,
+    )
+    from patchpulse.labeling.gold import CLAUDE_LABELS_FILE, SAMPLE_FILE
+    from patchpulse.models.snapshot import load_snapshot
+    from patchpulse.retrieval.embed import EmbeddingCache
+    from patchpulse.retrieval.embedders import OnnxEmbedder
+    from patchpulse.retrieval.judging import JUDGMENTS_PATH
+    from patchpulse.retrieval.queries import load_queries
+
+    settings = get_lab_settings()
+    if settings.eval_bundle_key is None:
+        raise ValueError(
+            "no PP_EVAL_BUNDLE_KEY: run `patchpulse-evals keygen` and put the key in .env and "
+            "in the EVAL_BUNDLE_KEY secret"
+        )
+    pinned = read_bundle_pin()
+    if pinned is not None and version <= pinned.version:
+        raise ValueError(
+            f"eval bundle v{pinned.version} is pinned already (a release can't change): "
+            f"build v{pinned.version + 1}"
+        )
+    pin = read_data_pin()
+    load_pinned_bundle(pin)  # checks the data bundle's hash
+    runs = {arm: runs_dir(arm) for arm in ("main", "injection")}
+    for arm, folder in runs.items():
+        if not any(folder.glob("*.json")):
+            raise ValueError(f"no stored {arm} runs: run `patchpulse-evals run --arm {arm}` first")
+    snapshot = load_snapshot(settings.data_dir)
+    embedder = OnnxEmbedder(encoder_dir)
+    pool = export_pool(
+        snapshot,
+        pd.read_csv(JUDGMENTS_PATH, dtype={"query_id": str}),
+        EmbeddingCache.for_embedder(settings.data_dir, embedder),
+    )
+    sources = BundleSources(
+        data_file=data_file(pin.data_version),
+        data_version=pin.data_version,
+        cache_file=EVALS_DATA / CACHE_FILE,
+        runs=runs,
+        pool=pool,
+        query_vectors=export_query_vectors(load_queries(QUERIES_PATH), embedder),
+        gold_test=export_gold_test(
+            settings.gold_dir / SAMPLE_FILE, settings.gold_dir / CLAUDE_LABELS_FILE, snapshot
+        ),
+        commit=_commit(),
+    )
+    built = build_bundle(version, key=settings.eval_bundle_key.get_secret_value(), sources=sources)
+    write_bundle_pin(version, built.sha256)
+    counts = built.manifest["counts"]
+    notes = (
+        f"Data version {pin.data_version}: {counts['main']} golden runs, {counts['injection']} "
+        f"injection runs, {counts['pool']} pool reviews ({pool.attrs['skipped']} skipped), "
+        f"{counts['gold_test']} gold test reviews."
+    )
+    print(f"Wrote {built.path.as_posix()} (sha256 {built.sha256}); pinned in {THRESHOLDS_PATH}.")
+    print("Upload it as the release asset:")
+    print(
+        f"gh release create eval-bundle-v{version} {built.path.as_posix()} "
+        f'--title "Eval bundle v{version}" --notes "{notes}"'
+    )
+    return 0
+
+
+def _smoke(bundle: Path, out: Path, *, qdrant_url: str, champion: Path) -> int:
+    settings = get_lab_settings()
+    if settings.eval_bundle_key is None:
+        raise ValueError("no PP_EVAL_BUNDLE_KEY: the smoke can't open the eval bundle")
+    pin = read_bundle_pin()
+    if pin is None:
+        raise ValueError(f"no eval bundle is pinned in {THRESHOLDS_PATH}: nothing to smoke")
+    folder = open_bundle(
+        bundle, settings.eval_bundle_key.get_secret_value(), expected_sha256=pin.sha256
+    )
+    try:
+        metrics = run_smoke(folder, commit=_commit(), qdrant_url=qdrant_url, champion_dir=champion)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)  # it holds review text
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(metrics.to_json(), indent=2, sort_keys=True) + "\n",
+                   encoding="utf-8", newline="\n")  # fmt: skip
+    print(
+        f"Smoke of bundle v{metrics.bundle_version}: {metrics.root_cause_correct} of "
+        f"{len(metrics.predicted)} incidents right, {len(metrics.unreplayed)} unreplayed; "
+        f"wrote {out}."
+    )
+    return 0
+
+
+def _read_metrics(path: Path) -> SmokeMetrics:
+    return SmokeMetrics.from_json(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _gate(pr: Path, base: Path | None, comment: Path) -> int:
+    baseline = _read_metrics(base) if base is not None and base.is_file() else None
+    result = compare(_read_metrics(pr), baseline, read_thresholds())
+    text = render_comment(result)
+    comment.parent.mkdir(parents=True, exist_ok=True)
+    comment.write_text(text, encoding="utf-8", newline="\n")
+    print(text.splitlines()[0].removeprefix("## "))
+    return 0 if result.passed else 1
+
+
 def _commit() -> str:
     """The checkout's commit, short; "unknown" without git."""
     git = shutil.which("git")
@@ -345,6 +483,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     judged = commands.add_parser("judge", help="judge the stored runs' citations and figures")
     judged.add_argument("--arms", default=JUDGED_ARMS,
                         help=f"comma-separated arms (default {JUDGED_ARMS})")  # fmt: skip
+    commands.add_parser("keygen", help="print a new eval bundle key (Seif runs it)")
+    bundle = commands.add_parser("bundle", help="build, encrypt and pin the eval bundle")
+    bundle.add_argument("--version", type=int, required=True, help="the bundle's version, N")
+    bundle.add_argument(
+        "--encoder-dir",
+        type=Path,
+        default=ENCODER_DIR,
+        help=f"the pinned review encoder (default {ENCODER_DIR})",
+    )
+    smoke = commands.add_parser("smoke", help="every check from the pinned eval bundle (CI)")
+    smoke.add_argument("--bundle", type=Path, required=True, help="the eval bundle file")
+    smoke.add_argument("--out", type=Path, required=True, help="where to write the metrics JSON")
+    smoke.add_argument("--qdrant-url", default=LOCAL_QDRANT,
+                       help=f"a Qdrant for the pool (default {LOCAL_QDRANT})")  # fmt: skip
+    smoke.add_argument("--champion", type=Path, default=CHAMPION_DIR,
+                       help=f"the champion student (default {CHAMPION_DIR})")  # fmt: skip
+    gate = commands.add_parser("gate", help="compare a PR's smoke metrics with main's baseline")
+    gate.add_argument("--pr", type=Path, required=True, help="the PR's metrics JSON")
+    gate.add_argument("--base", type=Path, help="main's baseline metrics JSON, if there is one")
+    gate.add_argument("--comment", type=Path, required=True, help="where to write the comment")
     commands.add_parser("label-sample", help="draw and export the judge's calibration sample")
     commands.add_parser("kappa", help=f"the judge's agreement with Seif ({AGREEMENT_PATH})")
     report = commands.add_parser("report", help="write the eval report from the stored runs")
@@ -359,6 +517,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "judge":
             return _judge(args.arms)
+        if args.command == "keygen":
+            print(keygen())
+            return 0
+        if args.command == "bundle":
+            return _bundle(args.version, encoder_dir=args.encoder_dir)
+        if args.command == "smoke":
+            return _smoke(args.bundle, args.out, qdrant_url=args.qdrant_url, champion=args.champion)
+        if args.command == "gate":
+            return _gate(args.pr, args.base, args.comment)
         if args.command == "label-sample":
             return _label_sample()
         if args.command == "kappa":

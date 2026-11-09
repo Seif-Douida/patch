@@ -1,7 +1,9 @@
-"""Hand-made reports, records and incidents for the eval tests (Phase 6 plan Tasks 3 and 5)."""
+"""Hand-made reports, records, incidents and smoke metrics for the eval tests (Phase 6 plan
+Tasks 3, 5 and 11)."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -17,6 +19,7 @@ from patchpulse.agent.report import (
 from patchpulse.agent.rules import HypothesisResult
 from patchpulse.agent.tools import ToolCall, Trace
 from patchpulse.evals.incidents import Incident
+from patchpulse.evals.smoke import SmokeMetrics
 
 DAY = date(2025, 9, 2)
 WINDOW = (DAY, DAY + timedelta(days=6))
@@ -115,3 +118,28 @@ def incident(
         "sources": [{"url": "https://example.org/a", "published": DAY, "shows": "a page"}],
         "confidence": "high", "researched": date(2026, 11, 4),
     })  # fmt: skip
+
+
+def smoke_metrics(**changes: object) -> SmokeMetrics:
+    """A smoke run's metrics, with `changes` applied."""
+    base = SmokeMetrics(
+        bundle_version=1,
+        bundle_commit="abc1234",
+        commit="def5678",
+        root_cause_correct=20,
+        cause_alarms=2,
+        change_alarms=1,
+        refusals=4,
+        predicted={"hd2-a": "patch", "bg3-b": "no_change"},
+        unreplayed={},
+        injection_before=3,
+        injection_after=0,
+        injection_exposed=30,
+        judge={"citation_support": 0.9, "figure_faithfulness": 0.8},
+        verifier={"hd2-a": {"c1": "shipped", "c2": "withheld:V2", "c3": "reworded"}},
+        recorded={"hd2-a": "a" * 64, "bg3-b": "b" * 64},
+        ndcg_at_10=0.87,
+        recall_at_20=0.36,
+        macro_f1=0.614,
+    )
+    return replace(base, **changes)  # type: ignore[arg-type]

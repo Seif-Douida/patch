@@ -82,6 +82,9 @@ class LabSettings(BaseSettings):
     # A self-hosted, OpenAI-style teacher server (ADR-020): its /v1 address and key, not committed.
     llm_server_url: str | None = None
     llm_server_key: SecretStr | None = None
+    # Phase 6: the eval bundle's AES-256-GCM key, base64 (`patchpulse-evals keygen`; the
+    # GitHub secret EVAL_BUNDLE_KEY holds the same). Never printed or logged.
+    eval_bundle_key: SecretStr | None = None
     # DagsHub's hosted MLflow (design D7).
     mlflow_tracking_uri: str | None = Field(default=None, validation_alias="MLFLOW_TRACKING_URI")
     mlflow_tracking_username: str | None = Field(

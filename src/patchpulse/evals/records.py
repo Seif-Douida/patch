@@ -25,7 +25,9 @@ RUNS_DIR = "runs"
 
 
 class _Frozen(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # A run that no longer fits (a later schema change) must fail without echoing its text:
+    # the smoke's errors reach CI's public log. This hides the nested models' inputs too.
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
 class StoredCall(_Frozen):

@@ -1,0 +1,211 @@
+name: eval-gate
+
+# Phase 6 (design D11, spec §11.7 and §13): every PR that touches what the evals measure replays the
+# pinned eval bundle and is compared with main's newest baseline; a push to main records that
+# baseline. It never calls a model, Azure or the Qdrant cluster: the bundle holds every recorded
+# answer, and a throwaway Qdrant container holds the retrieval pool. The only secret is the
+# bundle's key. Without a relevant change, a pinned bundle or the key (a fork's PR), it passes
+# without running, so a required check never waits.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: eval-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  QDRANT_IMAGE: qdrant/qdrant:v1.19.2
+
+jobs:
+  eval-gate:
+    name: eval-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Relevant changes
+        id: relevant
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pattern='^(src/|config/|evals/|models/|pyproject\.toml$|uv\.lock$|\.github/workflows/eval-gate\.yml$)'
+          if git diff --name-only "origin/$BASE_REF...HEAD" | grep -Eq "$pattern"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No change the evals measure: the gate passes without running."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pinned bundle
+        id: pin
+        if: steps.relevant.outputs.run == 'true'
+        run: |
+          version=$(sed -n '/^bundle:/,/^[^ ]/s/^  version: *\([0-9][0-9]*\) *$/\1/p' evals/thresholds.yaml)
+          if [ -z "$version" ]; then
+            echo "::notice::No eval bundle is pinned (evals/thresholds.yaml): the gate passes without running."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Bundle key
+        id: key
+        if: steps.pin.outputs.run == 'true'
+        env:
+          HAS_KEY: ${{ secrets.EVAL_BUNDLE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::notice::No EVAL_BUNDLE_KEY (a fork's PR can't read it): the gate passes without running."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        if: steps.key.outputs.run == 'true'
+        with:
+          version: "0.12.19"
+          enable-cache: true
+
+      # mssql-python's documented Linux requirements, as in ci.yml (the package imports them).
+      - name: Install SQL driver libraries
+        if: steps.key.outputs.run == 'true'
+        run: sudo apt-get install -y --no-install-recommends libltdl7 libkrb5-3 libgssapi-krb5-2
+
+      - if: steps.key.outputs.run == 'true'
+        run: uv sync --locked
+
+      - name: Start Qdrant
+        if: steps.key.outputs.run == 'true'
+        run: |
+          docker run -d --name qdrant -p 6333:6333 -p 6334:6334 "$QDRANT_IMAGE"
+          for _ in $(seq 1 30); do
+            if curl -fs http://localhost:6333/readyz > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs qdrant | tail -20
+          exit 1
+
+      # The release asset the pin names; `smoke` refuses it unless its SHA-256 is the pinned one.
+      - name: Download the eval bundle
+        if: steps.key.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pin.outputs.version }}
+        run: >-
+          gh release download "eval-bundle-v$VERSION" --repo "$GITHUB_REPOSITORY"
+          --pattern "eval-bundle-v$VERSION.bin" --dir build/evals
+
+      # As deploy.yml does, but from the repository variable: a PR can't read the deploy's
+      # environment. DagsHub serves the public repo's models without a token.
+      - name: Download the champion model
+        if: steps.key.outputs.run == 'true'
+        env:
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+        run: uv run --locked patchpulse-ml champion download --to build/champion
+
+      - name: Smoke
+        if: steps.key.outputs.run == 'true'
+        env:
+          PP_EVAL_BUNDLE_KEY: ${{ secrets.EVAL_BUNDLE_KEY }}
+          VERSION: ${{ steps.pin.outputs.version }}
+        run: >-
+          uv run --locked patchpulse-evals smoke --bundle "build/evals/eval-bundle-v$VERSION.bin"
+          --out build/evals/metrics.json --champion build/champion
+
+      # Numbers, case and claim ids only.
+      - name: Keep main's baseline
+        if: steps.key.outputs.run == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: eval-baseline
+          path: build/evals/metrics.json
+          retention-days: 90
+          if-no-files-found: error
+
+      # The newest of main's runs (a push or a manual one) that kept a baseline. Once the base
+      # branch pins a bundle, a missing baseline fails the check: it expires after 90 days, and an
+      # expired one must never turn the gate off.
+      - name: Main's baseline
+        if: steps.key.outputs.run == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          base_pin=$(git show "origin/$BASE_REF:evals/thresholds.yaml" 2>/dev/null \
+            | sed -n '/^bundle:/,/^[^ ]/s/^  version: *\([0-9][0-9]*\) *$/\1/p' || true)
+          found=""
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow eval-gate.yml --branch main \
+            --status success --limit 20 --json databaseId,event \
+            --jq '.[] | select(.event == "push" or .event == "workflow_dispatch") | .databaseId')
+          for run_id in $runs; do
+            if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name eval-baseline \
+                --dir build/evals/base 2> /dev/null; then
+              found=$run_id
+              break
+            fi
+          done
+          if [ -n "$found" ]; then
+            echo "Baseline from main's run $found."
+          elif [ -n "$base_pin" ]; then
+            echo "::error::$BASE_REF pins eval bundle v$base_pin but no baseline was found (expired, or main's run hasn't finished): run \`gh workflow run eval-gate.yml --ref main\`, then re-run this check."
+            exit 1
+          else
+            echo "::notice::No baseline from main yet: the gate reports without gating."
+          fi
+
+      - name: Gate
+        id: gate
+        if: steps.key.outputs.run == 'true' && github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          base=()
+          if [ -f build/evals/base/metrics.json ]; then
+            base=(--base build/evals/base/metrics.json)
+          fi
+          uv run --locked patchpulse-evals gate --pr build/evals/metrics.json "${base[@]}" \
+            --comment build/evals/comment.md
+
+      - name: Comment on the PR
+        if: steps.key.outputs.run == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ ! -f build/evals/comment.md ]; then
+            echo "::warning::The gate wrote no comment."
+            exit 0
+          fi
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --edit-last --body-file build/evals/comment.md \
+            || gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file build/evals/comment.md
+
+      - name: Fail on a breach
+        if: steps.key.outputs.run == 'true' && github.event_name == 'pull_request' && steps.gate.outcome == 'failure'
+        run: |
+          echo "::error::The eval gate failed: see the PR comment."
+          exit 1

@@ -3,11 +3,13 @@ freezing the eval datasets, and refusing a graded run on unfrozen ones."""
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
 import pytest
 from agent_fixtures import DATA_VERSION, make_bundle
+from eval_fixtures import smoke_metrics
 
 from patchpulse.agent.bundle import BUNDLE_FILE, REPORTS_FILE, dump_bundle
 from patchpulse.evals.cli import main
@@ -84,22 +86,110 @@ def test_the_main_arm_needs_frozen_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_QDRANT_URL", "http://localhost:1")  # a search is configured
     frozen_files(tmp_path)
 
-    code = main(["run", "--arm", "main"])
+    code = main(["run", "--arm", "main", "--encoder-dir", str(tmp_path)])
 
     assert code == 2
     assert "freeze" in capsys.readouterr().err
+
+
+KEY = base64.b64encode(b"k" * 32).decode()  # a low-entropy test key
+
+
+def test_keygen_prints_a_new_key(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["keygen"])
+
+    assert code == 0
+    assert len(base64.b64decode(capsys.readouterr().out.strip(), validate=True)) == 32
+
+
+def test_the_bundle_command_needs_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PP_EVAL_BUNDLE_KEY", raising=False)
+
+    code = main(["bundle", "--version", "1"])
+
+    assert code == 2
+    error = capsys.readouterr().err
+    assert "PP_EVAL_BUNDLE_KEY" in error
+    assert "keygen" in error
+
+
+def test_a_pinned_bundle_version_is_never_rebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_EVAL_BUNDLE_KEY", KEY)
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "thresholds.yaml").write_text(
+        f"bundle:\n  version: 1\n  sha256: {'a' * 64}\n", encoding="utf-8"
+    )
+
+    code = main(["bundle", "--version", "1"])
+
+    assert code == 2
+    assert "build v2" in capsys.readouterr().err
+
+
+def test_smoke_needs_a_pinned_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_EVAL_BUNDLE_KEY", KEY)
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "thresholds.yaml").write_text("bundle: null\n", encoding="utf-8")
+
+    code = main(["smoke", "--bundle", "eval-bundle-v1.bin", "--out", "metrics.json"])
+
+    assert code == 2
+    assert "no eval bundle is pinned" in capsys.readouterr().err
+
+
+def test_the_gate_command_fails_on_a_breach_after_writing_the_comment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base, worse, comment = tmp_path / "base.json", tmp_path / "pr.json", tmp_path / "comment.md"
+    base.write_text(json.dumps(smoke_metrics().to_json()), encoding="utf-8")
+    worse.write_text(json.dumps(smoke_metrics(root_cause_correct=10).to_json()), encoding="utf-8")
+
+    failed = main(["gate", "--pr", str(worse), "--base", str(base), "--comment", str(comment)])
+    failed_comment = comment.read_text(encoding="utf-8")
+    alone = main(["gate", "--pr", str(worse), "--comment", str(comment)])
+
+    assert failed == 1
+    assert failed_comment.startswith("## Eval gate: failed")
+    assert alone == 0
+    assert "no baseline yet" in comment.read_text(encoding="utf-8")
+    assert "failed" in capsys.readouterr().out
+
+
+def test_a_live_run_needs_review_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run without search cites no reviews, and its cases couldn't replay (Final review I2)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_GEMINI_API_KEY", "g" * 39)  # a low-entropy test key
+    monkeypatch.delenv("PP_QDRANT_URL", raising=False)
+
+    code = main(["run", "--arm", "a2"])
+
+    assert code == 2
+    assert "review search" in capsys.readouterr().err
 
 
 def test_the_injection_arm_needs_the_main_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PP_QDRANT_URL", "http://localhost:1")  # a search is configured
     frozen_files(tmp_path)
     freeze()
 
-    code = main(["run", "--arm", "injection"])
+    code = main(["run", "--arm", "injection", "--encoder-dir", str(tmp_path)])
 
     assert code == 2
     assert "run --arm main" in capsys.readouterr().err

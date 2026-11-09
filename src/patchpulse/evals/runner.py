@@ -6,6 +6,11 @@ where it stopped, and the cache answers every prompt it already holds (fill mode
 interrupted by the quota or an outage is never saved: its answers would be a basic report or a
 refusal that only the outage wrote. In replay mode nothing is asked; what the cache can't answer
 is named in the case's misses.
+
+A case with misses is never saved, so no metric can count it. A live case is replayed offline
+from the cache before it's saved: a model answer the router couldn't use (cut off, refused) or a
+tool call that failed is never cached, so such a case could never run again from the bundle. It
+is named instead, and the next run asks for it again.
 """
 
 from __future__ import annotations
@@ -63,6 +68,47 @@ def make_router(
     return ModelRouter(list(arm.chain), clients, cache, clock=clock)
 
 
+def case_deps(
+    case: Case,
+    arm: Arm,
+    *,
+    bundle: Bundle,
+    router: ModelRouter,
+    cache: ReplayCache,
+    search: ReviewSearch | None,
+    steam: SteamHttp | None,
+) -> AgentDeps:
+    """What one case's run reads: the arm's hooks, and the cache (wrapped for an injection case)
+    for the tools that leave the bundle."""
+    return AgentDeps(
+        bundle=bundle,
+        router=router,
+        search=search,
+        steam=steam,
+        external=case.wrap(cache) if case.wrap is not None else cache,
+        search_mode=arm.search_mode,
+        causal_tool=arm.causal_tool,
+    )
+
+
+def replay_misses(
+    case: Case,
+    arm: Arm,
+    *,
+    bundle: Bundle,
+    router: ModelRouter,
+    cache: ReplayCache,
+) -> list[str]:
+    """What a replay of the case from the cache alone would miss (no model, search or Steam)."""
+    offline = ReplayCache(cache.path, "replay")
+    replayer = ModelRouter(router.chain, {}, offline, clock=router.clock)
+    deps = case_deps(
+        case, arm, bundle=bundle, router=replayer, cache=offline, search=None, steam=None
+    )
+    run_recorded(ReportRequest.for_question(case.question, appid=case.appid), deps)
+    return list(dict.fromkeys(offline.misses))
+
+
 def _day_key(day: date) -> int:
     return day.year * 10_000 + day.month * 100 + day.day
 
@@ -112,16 +158,12 @@ def run_arm(
         if path.exists():
             already += 1
             continue
-        deps = AgentDeps(
-            bundle=bundle,
-            router=router,
-            search=search,
-            steam=steam,
-            external=case.wrap(cache) if case.wrap is not None else cache,
-            search_mode=arm.search_mode,
-            causal_tool=arm.causal_tool,
-        )
         while True:
+            # Fresh hooks on every attempt: an injection case plants its payload in the attempt's
+            # first search, and a retry after an outage is a new first search.
+            deps = case_deps(
+                case, arm, bundle=bundle, router=router, cache=cache, search=search, steam=steam
+            )
             cache.misses.clear()
             outages = router.outages
             record = run_recorded(ReportRequest.for_question(case.question, appid=case.appid), deps)
@@ -142,17 +184,20 @@ def run_arm(
                         case.case_id, wait)  # fmt: skip
             sleep(wait)
         outage_since = None
-        misses = list(cache.misses)
+        misses = list(dict.fromkeys(cache.misses))
+        if not misses and cache.mode != "replay":
+            misses = replay_misses(case, arm, bundle=bundle, router=router, cache=cache)
+        if misses:
+            missed[case.case_id] = misses  # never saved: the next run asks again
+            continue
         stored = StoredCase.from_record(
             record,
             case=case.case_id,
             arm=arm.name,
             data_version=bundle.data_version,
-            misses=misses,
+            misses=[],
             indexed_reviews=indexed_reviews(search, case.appid, record.window, bundle.data_version),
         )
         save_case(stored, path)
         recorded += 1
-        if misses:
-            missed[case.case_id] = misses
     return ArmOutcome(recorded, already, missed, None)
