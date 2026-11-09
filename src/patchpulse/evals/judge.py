@@ -115,9 +115,20 @@ def _parent(path: str) -> str:
     return path[:cut] if cut > 0 else ""
 
 
-def _figure(ref: EvidenceRef, calls: Mapping[str, StoredCall]) -> str:
-    """The cited value with what names it: the tool, its arguments (the periods), the path, and
-    the object holding the value, whose other fields say what it measures."""
+def _periods(stored: StoredCase) -> dict[str, Any]:
+    """The report's window and baseline, from the core call that takes both (aspect_breakdown):
+    a daily series' bare dates don't say which period they are."""
+    for call in stored.trace.calls:
+        if "window" in call.args and "baseline_window" in call.args:
+            return {"window": call.args["window"], "baseline": call.args["baseline_window"]}
+    if stored.window is not None:
+        return {"window": [day.isoformat() for day in stored.window]}
+    return {}
+
+
+def _figure(ref: EvidenceRef, calls: Mapping[str, StoredCall], periods: Mapping[str, Any]) -> str:
+    """The cited value with what names it: the tool, its arguments, the path, the object holding
+    the value (its other fields say what it measures), and the report's periods."""
     call = calls.get(ref.call_id)
     if call is None:
         return ""
@@ -132,6 +143,7 @@ def _figure(ref: EvidenceRef, calls: Mapping[str, StoredCall]) -> str:
         "path": ref.json_path,
         "value": value,
         "holder": holder,
+        "periods": dict(periods),
     }
     return json.dumps(shown, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -153,7 +165,7 @@ def _items(stored: StoredCase, claim: Claim, shipped: bool) -> list[JudgeItem]:
         items.append(JudgeItem(f"{prefix}/r{review_id}", "citation", claim.text, evidence, shipped))
     if claim.evidence is not None:
         calls = {c.call_id: c for c in stored.trace.calls}
-        evidence = _figure(claim.evidence, calls)
+        evidence = _figure(claim.evidence, calls, _periods(stored))
         items.append(JudgeItem(f"{prefix}/figure", "figure", claim.text, evidence, shipped))
     return items
 

@@ -5,6 +5,7 @@ MLflow with the report as the one artifact."""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import mlflow
@@ -15,8 +16,10 @@ from eval_fixtures import report as make_report
 from patchpulse.agent.graph import RunRecord
 from patchpulse.agent.report import Draft, WithheldClaim
 from patchpulse.agent.tools import Trace
+from patchpulse.evals.injection import InjectionOutcome, injection_metrics
 from patchpulse.evals.records import StoredCase
 from patchpulse.evals.report import (
+    EvalResults,
     RunInfo,
     build_results,
     log_eval_run,
@@ -85,6 +88,20 @@ def test_the_report_states_the_interval_caveat_and_scoring_version() -> None:
     assert "| Cited reviews supporting their claim (judge) | 0.0% |" in markdown
     assert "| Verifier on | 100.0% |" in markdown
     assert "| a2 | citation_support | - |" in markdown
+
+
+def test_the_injection_rates_are_called_lower_bounds() -> None:
+    """Success is matched by fixed words: a paraphrased or translated success isn't counted
+    (review of the set, 9 Nov)."""
+    outcome = InjectionOutcome("inj-01", "instruction", exposed=True, before=False, after=False)
+    base = results()
+    assert isinstance(base, EvalResults)
+    built = replace(base, injection=injection_metrics([outcome]))
+
+    section = render_report(built).split("## Injection set")[1].split("## ")[0]
+
+    assert "lower bounds" in section
+    assert "| cited_after_rate |" in section
 
 
 def test_log_eval_run_logs_metrics_and_the_report(
