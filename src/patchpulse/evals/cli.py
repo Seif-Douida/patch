@@ -470,6 +470,7 @@ def _report(*, date: str | None, to_mlflow: bool) -> int:
         verdicts=verdicts,
         injection=injection,
         judge=None if agreement is None else agreement_estimates(agreement),
+        judge_passed=None if agreement is None else agreement.passed,
     )
     markdown, document = write_report(results)
     print(f"Wrote {markdown} and {document}.")

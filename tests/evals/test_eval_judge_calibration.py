@@ -13,6 +13,7 @@ from patchpulse.evals.judge import (
     KAPPA_PASS,
     JudgeItem,
     JudgeLabel,
+    agreement_estimates,
     calibration_sample,
     judge_agreement,
     render_judge_agreement,
@@ -94,10 +95,59 @@ def test_kappa_report_per_question_with_the_pass_rule() -> None:
     assert not bad.passed
     shown = render_judge_agreement(good), render_judge_agreement(bad)
     assert "at least 0.6 on each question" in shown[0]
-    assert "| Citation support | 1.00 |" in shown[0]
+    assert "| Citation support | 100.0% |" in shown[0]
+    assert "| 1.00 |" in shown[0]
     assert "Passed" in shown[0]
-    assert "| Citation support | 0.50 |" in shown[1]
+    assert "| Citation support | 75.0% |" in shown[1]
+    assert "| 0.50 |" in shown[1]
     assert "Failed" in shown[1]
+
+
+def one_sided() -> tuple[dict[str, JudgeLabel], dict[str, bool]]:
+    """Seif finds nearly every item supported, as on 16 Nov 2026: kappa is near 0 whatever the
+    judge answers, and for figures it has nothing to work with."""
+    citations = [(True, True)] * 26 + [(True, False)] * 4 + [(False, True)]
+    figures = [(True, True)] * 14 + [(True, False)] * 2
+    labels_c, verdicts_c = labels_for(citations, "citation")
+    labels_f, verdicts_f = labels_for(figures, "figure", start=100)
+    return labels_c | labels_f, verdicts_c | verdicts_f
+
+
+def test_a_one_sided_sample_reports_the_raw_agreement() -> None:
+    """Seif's ruling (16 Nov 2026): the raw agreement is the figure reported; the missed kappa
+    bar stays stated, and the judge's scores are called uncalibrated."""
+    agreement = judge_agreement(*one_sided())
+
+    citation, figure = agreement.rows["citation"], agreement.rows["figure"]
+    shown = render_judge_agreement(agreement)
+
+    assert not agreement.passed
+    assert citation.agreement == pytest.approx(26 / 31)
+    assert citation.agreement_lo is not None
+    assert citation.agreement_hi is not None
+    assert citation.agreement_lo < 26 / 31 < citation.agreement_hi
+    assert (citation.seif_supported, citation.judge_supported, citation.n) == (30, 27, 31)
+    assert (figure.seif_supported, figure.judge_supported, figure.n) == (16, 14, 16)
+    assert "| Citation support | 83.9% |" in shown
+    assert "| 30 of 31 | 27 of 31 |" in shown
+    assert "| Figure faithfulness | 87.5% |" in shown
+    assert "Failed" in shown
+    assert "uncalibrated" in shown
+    assert "the rubric is revised" not in shown
+    assert shown.index("Agreement") < shown.index("Kappa")  # the raw agreement leads
+
+
+def test_the_report_gets_the_agreement_before_the_kappas() -> None:
+    estimates = agreement_estimates(judge_agreement(*one_sided()))
+
+    assert list(estimates)[:3] == [
+        "citation.agreement_rate", "figure.agreement_rate", "overall.agreement_rate",
+    ]  # fmt: skip
+    assert estimates["citation.agreement_rate"].value == pytest.approx(26 / 31)
+    assert estimates["citation.agreement_rate"].n == 31
+    assert estimates["overall.seif_supported_rate"].value == pytest.approx(46 / 47)
+    assert estimates["overall.judge_supported_rate"].value == pytest.approx(41 / 47)
+    assert estimates["kappa.citation"].value is not None
 
 
 def test_unsure_labels_are_left_out() -> None:

@@ -372,6 +372,10 @@ class KappaRow:
     agreement: float | None  # the share of items where Seif and the judge agree
     n: int  # items compared: labeled, sure and judged
     unsure: int  # left out
+    agreement_lo: float | None = None  # its bootstrap interval
+    agreement_hi: float | None = None
+    seif_supported: int = 0  # of n: kappa says little when one answer dominates
+    judge_supported: int = 0
 
 
 @dataclass(frozen=True)
@@ -397,6 +401,7 @@ def _kappa_row(pairs: Sequence[tuple[bool, bool]], unsure: int) -> KappaRow:
     if not np.isnan(finite).all():
         low, high = np.nanpercentile(finite, [2.5, 97.5])
         lo, hi = float(low), float(high)
+    agree_lo, agree_hi = np.percentile((seif[draws] == judged[draws]).mean(axis=1), [2.5, 97.5])
     return KappaRow(
         kappa=cohen_kappa(seif, judged),
         lo=lo,
@@ -404,6 +409,10 @@ def _kappa_row(pairs: Sequence[tuple[bool, bool]], unsure: int) -> KappaRow:
         agreement=float(np.mean(seif == judged)),
         n=len(pairs),
         unsure=unsure,
+        agreement_lo=float(agree_lo),
+        agreement_hi=float(agree_hi),
+        seif_supported=int(seif.sum()),
+        judge_supported=int(judged.sum()),
     )
 
 
@@ -425,11 +434,23 @@ def judge_agreement(
 
 
 def agreement_estimates(agreement: JudgeAgreement) -> dict[str, Estimate]:
-    """The kappas as the eval report shows them."""
-    return {
-        f"kappa.{name}": Estimate(row.kappa, row.lo, row.hi, row.n)
-        for name, row in agreement.rows.items()
+    """What the eval report shows: the raw agreement first (the figure reported: Seif's ruling,
+    16 Nov 2026), each side's share of "supported", then the kappas."""
+    rows = agreement.rows
+    estimates = {
+        f"{name}.agreement_rate": Estimate(row.agreement, row.agreement_lo, row.agreement_hi, row.n)
+        for name, row in rows.items()
     }
+    for name, row in rows.items():
+        if row.n:
+            estimates[f"{name}.seif_supported_rate"] = Estimate(row.seif_supported / row.n, n=row.n)
+            estimates[f"{name}.judge_supported_rate"] = Estimate(
+                row.judge_supported / row.n, n=row.n
+            )
+    estimates |= {
+        f"kappa.{name}": Estimate(row.kappa, row.lo, row.hi, row.n) for name, row in rows.items()
+    }
+    return estimates
 
 
 def _two(value: float | None) -> str:
@@ -445,21 +466,28 @@ def render_judge_agreement(agreement: JudgeAgreement) -> str:
         "seeing the judge's verdicts, the arm or whether the claim shipped. Unsure labels are "
         "left out.",
         "",
-        "| Question | Kappa | 95% interval | Agreement | Items | Unsure (left out) |",
-        "|---|---|---|---|---|---|",
+        "| Question | Agreement | 95% interval | Seif: supported | Judge: supported | Kappa | "
+        "Kappa's 95% interval | Unsure (left out) |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for name, row in agreement.rows.items():
         interval = "-" if row.lo is None or row.hi is None else f"{row.lo:.2f} to {row.hi:.2f}"
         share = "-" if row.agreement is None else f"{100 * row.agreement:.1f}%"
+        around = (
+            "-"
+            if row.agreement_lo is None or row.agreement_hi is None
+            else f"{100 * row.agreement_lo:.1f}% to {100 * row.agreement_hi:.1f}%"
+        )
         lines.append(
-            f"| {QUESTION_NAMES[name]} | {_two(row.kappa)} | {interval} | {share} | {row.n} | "
-            f"{row.unsure} |"
+            f"| {QUESTION_NAMES[name]} | {share} | {around} | {row.seif_supported} of {row.n} | "
+            f"{row.judge_supported} of {row.n} | {_two(row.kappa)} | {interval} | {row.unsure} |"
         )
     verdict = (
         "Passed."
         if agreement.passed
-        else "Failed: the rubric is revised and the items judged again before the judge counts "
-        "anywhere, and the eval report says so."
+        else "Failed: the judge's scores are reported as uncalibrated, beside the raw agreement "
+        "above. Kappa measures agreement beyond chance, so it stays near 0 when one answer "
+        "dominates, whatever the judge answers. The rubric isn't revised on these numbers."
     )
     lines += [
         "",

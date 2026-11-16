@@ -17,6 +17,7 @@ from patchpulse.agent.graph import RunRecord
 from patchpulse.agent.report import Draft, WithheldClaim
 from patchpulse.agent.tools import Trace
 from patchpulse.evals.injection import InjectionOutcome, injection_metrics
+from patchpulse.evals.metrics import Estimate
 from patchpulse.evals.records import StoredCase
 from patchpulse.evals.report import (
     EvalResults,
@@ -122,3 +123,31 @@ def test_log_eval_run_logs_metrics_and_the_report(
     assert logged.data.metrics["root_cause_accuracy"] == 1.0
     artifacts = [a.path for a in mlflow.MlflowClient().list_artifacts(run_id)]
     assert artifacts == ["2026-11-15.md"]
+
+
+def test_a_failed_judge_calibration_is_stated_with_the_raw_agreement() -> None:
+    """Seif's ruling (16 Nov 2026): report the raw agreement; the missed kappa bar is still
+    stated and the judge's scores are called uncalibrated."""
+    judge = {
+        "citation.agreement_rate": Estimate(26 / 31, 0.71, 0.97, 31),
+        "overall.agreement_rate": Estimate(40 / 47, 0.74, 0.94, 47),
+        "overall.seif_supported_rate": Estimate(46 / 47, None, None, 47),
+        "overall.judge_supported_rate": Estimate(41 / 47, None, None, 47),
+        "kappa.citation": Estimate(-0.05, -0.12, 0.0, 31),
+    }
+    base = results()
+    assert isinstance(base, EvalResults)
+
+    failed = render_report(replace(base, judge=judge, judge_passed=False))
+    passed = render_report(replace(base, judge=judge, judge_passed=True))
+    section = failed.split("## Judge agreement with Seif")[1].split("## ")[0]
+
+    assert "| citation.agreement_rate | 83.9% | 71.0% to 97.0% | 31 |" in section
+    assert "| kappa.citation | -0.05 |" in section
+    assert "kappa of at least 0.6 on each question, fixed before labeling, was not met" in section
+    assert "uncalibrated" in section
+    assert 'Seif answered "supported" on 46 of 47 compared items, the judge on 41' in section
+    assert "(uncalibrated: see Judge agreement with Seif)" in failed.split("## Headline")[0]
+    assert "uncalibrated" not in passed
+    assert "was met" in passed
+    assert "uncalibrated" not in render_report(base)
