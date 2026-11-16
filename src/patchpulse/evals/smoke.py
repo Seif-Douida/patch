@@ -90,6 +90,9 @@ class SmokeMetrics:
     ndcg_at_10: float | None
     recall_at_20: float | None
     macro_f1: float | None
+    # The SHA-256 of the evals/frozen.sha256 the checkout scored with: incidents, injection
+    # markers, rubric and scoring rule. The gate fails a PR whose freeze differs from main's.
+    frozen: str | None = None
     schema: int = SMOKE_SCHEMA
 
     def to_json(self) -> dict[str, Any]:
@@ -180,6 +183,7 @@ def run_smoke(
     bundle_dir: Path,
     *,
     commit: str,
+    frozen: str | None = None,
     qdrant_url: str = LOCAL_QDRANT,
     champion_dir: Path = CHAMPION_DIR,
     incidents: Sequence[Incident] | None = None,
@@ -188,7 +192,8 @@ def run_smoke(
     classification: Callable[[Path, Path], ClassificationScores] = gold_suite,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> SmokeMetrics:
-    """Every check of the opened bundle in `bundle_dir`."""
+    """Every check of the opened bundle in `bundle_dir`; `frozen` is the freeze's digest the
+    caller checked the datasets against (`require_frozen`)."""
     manifest = json.loads((bundle_dir / MANIFEST).read_text(encoding="utf-8"))
     bundle = load_bundle((bundle_dir / DATA_FILE).read_bytes())
     golden = list(incidents) if incidents is not None else load_incidents()
@@ -240,4 +245,5 @@ def run_smoke(
         ndcg_at_10=pool.ndcg_at_10,
         recall_at_20=pool.recall_at_20,
         macro_f1=gold.macro_f1,
+        frozen=frozen,
     )

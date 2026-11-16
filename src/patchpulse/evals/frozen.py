@@ -44,13 +44,15 @@ def freeze() -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def require_frozen() -> None:
-    """Raises naming every file that changed, appeared or disappeared since the freeze."""
+def require_frozen() -> str:
+    """The freeze's digest (what `freeze` returned: the SHA-256 of FROZEN_FILE). Raises naming
+    every file that changed, appeared or disappeared since the freeze."""
     if not FROZEN_FILE.is_file():
         raise ValueError(f"the eval datasets aren't frozen: run `patchpulse-evals freeze` first "
                          f"({FROZEN_FILE} is missing)")  # fmt: skip
+    raw = FROZEN_FILE.read_bytes()
     frozen: dict[str, str] = {}
-    for line in FROZEN_FILE.read_text(encoding="utf-8").splitlines():
+    for line in raw.decode("utf-8").splitlines():
         digest, _, name = line.partition("  ")
         frozen[name] = digest
     current = _current()
@@ -63,3 +65,4 @@ def require_frozen() -> None:
             + ", ".join(changed)
             + "; changing them is a ledgered ruling, a new freeze and a re-run"
         )
+    return hashlib.sha256(raw).hexdigest()

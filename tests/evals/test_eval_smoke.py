@@ -102,12 +102,14 @@ def test_smoke_replays_a_recorded_bundle(tmp_path: Path) -> None:
     result = run_smoke(
         folder,
         commit="def5678",
+        frozen="d" * 64,
         incidents=INCIDENTS,
         injection=[INJECTED],
         retrieval=lambda _bundle, _url: RetrievalScores(0.9, 0.5, {}),
         classification=lambda _bundle, _champion: ClassificationScores(0.6, 0.7, 0.5, 450),
     )
 
+    assert result.frozen == "d" * 64  # the datasets it scored with (Final review M1)
     assert result.unreplayed == {}
     assert result.predicted == {i.id: score_case(i, main[i.id].record()).predicted
                                 for i in INCIDENTS}  # fmt: skip

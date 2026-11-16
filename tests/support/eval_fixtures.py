@@ -141,5 +141,6 @@ def smoke_metrics(**changes: object) -> SmokeMetrics:
         ndcg_at_10=0.87,
         recall_at_20=0.36,
         macro_f1=0.614,
+        frozen="f" * 64,
     )
     return replace(base, **changes)  # type: ignore[arg-type]

@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ from patchpulse.agent.llm_cache import ReplayCache
 from patchpulse.agent.report import Claim, EvidenceRef, WithheldClaim
 from patchpulse.agent.router import ModelRouter
 from patchpulse.agent.search import SNIPPET_CHARS
-from patchpulse.agent.tools import Trace
+from patchpulse.agent.tools import ToolCall, Trace
 from patchpulse.config import LabSettings
 from patchpulse.evals.judge import (
     JUDGE_SCHEMA,
@@ -115,6 +115,38 @@ def test_items_cover_cited_reviews_and_cited_figures() -> None:
     assert shown["value"] == 2.0
     assert shown["holder"] == {"change": 2.0}
     assert all(i.shipped for i in items)
+
+
+def test_a_figure_names_the_reports_window_and_baseline() -> None:
+    """A daily series carries only its dates: the report's periods tell the judge which one it
+    is (review of the rubric, 9 Nov)."""
+    periods = {
+        "window": ["2026-03-01", "2026-03-07"],
+        "baseline_window": ["2026-02-01", "2026-02-28"],
+    }
+    aspects = ToolCall("r.1", "aspect_breakdown", periods, {"aspects": {}})
+    series = ToolCall("r.2", "sentiment_timeseries", {"start": "2026-03-01", "end": "2026-03-07"},
+                      {"total": {"reviews": 200, "share": 70.0}})  # fmt: skip
+    level = claim("c1", "The positive share was 70% in the window.").model_copy(
+        update={"value": 70.0, "unit": "%",
+                "evidence": EvidenceRef(call_id="r.2", json_path="total.share")}
+    )  # fmt: skip
+    result = make_report(hypotheses(("H1",)), claims=(level,))
+    window = (date(2026, 3, 1), date(2026, 3, 7))
+    record = RunRecord(result, window, result.hypotheses, None, None,
+                       Trace(calls=[aspects, series]), False)  # fmt: skip
+    case = StoredCase.from_record(
+        record, case="p0", arm="main", data_version=60, misses=[], indexed_reviews=None
+    )
+
+    (item,) = judge_items(case)
+
+    shown = json.loads(item.evidence)
+    assert shown["periods"] == {
+        "window": ["2026-03-01", "2026-03-07"],
+        "baseline": ["2026-02-01", "2026-02-28"],
+    }
+    assert shown["holder"] == {"reviews": 200, "share": 70.0}
 
 
 def test_withheld_claims_are_judged_and_reworded_ones_on_their_shipped_text() -> None:

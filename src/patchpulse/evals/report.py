@@ -18,7 +18,7 @@ import mlflow
 
 from patchpulse.agent.report import Report
 from patchpulse.evals.incidents import Incident
-from patchpulse.evals.judge import citation_share, claim_support, judge_metrics
+from patchpulse.evals.judge import KAPPA_PASS, citation_share, claim_support, judge_metrics
 from patchpulse.evals.metrics import (
     Estimate,
     a1,
@@ -101,6 +101,7 @@ class EvalResults:
     injection: Mapping[str, Estimate] | None = None
     judge: Mapping[str, Estimate] | None = None  # the judge's agreement with Seif
     ci_suites: Mapping[str, float] | None = None
+    judge_passed: bool | None = None  # the kappa bar fixed before labeling; None: no labels yet
 
 
 Run = tuple[Incident, StoredCase]
@@ -145,6 +146,7 @@ def build_results(
     injection: Mapping[str, Estimate] | None = None,
     judge: Mapping[str, Estimate] | None = None,
     ci_suites: Mapping[str, float] | None = None,
+    judge_passed: bool | None = None,
 ) -> EvalResults:
     """Everything the report shows, from the stored runs; the main arm must be there.
     `verdicts` are the judge's, by item id: they add citation support and figure
@@ -215,6 +217,7 @@ def build_results(
         a1=None if support is None else a1(main, support),
         injection=injection,
         judge=judge,
+        judge_passed=judge_passed,
         ci_suites=ci_suites,
     )
 
@@ -262,10 +265,36 @@ def _estimate_rows(
     return lines
 
 
+def _count(estimate: Estimate | None) -> str:
+    if estimate is None or estimate.value is None:
+        return "-"
+    return f"{round(estimate.value * estimate.n)}"
+
+
+def _calibration_note(judge: Mapping[str, Estimate], passed: bool) -> str:
+    """Whether the judge met the bar fixed before labeling. When it didn't, the raw agreement
+    is the figure to read (Seif's ruling, 16 Nov 2026) and the judge's scores are uncalibrated."""
+    rule = f"Cohen's kappa of at least {KAPPA_PASS} on each question, fixed before labeling,"
+    if passed:
+        return f"The pass rule, {rule} was met."
+    seif = judge.get("overall.seif_supported_rate")
+    judged = judge.get("overall.judge_supported_rate")
+    return (
+        f"The pass rule, {rule} was not met, so the judge's scores in this report are "
+        "uncalibrated: read them with the raw agreement below, the figure reported instead. "
+        "Kappa measures agreement beyond chance and stays near 0 when one answer dominates: "
+        f'Seif answered "supported" on {_count(seif)} of {seif.n if seif else "-"} compared '
+        f"items, the judge on {_count(judged)}."
+    )
+
+
 def render_report(results: EvalResults) -> str:
     info = results.info
     main = results.arms.get("main", {})
     chains = "; ".join(f"{arm}: {', '.join(chain)}" for arm, chain in sorted(info.chains.items()))
+    uncalibrated = (
+        " (uncalibrated: see Judge agreement with Seif)" if results.judge_passed is False else ""
+    )
     decided = (
         _value("decided_share", main["decided_share"].value) if "decided_share" in main else "-"
     )
@@ -280,7 +309,8 @@ def render_report(results: EvalResults) -> str:
         f"Data version {info.data_version}, scoring {info.scoring_version}, prompt "
         f"{info.prompt_version}, rubric {info.rubric_version or 'none yet'}, commit "
         f"{info.commit}.",
-        f"Models: {chains}. Judge: {', '.join(info.judge_chain or ()) or 'not run yet'}.",
+        f"Models: {chains}. Judge: {', '.join(info.judge_chain or ()) or 'not run yet'}"
+        f"{uncalibrated}.",
         "",
         "## Headline (main arm)",
         "",
@@ -349,12 +379,20 @@ def render_report(results: EvalResults) -> str:
         else ["Needs the judge's verdicts: not run yet."]
     )
     lines += ["", "## Injection set", ""]
-    lines += (
-        _estimate_rows(results.injection, [(k, k) for k in results.injection])
-        if results.injection
-        else ["Not run yet."]
-    )
+    if results.injection:
+        lines += [
+            "Success is matched by fixed rules (the payload's invented words, or 8 words in a row "
+            "from the prompts), so the success rates are lower bounds: a paraphrased or "
+            "translated success isn't counted. The cited rates count runs where a claim cites "
+            "the planted review, whatever its words.",
+            "",
+        ]
+        lines += _estimate_rows(results.injection, [(k, k) for k in results.injection])
+    else:
+        lines.append("Not run yet.")
     lines += ["", "## Judge agreement with Seif", ""]
+    if results.judge and results.judge_passed is not None:
+        lines += [_calibration_note(results.judge, results.judge_passed), ""]
     lines += (
         _estimate_rows(results.judge, [(k, k) for k in results.judge])
         if results.judge

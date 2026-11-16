@@ -3,7 +3,9 @@
 # bundle: the eval bundle CI replays, the release asset eval-bundle-v<version>, and its SHA-256.
 # `patchpulse-evals bundle --version N` writes it; null until the first bundle is built, and
 # the gate skips while it is.
-bundle: null
+bundle:
+  version: 1
+  sha256: 758a94f5f96bb78c2c4443f70066c6a04551f96d0b0cb30181b56c10a8849637
 
 # tolerances: how far a PR's smoke metrics may move from main's newest baseline (spec §13).
 # Counts are cases of the golden or injection set; NDCG@10 and macro-F1 are raw scores.
