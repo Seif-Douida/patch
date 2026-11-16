@@ -5,8 +5,9 @@ name: eval-gate
 # baseline. It never calls a model, Azure or the Qdrant cluster: the bundle holds every recorded
 # answer, and a throwaway Qdrant container holds the retrieval pool. The only secret is the
 # bundle's key. Without a relevant change, a pinned bundle or the key (a fork's PR), it passes
-# without running, so a required check never waits; a diff or a pin it can't read fails it. A PR
-# is judged by main's tolerances, and fails if it changes the frozen eval datasets.
+# without running, so a required check never waits; a diff or a pin it can't read fails it, and
+# so does a missing key anywhere but a fork's PR. A PR is judged by main's tolerances, and fails
+# if it changes the frozen eval datasets.
 on:
   pull_request:
   push:
@@ -98,12 +99,18 @@ jobs:
         if: steps.pin.outputs.run == 'true'
         env:
           HAS_KEY: ${{ secrets.EVAL_BUNDLE_KEY != '' }}
+          FROM_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          if [ "$HAS_KEY" != "true" ]; then
+          # Only a fork's PR can't read the secret. Anywhere else a missing key is a broken
+          # setup: skipping green there would turn the gate off without anyone noticing.
+          if [ "$HAS_KEY" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$FROM_FORK" = "true" ]; then
             echo "::notice::No EVAL_BUNDLE_KEY (a fork's PR can't read it): the gate passes without running."
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
-            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::error::A bundle is pinned but EVAL_BUNDLE_KEY isn't readable: add it as a repository secret (Settings, Secrets and variables, Actions), not an environment secret."
+            exit 1
           fi
 
       - name: Start Qdrant

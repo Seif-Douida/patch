@@ -213,3 +213,18 @@ def test_the_gate_judges_by_mains_tolerances() -> None:
     ) in baseline
     assert 'git rev-parse --verify "origin/$BASE_REF"' in baseline  # a missing base fails
     assert "--thresholds build/evals/base-thresholds.yaml" in gate_step
+
+
+def test_a_missing_key_fails_unless_the_pr_comes_from_a_fork() -> None:
+    """Only a fork's PR can't read the secret. On main or a branch PR a missing key is a broken
+    setup and must fail: on 16 Nov 2026 PR #38 and its merge both skipped green without it."""
+    key = step("Bundle key")
+    run = key["run"]
+
+    assert key["env"]["FROM_FORK"] == (
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.head.repo.full_name != github.repository }}"
+    )
+    assert run.index('"$HAS_KEY" = "true"') < run.index('"$FROM_FORK" = "true"')
+    assert run.index("run=false") < run.index("::error::") < run.index("exit 1")
+    assert "repository secret" in run
