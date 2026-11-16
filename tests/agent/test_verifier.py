@@ -211,7 +211,7 @@ def leaves(value: Any) -> list[float]:
     return [abs(value)] if isinstance(value, int | float) and not isinstance(value, bool) else []
 
 
-def test_a_claims_numbers_must_come_from_its_evidence() -> None:
+def test_a_claims_numbers_must_come_from_the_runs_results() -> None:
     run = Run()
     side = run.aspects["aspects"]["performance"]["negative"]
     found = leaves(run.aspects)
@@ -240,8 +240,9 @@ def test_a_claims_numbers_must_come_from_its_evidence() -> None:
 
     checked = run.verify(held, invented_size, invented_levels, another_tools, no_value)
 
-    assert [c.claim_id for c in checked.claims] == ["c1"]
-    assert withheld_rules(checked) == ["V2", "V2", "V2", "V2"]
+    # A number from another tool's result or a quoted claim's count now passes.
+    assert [c.claim_id for c in checked.claims] == ["c1", "c2", "c4", "c5"]
+    assert withheld_rules(checked) == ["V2"]
 
 
 def test_a_claim_stating_a_number_in_words_fails_v2() -> None:

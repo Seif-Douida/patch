@@ -306,22 +306,18 @@ def _leaves(value: Any) -> list[float]:
 
 def _numbers_hold(claim: Claim, call: ToolCall | None, trace: Trace) -> bool:
     """Every number the sentence states is the claim's value (within its tolerance) or, as
-    rounded, a number in this run's results of the cited tool (the window's and the baseline's
-    series are two calls of one tool); a claim without a value states no number. A number in
-    words fails: it can't be checked."""
+    rounded, a number in this run's tool results: a sentence may give a date or a count from
+    another tool than the one it cites, and a quoted claim may give one too. A number in words
+    fails: it can't be checked."""
     if _NUMBER_WORDS.search(claim.text):
         return False
     stated = _stated(claim.text)
     if not stated:
         return True
-    if claim.value is None:
-        return False
     value = claim.value
-    pool = [value]
-    if call is not None:
-        pool += [x for c in trace.calls if c.tool == call.tool for x in _leaves(c.result)]
+    pool = [x for c in trace.calls for x in _leaves(c.result)]
     return all(
-        claim.tolerance.accepts(number, abs(value))
+        (value is not None and claim.tolerance.accepts(number, abs(value)))
         or any(_as_rounded(number, decimals, x) for x in pool)
         for number, decimals in stated
     )
