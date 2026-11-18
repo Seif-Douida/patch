@@ -27,6 +27,33 @@ if TYPE_CHECKING:
     from qdrant_client import QdrantClient
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+GOOGLE_API = "generativelanguage.googleapis.com"
+
+
+@pytest.fixture(autouse=True)
+def no_requests_to_google(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """No test reaches Google's API: a fake client or a mock transport answers instead.
+
+    Found 18 Nov (Phase 7 CI): the runner's reports tests set a fake key, the nightly spot-check
+    then asked Google for real, and its rate limiter waited out a minute per test. A nightly stage
+    turns a failed request into a warning, so a raised error alone would pass unseen: each attempt
+    is recorded and fails the test at teardown.
+    """
+    import httpx2
+
+    attempts: list[str] = []
+    real = httpx2.HTTPTransport.handle_request
+
+    def guarded(self: httpx2.HTTPTransport, request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == GOOGLE_API:
+            attempts.append(f"{request.method} {request.url.path}")
+            raise RuntimeError(f"a test sent a request to {GOOGLE_API}")
+        return real(self, request)
+
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", guarded)
+    yield attempts
+    if attempts:
+        pytest.fail(f"{len(attempts)} request(s) to {GOOGLE_API}, first: {attempts[0]}")
 
 
 def _sa_password() -> str | None:

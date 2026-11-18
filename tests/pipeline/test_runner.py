@@ -924,7 +924,12 @@ def failing_bundle(connection: Connection, *, run_id: int, today: date) -> Bundl
 
 
 def with_gemini(settings: Settings, **changes: Any) -> Settings:
-    return settings.model_copy(update={"gemini_api_key": SecretStr("test-gemini-key"), **changes})
+    """A key for the reports stage. The spot-check and the online evals would ask Google for real
+    with it (and their limiter wait out a minute): they stay off unless a test turns them on."""
+    off = {"spotcheck_budget_minutes": 0, "online_eval_budget_minutes": 0}
+    return settings.model_copy(
+        update={"gemini_api_key": SecretStr("test-gemini-key"), **off, **changes}
+    )
 
 
 def tonight(**counts: int) -> ReportsOutcome:
@@ -1558,7 +1563,8 @@ def test_a_failing_monitoring_stage_is_a_warning_and_the_night_succeeds(
 ) -> None:
     stages = monitoring()
     stages[failing].result = RuntimeError("PP_GEMINI_API_KEY=test-gemini-key broke")
-    result = env.run(settings=with_gemini(env.settings), dbt=ok_dbt, export=stub_export, **stages)
+    settings = with_gemini(env.settings, spotcheck_budget_minutes=4, online_eval_budget_minutes=2)
+    result = env.run(settings=settings, dbt=ok_dbt, export=stub_export, **stages)
 
     assert result.status == "succeeded"
     assert "skipped" in result.stages[failing]
@@ -1587,8 +1593,8 @@ def test_the_reports_stage_record_never_holds_its_runs(env: Env) -> None:
     night = replace(tonight(due=1, written=1), runs=(ScoredRun("p1-7d", record, "t1"),))
     stages = monitoring()
     result = env.run(
-        settings=with_gemini(env.settings), dbt=ok_dbt, export=stub_export,
-        bundle=fixture_bundle, reports=FakeReports([night]), **stages,
+        settings=with_gemini(env.settings, online_eval_budget_minutes=2), dbt=ok_dbt,
+        export=stub_export, bundle=fixture_bundle, reports=FakeReports([night]), **stages,
     )  # fmt: skip
 
     assert "runs" not in result.stages["reports"]
