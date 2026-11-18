@@ -8,6 +8,8 @@
     teacher bakeoff    Label gold dev with each teacher candidate and pick one (reports/aspects/,
                        MLflow). Needs PP_GEMINI_API_KEY and the MLFLOW_TRACKING_* settings.
     silver sample      Draw the ~30k silver reviews and their holdout (data/local/silver/).
+    silver export-labels  Write the silver labels, ids and labels only, to data/silver/labels.csv
+                       for git: the retrain in Azure trains on them (Phase 7).
     teacher label      Label the silver set (or `--set gold`, for the eval report) with the chosen
                        teacher; resumable after a quota stop.
     train s0           Train S0 (TF-IDF + logistic regression) on silver train, tune its thresholds
@@ -81,6 +83,7 @@ from patchpulse.labeling.limits import USAGE_FILE, RequestLimiter
 from patchpulse.labeling.openai_compat import OpenAICompatClient
 from patchpulse.labeling.silver import (
     IDS_FILE,
+    LABELS_FILE,
     SILVER_DIR,
     SILVER_SIZE,
     label_silver,
@@ -92,7 +95,14 @@ from patchpulse.labeling.silver import (
 )
 from patchpulse.labeling.teacher import TextModel, label_reviews, prompt_hash, review_inputs
 from patchpulse.labeling.teachers import ModelConfig, load_model_config
-from patchpulse.models.artifact import MODEL_FILE, Scorer, load_scorer, record_metrics
+from patchpulse.models import monitor_cli
+from patchpulse.models.artifact import (
+    MODEL_FILE,
+    Scorer,
+    load_scorer,
+    new_version,
+    record_metrics,
+)
 from patchpulse.models.champion import (
     PIN_FILE,
     ChampionError,
@@ -138,7 +148,7 @@ from patchpulse.models.s1b import (
 )
 from patchpulse.models.snapshot import explain_pull_error, load_snapshot, pull
 from patchpulse.models.text import clean_texts
-from patchpulse.models.thresholds import cv_predictions
+from patchpulse.models.thresholds import CV_FOLDS, CV_SEED, DevScores, cv_predictions, score_on_dev
 from patchpulse.models.tracking import (
     TrackingError,
     log_ids_hash,
@@ -147,16 +157,11 @@ from patchpulse.models.tracking import (
     tracking_run,
 )
 from patchpulse.models.training import (
-    CV_FOLDS,
-    CV_SEED,
     MODELS_DIR,
-    DevScores,
     TrainingData,
     label_matrix,
     load_training_data,
     log_student,
-    new_version,
-    score_on_dev,
 )
 from patchpulse.retrieval import cli as retrieval_cli
 
@@ -375,6 +380,28 @@ def _silver_sample(settings: LabSettings, *, seed: int, n: int, force: bool) -> 
         len(holdout),
         ids_path,
         mix,
+    )
+    return 0
+
+
+def _silver_export_labels(settings: LabSettings) -> int:
+    """The silver labels for git (Phase 7 design D5): what the retrain in Azure trains on."""
+    # Lazy: retrain_data reaches the pipeline's SQL modules, which the deploy's champion
+    # download (this CLI, ml group only) doesn't install.
+    from patchpulse.models.retrain_data import SILVER_LABELS, write_silver_csv
+
+    labels = pd.read_parquet(settings.data_dir / SILVER_DIR / LABELS_FILE)
+    written = write_silver_csv(
+        {str(k): v for k, v in row.items()} for row in labels.to_dict("records")
+    )
+    splits = labels["split"].value_counts()
+    teachers = ", ".join(
+        f"{model} / {digest}"
+        for model, digest in sorted(set(zip(labels["model"], labels["prompt_hash"], strict=True)))
+    )
+    print(
+        f"{written} labels to {SILVER_LABELS}: {int(splits.get('train', 0))} train, "
+        f"{int(splits.get('holdout', 0))} holdout; teacher {teachers}"
     )
     return 0
 
@@ -987,6 +1014,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     silver_sample.add_argument("--seed", type=int, required=True)
     silver_sample.add_argument("--n", type=int, default=SILVER_SIZE)
     silver_sample.add_argument("--force", action="store_true", help="start the silver set over")
+    silver.add_parser(
+        "export-labels", help="write the silver labels (ids and labels, no text) to data/silver/"
+    )
     train = commands.add_parser("train", help="train a student").add_subparsers(
         dest="train_command", required=True
     )
@@ -1012,6 +1042,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     download = champion.add_parser("download", help="download the pinned champion and check it")
     download.add_argument("--to", type=Path, required=True, help="the directory to write it to")
     retrieval_cli.register(commands)
+    monitor_cli.register(commands)
     causal_cli.register(commands)
     args = parser.parse_args(argv)
 
@@ -1026,6 +1057,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = get_lab_settings()
         if args.command == "pull":
             return _pull(settings, yes=args.yes)
+        if args.command in {"reference", "monitor"}:
+            return monitor_cli.run(args, settings)
         if args.command == "retrieval":
             return retrieval_cli.run(args, settings)
         if args.command == "causal":
@@ -1042,6 +1075,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.train_command == "s1b":
                 return _train_s1b(settings, checkpoint=args.checkpoint)
             return _train_s1a(settings) if args.train_command == "s1a" else _train_s0(settings)
+        if args.command == "silver" and args.silver_command == "export-labels":
+            return _silver_export_labels(settings)
         if args.command == "silver":
             return _silver_sample(settings, seed=args.seed, n=args.n, force=args.force)
         if args.command == "teacher" and args.teacher_command == "label":

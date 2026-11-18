@@ -10,12 +10,18 @@ NumPy only, so the jobs image can use it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from patchpulse.models.metrics import macro_f1
+from patchpulse.labeling.taxonomy import ASPECTS
+from patchpulse.models.metrics import macro_f1, micro_f1, prf
+from patchpulse.models.split import Split
 
 DEFAULT_CUT = 0.5  # for an aspect with no positives to tune on
+CV_FOLDS = 5
+CV_SEED = 20261012
 
 
 def _matrices(y_true: ArrayLike, probs: ArrayLike) -> tuple[NDArray[np.bool_], NDArray[np.float64]]:
@@ -68,3 +74,23 @@ def cv_predictions(
 def cv_macro_f1(y_true: ArrayLike, probs: ArrayLike, *, folds: int = 5, seed: int) -> float:
     """Macro-F1 of the out-of-fold decisions, pooled over all of dev."""
     return macro_f1(y_true, cv_predictions(y_true, probs, folds=folds, seed=seed))
+
+
+@dataclass(frozen=True)
+class DevScores:
+    thresholds: NDArray[np.float64]  # tuned on all of dev: the ones the model ships with
+    cv_macro_f1: float  # out of fold: the number students are compared on
+    cv_micro_f1: float
+    cv_f1: dict[str, float]
+
+
+def score_on_dev(dev: Split, probs: NDArray[np.float64]) -> DevScores:
+    """Phase 2's procedure (here since Phase 7, so the jobs image's retrain uses it too)."""
+    predicted = cv_predictions(dev.labels, probs, folds=CV_FOLDS, seed=CV_SEED)
+    per_aspect = prf(dev.labels, predicted).f1
+    return DevScores(
+        thresholds=tune_thresholds(dev.labels, probs),
+        cv_macro_f1=float(per_aspect.mean()),
+        cv_micro_f1=micro_f1(dev.labels, predicted),
+        cv_f1={code: float(f1) for code, f1 in zip(ASPECTS, per_aspect, strict=True)},
+    )

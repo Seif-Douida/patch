@@ -41,6 +41,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      issues: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,6 +64,22 @@ jobs:
       # Next.js copies public/ into the site as is; the checkout's git metadata must not go with it.
       - name: Drop the data checkout's git metadata
         run: rm -rf web/public/data/.git
+
+      # Phase 7 (design D10): the Monitoring page's open alerts. The issues are public; only their
+      # number, title, label and opening time are kept, never a body.
+      - name: List the open alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh issue list --state open --label alert --limit 100 \
+            --json number,title,labels,createdAt > open-alert.json
+          gh issue list --state open --label drift --limit 100 \
+            --json number,title,labels,createdAt > open-drift.json
+          jq -s '[.[][] | {number, title, opened_at: .createdAt,
+                  label: (if any(.labels[].name; . == "drift") then "drift" else "alert" end)}]
+                 | unique_by(.number)' open-alert.json open-drift.json \
+            > web/public/data/alerts.json
 
       - uses: actions/setup-node@v7
         with:

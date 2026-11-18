@@ -10,7 +10,8 @@ name: deploy
 #      compatible, so the running API keeps working against the new schema).
 #   2. pp-api moves to this commit's image and must report its SHA on /health, else it is rolled
 #      back to the image it ran before.
-#   3. pp-nightly picks up this commit's image for its next scheduled run.
+#   3. pp-nightly picks up this commit's image for its next scheduled run, and pp-retrain for its
+#      next run (Phase 7).
 on:
   push:
     branches: [main]
@@ -215,6 +216,15 @@ jobs:
           az containerapp update -g "$RG" -n pp-api --image "$PREVIOUS_IMAGE" -o none
           echo "::error::pp-api was rolled back to $PREVIOUS_IMAGE; pp-nightly keeps its image. The migrations stay applied."
 
-      - name: Point pp-nightly at this commit's image
+      - name: Point the jobs at this commit's image
         if: steps.api.outputs.ready == 'true'
-        run: az containerapp job update -g "$RG" -n pp-nightly --image "$JOBS_IMAGE:$GITHUB_SHA" -o none
+        run: |
+          az containerapp job update -g "$RG" -n pp-nightly --image "$JOBS_IMAGE:$GITHUB_SHA" -o none
+          # pp-retrain (Phase 7) compares its challenger with the champion baked into its image, so
+          # it moves with the nightly. Until infra.yml has created it there is nothing to move.
+          retrain=$(az containerapp job list -g "$RG" --query "[?name=='pp-retrain'] | length(@)" -o tsv)
+          if [ "$retrain" = "1" ]; then
+            az containerapp job update -g "$RG" -n pp-retrain --image "$JOBS_IMAGE:$GITHUB_SHA" -o none
+          else
+            echo "::notice::pp-retrain does not exist yet; run infra.yml to create it."
+          fi

@@ -30,7 +30,7 @@ import httpx2
 from sqlalchemy import Engine
 
 from patchpulse.agent.bundle import Bundle, current_bundles
-from patchpulse.agent.graph import AgentDeps, Refusal, ReportRequest, run_report
+from patchpulse.agent.graph import AgentDeps, Refusal, ReportRequest, RunRecord, run_recorded
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
 from patchpulse.agent.patch_notes import agent_steam
 from patchpulse.agent.report import Report, public_copy
@@ -55,7 +55,18 @@ from patchpulse.labeling.teachers import load_model_config
 
 log = logging.getLogger("patchpulse.pipeline.reports")
 
-Agent = Callable[[ReportRequest], Report | Refusal]
+# The live agent returns the run's record (Phase 7: the online evals judge its citations); a fake
+# may return the report alone.
+Agent = Callable[[ReportRequest], Report | Refusal | RunRecord]
+
+
+@dataclass(frozen=True)
+class ScoredRun:
+    """A report written tonight, with its run's record and trace, for the online evals."""
+
+    report_id: str
+    record: RunRecord
+    trace_id: str | None
 
 
 @dataclass(frozen=True)
@@ -65,6 +76,7 @@ class ReportsOutcome:
     basic: int  # reports that came out basic tonight (no model answered)
     failed: int  # reports that raised; due again the next night
     remaining: int  # due but left for the next night by the deadline
+    runs: tuple[ScoredRun, ...] = ()  # the stored reports whose run was recorded
 
 
 def reports_file(bundle: Bundle, stored: Mapping[Key, StoredReport], *, data_version: int) -> bytes:
@@ -141,7 +153,7 @@ def _live_agent(stack: ExitStack, settings: Settings, bundle: Bundle, steam: Ste
         steam=None if steam is None else agent_steam(steam.client, steam.limiter),
         tracer=_tracer(stack, settings, search),
     )
-    return functools.partial(run_report, deps=deps)
+    return functools.partial(run_recorded, deps=deps)
 
 
 def run_reports(
@@ -162,6 +174,7 @@ def run_reports(
         due = reports_due(bundle, latest_reports(connection))
     appids = {p.bundle_id: g.appid for g in bundle.games for p in g.patches if p.bundle_id}
     written = basic = failed = started = 0
+    runs: list[ScoredRun] = []
     with ExitStack() as stack:
         if due and agent is None:
             agent = _live_agent(stack, settings, bundle, steam)
@@ -170,7 +183,9 @@ def run_reports(
                 break
             started += 1
             try:
-                result = agent(ReportRequest.for_bundle(bundle_id, horizon))
+                answer = agent(ReportRequest.for_bundle(bundle_id, horizon))
+                record = answer if isinstance(answer, RunRecord) else None
+                result = answer.result if isinstance(answer, RunRecord) else answer
                 if isinstance(result, Refusal):
                     raise RuntimeError(f"refused: {result.reason}")
                 fingerprint = report_fingerprint(report_inputs(bundle, bundle_id, horizon))
@@ -196,8 +211,15 @@ def run_reports(
                 continue
             written += int(stored)
             basic += int(result.basic)
+            if stored and record is not None:
+                runs.append(ScoredRun(result.report_id, record, record.trace_id))
     outcome = ReportsOutcome(
-        due=len(due), written=written, basic=basic, failed=failed, remaining=len(due) - started
+        due=len(due),
+        written=written,
+        basic=basic,
+        failed=failed,
+        remaining=len(due) - started,
+        runs=tuple(runs),
     )
     log.info(
         "reports: %d due, %d written, %d basic, %d failed, %d left for the next night (%.1f s)",

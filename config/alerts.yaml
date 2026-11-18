@@ -1,0 +1,124 @@
+# Every alert PatchPulse raises (Phase 7 design D7, ADR-013): one GitHub issue per rule, found by
+# its title and label, commented on while the rule stays breached and closed when it recovers.
+#
+# id: the rule's name in code. title: the issue's title, which deduplicates it. label: `alert`
+# (operations) or `drift` (the aspect model's inputs and outputs). where: what evaluates it.
+# threshold: the rule's number (its unit in `meaning`); null for the drift rules until
+# `patchpulse-ml monitor calibrate` writes them (Phase 7 Task 17), and while null they report
+# without alerting. Issue bodies hold numbers, ids and run ids only.
+
+# Existing alerts (Phases 1-6), listed so this file is the one place to read them.
+- id: nightly_failed
+  title: "pipeline failed: nightly"
+  label: alert
+  where: nightly
+  threshold: null
+  meaning: a nightly run failed or couldn't report itself (cost-guard's backstop)
+- id: qdrant_out_of_sync
+  title: "Qdrant out of sync"
+  label: alert
+  where: index
+  threshold: 0.005
+  meaning: share of points that differ between SQL's mirror and the cluster
+- id: index_skipped
+  title: "index stage skipped"
+  label: alert
+  where: index
+  threshold: null
+  meaning: the index stage couldn't run (no encoder or no cluster settings)
+- id: qdrant_unreachable
+  title: "Qdrant unreachable"
+  label: alert
+  where: index
+  threshold: null
+  meaning: the index stage couldn't reach the cluster
+- id: basic_reports
+  title: "Basic reports published"
+  label: alert
+  where: reports
+  threshold: null
+  meaning: reports were written without a model answer (Gemini down or out of quota)
+- id: cost_guard_trip
+  title: "cost-guard tripped"
+  label: alert
+  where: cost_guard
+  threshold: null
+  meaning: the $0 kill switch stopped pp-api and deleted pp-nightly (ADR-017)
+
+# Phase 7: drift (weekly, against models/reference.json).
+- id: drift_language
+  title: "drift: language mix"
+  label: drift
+  where: weekly
+  threshold: 0.3557
+  meaning: PSI of the week's language mix against the champion's training data
+- id: drift_length
+  title: "drift: text length"
+  label: drift
+  where: weekly
+  threshold: 0.3538
+  meaning: PSI of the week's review lengths against the champion's training data
+- id: drift_embedding
+  title: "drift: embeddings"
+  label: drift
+  where: weekly
+  threshold: 0.9009
+  meaning: ROC AUC of a classifier telling the week's e5 vectors from the reference's
+- id: drift_aspects
+  title: "drift: aspect shares"
+  label: drift
+  where: weekly
+  threshold: 26.23
+  meaning: the largest move of an aspect's predicted share, in points
+- id: drift_confidence
+  title: "drift: confidence"
+  label: drift
+  where: weekly
+  threshold: 6.369
+  meaning: change in the share of probabilities within 0.1 of their threshold
+
+# Phase 7: the teacher spot-check, the online evals, Langfuse.
+- id: agreement_dropped
+  title: "teacher-student agreement dropped"
+  label: alert
+  where: weekly
+  threshold: 0.05
+  meaning: the week's macro-F1 upper bound is this far below the silver holdout's agreement
+- id: teacher_unavailable
+  title: "teacher unavailable"
+  label: alert
+  where: nightly
+  threshold: 7
+  meaning: days without a spot-check label
+- id: verifier_dropped
+  title: "verifier pass rate dropped"
+  label: alert
+  where: nightly
+  threshold: 0.80
+  meaning: the last 10 reports' pooled pre-verifier pass rate is below this share
+- id: langfuse_units
+  title: "Langfuse units"
+  label: alert
+  where: nightly
+  threshold: 40000
+  meaning: the month's Langfuse units (the Hobby plan allows 50,000)
+
+# Phase 7: uptime.yml and cost-guard.
+- id: api_down
+  title: "pp-api down"
+  label: alert
+  where: uptime
+  threshold: 2
+  meaning: failed /health tries in a row, 60 s each
+- id: data_stale
+  title: "data stale"
+  label: alert
+  where: uptime
+  threshold: 60
+  meaning: hours since the published data was generated (nights run every other day)
+- id: sql_allowance
+  title: "SQL allowance low"
+  label: alert
+  where: cost_guard
+  threshold: 0.2
+  meaning: share of the free 100,000 vCore-s left, or the month's pace runs out before the 1st

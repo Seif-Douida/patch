@@ -36,6 +36,8 @@ EXPECTED_TABLES = {
     "raw.steam_review_daily",
     "app.patch_effect",
     "app.report",
+    "raw.teacher_label",
+    "ops.eval_metric",
 }
 EXPECTED_SCHEMAS = {"raw", "ops", "stg", "core", "mart", "app"}
 
@@ -95,6 +97,7 @@ def test_only_surrogate_keys_are_identity_columns(migrated: tuple[Settings, Engi
     assert identities == {
         "ops.pipeline_run.run_id",
         "ops.data_quality_result.id",
+        "ops.eval_metric.id",
         "raw.steam_page.page_id",
     }
 

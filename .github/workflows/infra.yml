@@ -99,9 +99,13 @@ jobs:
           PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}
           PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}
           PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ vars.MLFLOW_TRACKING_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
           # An empty value would reach Azure as an empty pp_writer password, hash salt, alert
-          # address, GitHub App credential, Qdrant credential, Gemini key or Langfuse key.
+          # address, GitHub App credential, Qdrant credential, Gemini key, Langfuse key or
+          # pp-retrain's DagsHub token.
           missing=""
           [ -n "$SQL_WRITER_PASSWORD" ] || missing="$missing SQL_WRITER_PASSWORD"
           [ -n "$AUTHOR_HASH_SALT" ] || missing="$missing AUTHOR_HASH_SALT"
@@ -114,6 +118,9 @@ jobs:
           [ -n "$PP_GEMINI_API_KEY" ] || missing="$missing PP_GEMINI_API_KEY"
           [ -n "$PP_LANGFUSE_PUBLIC_KEY" ] || missing="$missing PP_LANGFUSE_PUBLIC_KEY"
           [ -n "$PP_LANGFUSE_SECRET_KEY" ] || missing="$missing PP_LANGFUSE_SECRET_KEY"
+          [ -n "$DAGSHUB_TOKEN" ] || missing="$missing DAGSHUB_TOKEN"
+          [ -n "$MLFLOW_TRACKING_URI" ] || missing="$missing MLFLOW_TRACKING_URI(variable)"
+          [ -n "$MLFLOW_TRACKING_USERNAME" ] || missing="$missing MLFLOW_TRACKING_USERNAME(variable)"
           if [ -n "$missing" ]; then
             echo "::error::Add these secrets to the GitHub environment 'production':$missing"
             exit 1
@@ -166,6 +173,9 @@ jobs:
           PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}
           PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}
           PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ vars.MLFLOW_TRACKING_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
           az deployment group what-if -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam
@@ -188,6 +198,9 @@ jobs:
           PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}
           PP_LANGFUSE_PUBLIC_KEY: ${{ secrets.PP_LANGFUSE_PUBLIC_KEY }}
           PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ vars.MLFLOW_TRACKING_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
           az deployment group create -g "$RG" --name "infra-$GITHUB_RUN_ID" \
             --parameters infra/main.bicepparam \

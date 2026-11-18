@@ -20,7 +20,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from patchpulse.labeling.taxonomy import ASPECTS
+from patchpulse.labeling.taxonomy import (  # re-exported: older callers import them from here
+    format_aspects as format_aspects,
+)
+from patchpulse.labeling.taxonomy import (
+    parse_aspects as parse_aspects,
+)
 from patchpulse.models.snapshot import Snapshot
 
 EN = "english"  # Steam's language names
@@ -169,7 +174,6 @@ BATCH_SEED = 20261006
 BATCHES = 4
 PILOT_SIZE = 30
 CLAUDE_LABELS_FILE = "labels_claude.csv"
-NONE = "none"
 
 
 def batch_ids(
@@ -215,23 +219,6 @@ class GoldLabels:
     labels: dict[int, frozenset[str]]
     annotator: str
     guidelines_version: str
-
-
-def parse_aspects(cell: str) -> frozenset[str]:
-    """`performance|content` or `none`; anything else is an error, never a guess."""
-    parts = [part.strip() for part in str(cell).split("|") if part.strip()]
-    if parts == [NONE]:
-        return frozenset()
-    if NONE in parts:
-        raise ValueError(f"'none' can't be combined with aspect codes: {cell!r}")
-    unknown = [part for part in parts if part not in ASPECTS]
-    if unknown or not parts:
-        raise ValueError(f"unknown aspect code(s) {unknown or [cell]}; known: {', '.join(ASPECTS)}")
-    return frozenset(parts)
-
-
-def format_aspects(aspects: frozenset[str]) -> str:
-    return "|".join(code for code in ASPECTS if code in aspects) or NONE
 
 
 def _merge_rows(path: Path, new: pd.DataFrame) -> None:

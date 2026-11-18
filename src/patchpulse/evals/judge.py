@@ -190,14 +190,23 @@ def judge_prompt(item: JudgeItem) -> str:
 
 
 def judge(
-    items: Sequence[JudgeItem], router: ModelRouter, *, rubric_path: Path = RUBRIC_PATH
+    items: Sequence[JudgeItem],
+    router: ModelRouter,
+    *,
+    rubric_path: Path = RUBRIC_PATH,
+    stop: Callable[[], bool] | None = None,
 ) -> JudgeRun:
     """Each item's verdict, with the rubric as the system prompt. An item no model answers stays
-    unjudged; the run goes on (the router rests a failing model)."""
+    unjudged; the run goes on (the router rests a failing model). `stop` is asked before each
+    item: once it says so, the rest stay unjudged (the nightly's online evals pass their
+    deadline)."""
     system = rubric_path.read_text(encoding="utf-8")
     verdicts: dict[str, bool] = {}
     asked = cached = blank = unanswered = 0
     for n, item in enumerate(items, start=1):
+        if stop is not None and stop():
+            unanswered += len(items) - n + 1
+            break
         if n % PROGRESS_EVERY == 0:
             log.info("judge: item %d of %d", n, len(items))
         if not item.evidence:

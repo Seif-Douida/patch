@@ -12,7 +12,14 @@ describe("SiteHeader", () => {
     const menu = within(screen.getByRole("navigation", { name: "Site" }));
     const links = menu.getAllByRole("link").map((link) => [link.textContent, link.getAttribute("href")]);
     // Next adds the trailing slash in the build (trailingSlash: true), not under Vitest.
-    expect(links.map(([text]) => text)).toEqual(["Games", "Ask"]);
+    expect(links.map(([text]) => text)).toEqual(["Games", "Ask", "Monitoring"]);
     expect(links[1]?.[1]).toMatch(/^\/ask\/?$/);
+  });
+
+  it("links_monitoring_from_the_header", () => {
+    render(<SiteHeader />);
+
+    const link = screen.getByRole("link", { name: "Monitoring" });
+    expect(link.getAttribute("href")).toMatch(/^\/monitoring\/?$/);
   });
 });

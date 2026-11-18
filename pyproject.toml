@@ -60,7 +60,8 @@ files = ["src", "tests"]
 module = [
     "huggingface_hub", "huggingface_hub.*", "joblib", "joblib.*", "mssql_python", "mssql_python.*",
     "onnxruntime", "onnxruntime.*", "sklearn", "sklearn.*", "statsmodels", "statsmodels.*",
-    "streamlit", "streamlit.*", "torch", "torch.*", "transformers", "transformers.*",
+    "streamlit", "streamlit.*", "threadpoolctl", "threadpoolctl.*", "torch", "torch.*",
+    "transformers", "transformers.*",
 ]
 ignore_missing_imports = true
 
@@ -83,8 +84,8 @@ markers = [
 
 [dependency-groups]
 # The API image syncs `api`, `retrieval`, `causal` and `agent`; the jobs image `pipeline`, `scoring`,
-# `retrieval`, `causal` and `agent`; dev gets everything but the local-only Phase 2 groups (`lab`,
-# `gpu`).
+# `retrieval`, `causal`, `agent` and `retrain`; dev gets everything but the local-only Phase 2 groups
+# (`lab`, `gpu`).
 dev = [
     { include-group = "api" },
     { include-group = "pipeline" },
@@ -93,6 +94,7 @@ dev = [
     { include-group = "retrieval" },
     { include-group = "causal" },
     { include-group = "agent" },
+    { include-group = "retrain" },
     "httpx2>=2.13.1",
     "mypy>=2.3.1",
     # Tests build tiny ONNX graphs as fake encoders; the jobs image doesn't need it.
@@ -143,6 +145,13 @@ scoring = [
     "scikit-learn>=1.9.1",
     "tokenizers>=0.23.2",
 ]
+# Phase 7: pp-retrain in the jobs image (design D5): MLflow's client for the `retraining` runs and
+# the registry, and scikit-learn's threadpoolctl to time the challenger on one thread. Both are
+# already locked (the `ml` group, scikit-learn).
+retrain = [
+    "mlflow-skinny>=3.17.0",
+    "threadpoolctl>=3.6.0",
+]
 pipeline = [
     "alembic>=1.20.0",
     "dbt-core~=1.12.5",
@@ -170,8 +179,12 @@ agent = [
 # data, Gemini, Steam), the models config, the bundle's types (the estimate store imports
 # SQLAlchemy; the API never connects to SQL) and the query encoder (ONNX Runtime, tokenizers).
 api = [
+    "azure-monitor-opentelemetry-exporter>=1.0.0b59",
     "httpx2>=2.13.1",
     "onnxruntime>=1.30.0",
+    "opentelemetry-instrumentation-fastapi>=0.66b2",
+    "opentelemetry-instrumentation-httpx>=0.66b2",
+    "opentelemetry-sdk>=1.45.2",
     "pydantic-settings>=2.15.0",
     "pyyaml>=6",
     "sqlalchemy>=2.1.1",

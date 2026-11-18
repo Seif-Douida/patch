@@ -1,0 +1,333 @@
+"""The nightly teacher spot-check (Phase 7 design D3, spec §14 "Online accuracy proxy").
+
+Each night 200 reviews first seen in that run are labeled by the teacher (prompt v1, the silver
+set's batching and validation), and the labels stored in `raw.teacher_label` (source `spotcheck`).
+The teacher in Azure is Google's free Gemma 4 31B, never the friend's server (ADR-020).
+
+Each week the champion's labels are compared with the teacher's on that week's spot-check reviews
+(the online accuracy proxy), against the same comparison on the silver holdout (the reference).
+The labels also train the next challenger: a fixed fifth of reviews, by a hash of the id, is held
+out for deciding promotions (Task 10).
+
+The text is read from SQL into memory for the request and never stored or logged.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import httpx2
+import numpy as np
+from numpy.typing import NDArray
+from sqlalchemy import Connection, Engine, bindparam, text
+
+from patchpulse.config import Settings
+from patchpulse.labeling.limits import QuotaExhaustedError, RequestLimiter
+from patchpulse.labeling.llm import TeacherUnavailableError
+from patchpulse.labeling.taxonomy import ASPECTS
+from patchpulse.labeling.teacher import (
+    ReviewIn,
+    TextModel,
+    label_batch,
+    make_batches,
+    prompt_hash,
+)
+from patchpulse.labeling.teachers import load_model_config
+from patchpulse.models.metrics import assessable_macro_f1, bootstrap_ci, prf
+from patchpulse.monitoring.alerts import AlertRule, Outcome
+from patchpulse.monitoring.reference import Reference
+from patchpulse.monitoring.store import MetricRow, StoredTeacherLabel, write_teacher_labels
+
+log = logging.getLogger("patchpulse.pipeline.spotcheck")
+
+SPOTCHECK_SIZE = 200
+SPOTCHECK_MODEL = "gemma-4-31b"  # config/models.yaml: Google's gemma-4-31b-it
+SPOTCHECK_SOURCE = "spotcheck"
+HOLDOUT_SHARE = 0.2
+SPOTCHECK_ATTEMPTS = 2  # the second only waits out a per-minute limit; errors raise at once
+AGREEMENT_SEED = 20261117
+
+_CANDIDATES = """
+SELECT r.recommendation_id
+FROM raw.steam_review AS r
+WHERE r.first_seen_run_id = :run
+  AND NOT EXISTS (
+      SELECT 1 FROM raw.steam_review AS newer
+      WHERE newer.recommendation_id = r.recommendation_id
+        AND newer.timestamp_updated > r.timestamp_updated)
+ORDER BY r.recommendation_id
+"""
+_PICKED = """
+SELECT r.recommendation_id, r.timestamp_updated, r.voted_up, r.review_text, g.name
+FROM raw.steam_review AS r
+JOIN raw.game AS g ON g.appid = r.appid
+WHERE r.first_seen_run_id = :run AND r.recommendation_id IN :ids
+  AND NOT EXISTS (
+      SELECT 1 FROM raw.steam_review AS newer
+      WHERE newer.recommendation_id = r.recommendation_id
+        AND newer.timestamp_updated > r.timestamp_updated)
+"""
+_LABELS = ", ".join(f"t.l_{code}" for code in ASPECTS)
+_SCORES = ", ".join(f"s.l_{code}" for code in ASPECTS)
+_PAIRS = f"""
+SELECT {_LABELS}, {_SCORES}
+FROM raw.teacher_label AS t
+JOIN raw.review_aspect_score AS s
+  ON s.recommendation_id = t.recommendation_id
+ AND s.timestamp_updated = t.timestamp_updated
+ AND s.model_version = :model
+WHERE t.source = 'spotcheck' AND t.created_at >= :start AND t.created_at < :stop
+ORDER BY t.recommendation_id
+"""  # noqa: S608 (column names from the taxonomy, values bound)
+_TIMES = "SELECT MIN(created_at), MAX(created_at) FROM raw.teacher_label WHERE source = 'spotcheck'"
+
+
+@dataclass(frozen=True)
+class SpotcheckOutcome:
+    drawn: int
+    labeled: int
+    failed_batches: int
+    stopped: str | None  # deadline, outage, quota
+
+
+def is_holdout(recommendation_id: int) -> bool:
+    """A fixed fifth of reviews, the same in every run: the recent holdout for promotions."""
+    first = hashlib.sha256(str(int(recommendation_id)).encode()).digest()[0]
+    return first < int(HOLDOUT_SHARE * 256)
+
+
+def new_reviews(
+    connection: Connection, *, run_id: int, n: int, seed: int
+) -> list[tuple[ReviewIn, datetime]]:
+    """Up to `n` reviews first seen in this run (their latest version), drawn with `seed`."""
+    ids = [int(row[0]) for row in connection.execute(text(_CANDIDATES), {"run": run_id})]
+    if len(ids) > n:
+        rng = np.random.default_rng(seed)
+        ids = sorted(int(i) for i in rng.choice(np.asarray(ids), size=n, replace=False))
+    if not ids:
+        return []
+    statement = text(_PICKED).bindparams(bindparam("ids", expanding=True))
+    rows = connection.execute(statement, {"run": run_id, "ids": ids}).all()
+    return [
+        (
+            ReviewIn(review_id=int(r[0]), game=str(r[4]), voted_up=bool(r[2]), text=str(r[3])),
+            r[1],
+        )
+        for r in sorted(rows, key=lambda row: int(row[0]))
+    ]
+
+
+def make_spotcheck_client(
+    settings: Settings,
+    http: httpx2.Client,
+    *,
+    state_path: Path,
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], None] = time.sleep,
+) -> TextModel:
+    """Google's Gemma 4 31B with its limiter. Nothing else labels with it in Azure, so the
+    spot-check uses the model's whole free quota (Phase 2 split it between two runs)."""
+    from patchpulse.labeling.gemini import GeminiClient
+
+    if settings.gemini_api_key is None:
+        raise ValueError("the spot-check needs PP_GEMINI_API_KEY")
+    config = (
+        load_model_config().candidates[SPOTCHECK_MODEL].model_copy(update={"use_fraction": 1.0})
+    )
+    limiter = RequestLimiter(config, state_path=state_path, clock=clock, sleep=sleep)
+    return GeminiClient(
+        settings.gemini_api_key.get_secret_value(),
+        http,
+        limiter,
+        config,
+        sleep=sleep,
+        max_attempts=SPOTCHECK_ATTEMPTS,
+        # A timeout or an outage stops the night's spot-check at once (final review C1): two
+        # tries of a stalled request cost the night four minutes past the stage's budget.
+        retry_errors=False,
+    )
+
+
+def run_spotcheck(
+    engine: Engine,
+    *,
+    run_id: int,
+    client: TextModel,
+    model_id: str,
+    deadline: float,
+    clock: Callable[[], float],
+    n: int = SPOTCHECK_SIZE,
+) -> SpotcheckOutcome:
+    with engine.connect() as connection:
+        drawn = new_reviews(connection, run_id=run_id, n=n, seed=run_id)
+    versions = {review.review_id: updated for review, updated in drawn}
+    digest = prompt_hash()
+    labeled = failed = 0
+    stopped: str | None = None
+    for batch in make_batches([review for review, _ in drawn]):
+        if clock() >= deadline:
+            stopped = "deadline"
+            break
+        try:
+            labels = label_batch(client, batch, stop=lambda: clock() >= deadline)
+        except QuotaExhaustedError:
+            stopped = "quota"
+            break
+        except TeacherUnavailableError:
+            stopped = "outage"
+            break
+        if len(labels) < len(batch.review_ids):
+            failed += 1
+        stored = [
+            StoredTeacherLabel(
+                recommendation_id=label.review_id,
+                timestamp_updated=versions[label.review_id],
+                model=model_id,
+                prompt_hash=digest,
+                source=SPOTCHECK_SOURCE,
+                aspects=label.aspects,
+            )
+            for label in labels
+        ]
+        with engine.begin() as connection:
+            labeled += write_teacher_labels(connection, stored, run_id=run_id)
+    log.info(
+        "spot-check: %d drawn, %d labeled, %d batches incomplete%s",
+        len(drawn),
+        labeled,
+        failed,
+        f", stopped ({stopped})" if stopped else "",
+    )
+    return SpotcheckOutcome(
+        drawn=len(drawn), labeled=labeled, failed_batches=failed, stopped=stopped
+    )
+
+
+def _matrix(rows: Sequence[Sequence[object]], start: int) -> NDArray[np.bool_]:
+    k = len(ASPECTS)
+    return np.array(
+        [[bool(v) for v in row[start : start + k]] for row in rows], dtype=bool
+    ).reshape(len(rows), k)
+
+
+def weekly_agreement(
+    connection: Connection, window: tuple[date, date], *, model_version: str
+) -> list[MetricRow]:
+    """The champion's labels against the teacher's on the window's spot-check labels."""
+    start, end = window
+    rows = connection.execute(
+        text(_PAIRS),
+        {
+            "model": model_version,
+            "start": datetime.combine(start, datetime.min.time()),
+            "stop": datetime.combine(end + timedelta(days=1), datetime.min.time()),
+        },
+    ).all()
+    if not rows:
+        return []
+    teacher, student = _matrix(rows, 0), _matrix(rows, len(ASPECTS))
+    n = len(rows)
+
+    def macro(ix: NDArray[np.intp]) -> float:
+        return assessable_macro_f1(teacher[ix], student[ix])
+
+    lo, hi = bootstrap_ci(macro, n, seed=AGREEMENT_SEED)
+    scores = prf(teacher, student)
+    result = [
+        MetricRow(
+            "agreement",
+            "macro_f1",
+            "week",
+            start,
+            end,
+            assessable_macro_f1(teacher, student),
+            None if np.isnan(lo) else float(lo),
+            None if np.isnan(hi) else float(hi),
+            n,
+        )
+    ]
+    result += [
+        MetricRow(
+            "agreement", f"f1.{code}", "week", start, end, float(f1), None, None, int(support)
+        )
+        for code, f1, support in zip(ASPECTS, scores.f1, scores.support, strict=True)
+    ]
+    return result
+
+
+def label_times(connection: Connection) -> tuple[datetime | None, datetime | None]:
+    """The first and the last spot-check label's time (naive UTC)."""
+    first, last = connection.execute(text(_TIMES)).one()
+    return first, last
+
+
+def teacher_outcomes(
+    rows: Sequence[MetricRow],
+    reference: Reference,
+    *,
+    last_label_at: datetime | None,
+    first_label_at: datetime | None,
+    now: datetime,
+    rules: Mapping[str, AlertRule],
+) -> list[Outcome]:
+    """`agreement_dropped` (weekly) and `teacher_unavailable` (nightly)."""
+    outcomes = []
+    drop = rules["agreement_dropped"].threshold
+    macro = next((r for r in rows if r.metric == "macro_f1"), None)
+    if macro is None or macro.hi is None or drop is None:
+        outcomes.append(Outcome("agreement_dropped", None, "agreement: not measured"))
+    else:
+        floor = reference.teacher_agreement_macro_f1 - drop
+        body = (
+            f"macro_f1 {macro.value:.3f} (95% {macro.lo:.3f} to {macro.hi:.3f}), reference "
+            f"{reference.teacher_agreement_macro_f1:.3f}, floor {floor:.3f}, "
+            f"week {macro.window_start} to {macro.window_end}, n {macro.n}"
+        )
+        outcomes.append(Outcome("agreement_dropped", macro.hi < floor, body))
+    outcomes.append(
+        unavailable_outcome(first_label_at, last_label_at, now, rules["teacher_unavailable"])
+    )
+    return outcomes
+
+
+def unavailable_outcome(
+    first_label_at: datetime | None, last_label_at: datetime | None, now: datetime, rule: AlertRule
+) -> Outcome:
+    """`teacher_unavailable`: no spot-check label for `threshold` days, once there was one."""
+    if first_label_at is None or last_label_at is None or rule.threshold is None:
+        return Outcome(rule.id, None, "spot-check: no label yet")
+    idle = (now - last_label_at).total_seconds() / 86_400
+    body = f"last spot-check label {last_label_at:%Y-%m-%d %H:%M} UTC, {idle:.1f} days ago"
+    return Outcome(rule.id, idle >= rule.threshold, body)
+
+
+def run_live_spotcheck(
+    engine: Engine,
+    settings: Settings,
+    *,
+    run_id: int,
+    clock: Callable[[], float],
+    deadline: float,
+) -> SpotcheckOutcome:
+    """The nightly stage: Google's Gemma 4 31B, its day count in a temporary file (the job's file
+    system is gone by morning)."""
+    import tempfile
+    from datetime import UTC
+
+    def now() -> datetime:
+        return datetime.now(UTC)
+
+    model_id = load_model_config().candidates[SPOTCHECK_MODEL].id
+    with httpx2.Client() as http, tempfile.TemporaryDirectory() as scratch:
+        client = make_spotcheck_client(
+            settings, http, state_path=Path(scratch) / "gemini-requests.json", clock=now
+        )
+        return run_spotcheck(
+            engine, run_id=run_id, client=client, model_id=model_id, deadline=deadline, clock=clock
+        )

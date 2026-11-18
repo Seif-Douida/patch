@@ -68,6 +68,16 @@ param langfusePublicKey string
 @secure()
 param langfuseSecretKey string
 
+@description('DagsHub\'s MLflow tracking URI for pp-retrain (Phase 7), from the variable MLFLOW_TRACKING_URI (the one deploy.yml downloads the champion from).')
+param mlflowTrackingUri string
+
+@description('DagsHub user the token belongs to, from the variable MLFLOW_TRACKING_USERNAME.')
+param mlflowTrackingUsername string
+
+@description('DagsHub token with write access, from the secret DAGSHUB_TOKEN. It reaches pp-retrain only, as a Container Apps secret: the challenger\'s runs and registration (design D5).')
+@secure()
+param dagshubToken string
+
 @description('Address the backup cost alert emails (ADR-017 option B), from the secret ALERT_EMAIL. Secure only to keep it out of the public repo and logs.')
 @secure()
 param alertEmail string
@@ -99,6 +109,7 @@ module containerApps 'modules/containerapps.bicep' = {
     location: location
     tags: tags
     logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
+    appInsightsName: monitoring.outputs.appInsightsName
     apiImage: apiImage
     allowedOrigin: 'https://${web.outputs.defaultHostname}'
     geminiApiKey: geminiApiKey
@@ -141,6 +152,9 @@ module jobs 'modules/jobs.bicep' = {
     geminiApiKey: geminiApiKey
     langfusePublicKey: langfusePublicKey
     langfuseSecretKey: langfuseSecretKey
+    mlflowTrackingUri: mlflowTrackingUri
+    mlflowTrackingUsername: mlflowTrackingUsername
+    dagshubToken: dagshubToken
   }
 }
 

@@ -316,21 +316,27 @@ class GitHubPublisher:
         )
         log.info("reported the failure on issue #%d", number)
 
-    def alert(self, *, title: str, body: str) -> None:
-        """Open the issue with this title, or comment on it if it's open (Phase 3: the index
-        stage's alerts, whose bodies hold counts and run ids only)."""
+    def alert(self, *, title: str, body: str, label: str = ALERT_LABEL) -> None:
+        """Open the issue with this title and label, or comment on it if it's open (Phase 3: the
+        index stage's alerts; Phase 7: every rule of config/alerts.yaml, `drift` among them).
+        Bodies hold counts and run ids only."""
         number = open_or_update_issue(
-            self._token(), self.repo, title=title, body=body, label=ALERT_LABEL, http=self._http
+            self._token(), self.repo, title=title, body=body, label=label, http=self._http
         )
         log.info("raised %r on issue #%d", title, number)
 
-    def resolve(self, *, title: str, comment: str) -> None:
-        """Comment on and close the open issue with this title, if there is one."""
+    def dispatch(self, event: str, payload: Mapping[str, Any]) -> None:
+        """A repository_dispatch event (Phase 7: `retrain-requested` for retrain.yml)."""
+        dispatch(self._token(), self.repo, event, payload, self._http)
+        log.info("dispatched %s", event)
+
+    def resolve(self, *, title: str, comment: str, label: str = ALERT_LABEL) -> None:
+        """Comment on and close the open issue with this title and label, if there is one."""
         closed = close_issue(
             self._token(),
             self.repo,
             title=title,
-            label=ALERT_LABEL,
+            label=label,
             comment=comment,
             http=self._http,
         )

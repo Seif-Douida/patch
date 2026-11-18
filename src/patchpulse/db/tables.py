@@ -1,6 +1,6 @@
 """SQLAlchemy Core definitions of the tables Alembic owns, for the loaders.
 
-They mirror migrations 0001 to 0006; `test_table_definitions_match_the_migrated_schema` keeps
+They mirror migrations 0001 to 0007; `test_table_definitions_match_the_migrated_schema` keeps
 them in step. Datetime columns hold naive UTC (DATETIME2 has no time zone).
 """
 
@@ -276,4 +276,39 @@ report = Table(
     Column("public_json", UnicodeText, nullable=False),
     Column("created_at", DateTime, nullable=False),
     schema="app",
+)
+
+
+# Phase 7 (migration 0007): the teacher's labels by review version (no text) and every number the
+# monitoring measures.
+teacher_label = Table(
+    "teacher_label",
+    metadata,
+    Column("recommendation_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("timestamp_updated", DateTime, primary_key=True),
+    Column("model", Unicode(64), primary_key=True),
+    Column("prompt_hash", Unicode(64), primary_key=True),
+    Column("source", Unicode(16), nullable=False),
+    Column("run_id", BigInteger),
+    Column("created_at", DateTime, nullable=False),
+    *(Column(f"l_{code}", Boolean, nullable=False) for code in _ASPECTS),
+    schema="raw",
+)
+
+eval_metric = Table(
+    "eval_metric",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("run_id", BigInteger),
+    Column("family", Unicode(32), nullable=False),
+    Column("metric", Unicode(128), nullable=False),
+    Column("scope", Unicode(64), nullable=False),
+    Column("window_start", Date),
+    Column("window_end", Date),
+    Column("value", Float),
+    Column("lo", Float),
+    Column("hi", Float),
+    Column("n", Integer),
+    Column("created_at", DateTime, nullable=False),
+    schema="ops",
 )

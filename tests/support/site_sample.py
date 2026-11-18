@@ -17,6 +17,7 @@ Regenerate after changing the exporter: `uv run python tests/support/site_sample
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import sys
@@ -191,7 +192,7 @@ def sample_files() -> dict[str, bytes]:
             "5013",
         ),
     ]
-    return shape_site_export(
+    site = shape_site_export(
         games,
         days,
         patches,
@@ -201,6 +202,7 @@ def sample_files() -> dict[str, bytes]:
         effects=EFFECTS,
         reports=REPORTS,
     )
+    return {**site, "monitoring.json": _monitoring_sample(), "alerts.json": _alerts_sample()}
 
 
 TOO_FEW = "too few comparison games without their own patch (3 of 5 needed)"
@@ -420,6 +422,174 @@ def write(directory: Path) -> None:
         path = directory / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+
+
+# Phase 7 (design D10): the Monitoring page's data, invented like the rest, through the real
+# shaping. The rules are config/alerts.yaml's with invented drift thresholds: the real ones stay
+# null until calibration.
+SAMPLE_THRESHOLDS = {
+    "drift_language": 0.12,
+    "drift_length": 0.08,
+    "drift_embedding": 0.62,
+    "drift_aspects": 4.0,
+    "drift_confidence": 3.0,
+}
+DRIFT_LEVELS = {  # statistic -> (typical weekly value, spread)
+    "language_psi": (0.04, 0.02),
+    "length_psi": (0.03, 0.015),
+    "embedding_auc": (0.54, 0.02),
+    "aspect_max_change": (1.6, 0.6),
+    "uncertain_change": (0.8, 0.5),
+}
+
+
+def _monitoring_sample() -> bytes:
+    from patchpulse.export.monitoring import RunRow, shape_monitoring
+    from patchpulse.models.champion import ChampionPin
+    from patchpulse.monitoring.alerts import load_rules
+    from patchpulse.monitoring.drift import DRIFT_RULES
+    from patchpulse.monitoring.store import MetricRow
+
+    rng = random.Random(7)  # noqa: S311 - invents sample numbers; nothing secret
+    rules = {
+        rule_id: rule.model_copy(update={"threshold": SAMPLE_THRESHOLDS[rule_id]})
+        if rule_id in SAMPLE_THRESHOLDS
+        else rule
+        for rule_id, rule in load_rules().items()
+    }
+    runs = []
+    for k in range(30):
+        started = GENERATED_AT.replace(tzinfo=None) - timedelta(days=2 * (30 - k), minutes=-1)
+        failed = k == 21
+        stages = {
+            "reviews": round(rng.uniform(90, 180), 1),
+            "score": round(rng.uniform(40, 80), 1),
+            "dbt": round(rng.uniform(300, 420), 1),
+            "index": round(rng.uniform(60, 240), 1),
+            "reports": 0.0 if failed else round(rng.uniform(80, 170), 1),
+        }
+        runs.append(
+            RunRow(
+                12 + k,
+                started,
+                started + timedelta(seconds=sum(stages.values()) + 240),
+                "failed" if failed else "succeeded",
+                stages,
+            )
+        )
+    weeks = [GENERATED_AT.date() - timedelta(days=7 * (8 - w) + 1) for w in range(8)]
+    drift = []
+    for metric, (level, spread) in DRIFT_LEVELS.items():
+        for w, end in enumerate(weeks):
+            value = level + rng.uniform(-spread, spread)
+            if metric == "language_psi" and w == 6:
+                value = 0.17  # one week over its threshold: the drift issue below
+            drift.append(
+                MetricRow(
+                    "drift",
+                    metric,
+                    "week",
+                    end - timedelta(days=6),
+                    end,
+                    round(value, 4),
+                    None,
+                    None,
+                    rng.randint(600, 1400),
+                )
+            )
+    drill_end = weeks[3]
+    drift.append(
+        MetricRow(
+            "drift",
+            "language_psi",
+            "drill",
+            drill_end - timedelta(days=6),
+            drill_end,
+            0.61,
+            None,
+            None,
+            900,
+        )
+    )
+    agreement = []
+    for end in weeks:
+        value = round(rng.uniform(0.66, 0.74), 4)
+        agreement.append(
+            MetricRow(
+                "agreement",
+                "macro_f1",
+                "week",
+                end - timedelta(days=6),
+                end,
+                value,
+                round(value - 0.04, 4),
+                round(value + 0.04, 4),
+                700,
+            )
+        )
+    online = []
+    for k in range(14):
+        night = GENERATED_AT.date() - timedelta(days=2 * (14 - k))
+        reports = rng.randint(1, 3)
+        basic = 1 if k == 9 else 0
+
+        def row(
+            metric: str, scope: str, value: float, n: int | None = None, day: date = night
+        ) -> MetricRow:
+            return MetricRow("online", metric, scope, day, day, value, None, None, n)
+
+        online += [
+            row("reports", "night", float(reports)),
+            row("gemini_errors", "night", float(basic)),
+            row("pre_verifier_pass_rate", "night", round(rng.uniform(0.7, 0.95), 4), 12),
+        ]
+        for r in range(reports):
+            scope = f"report:{6000 + 3 * k + r}"
+            online += [
+                row("withheld.V3", scope, float(rng.randint(0, 2))),
+                row("reworded", scope, float(rng.randint(0, 1))),
+                row("judge.faithfulness", scope, round(rng.uniform(0.75, 0.95), 4), 6),
+                row("judge.answers_question", scope, round(rng.uniform(0.7, 0.9), 4), 6),
+            ]
+    last = weeks[-2]
+    retrain = [
+        MetricRow("retrain", "requested.drift", "night", last + timedelta(days=1),
+                  last + timedelta(days=1), 1.0, None, None, None),
+        MetricRow("retrain", "decision.keep", "run", last + timedelta(days=1),
+                  last + timedelta(days=1), 0.004, None, None, 812),
+    ]  # fmt: skip
+    assert set(SAMPLE_THRESHOLDS) == set(DRIFT_RULES)
+    return shape_monitoring(
+        runs=runs,
+        last_success=runs[-1].finished_at,
+        quality=[
+            ("prices_unavailable", "warn", 2),
+            ("reports_failed", "warn", 1),
+            ("game_failed", "error", 1),
+        ],
+        metrics={"drift": drift, "agreement": agreement, "online": online, "retrain": retrain},
+        rules=rules,
+        champion=ChampionPin(
+            version=3,
+            family="s0",
+            model_version="20261012T223218Z",
+            model_json_sha256="0" * 64,
+            taxonomy_version="v1",
+        ),
+        reference_agreement=0.72,
+        generated_at=GENERATED_AT,
+    )
+
+
+def _alerts_sample() -> bytes:
+    """What publish-site.yml writes from the open issues (design D10)."""
+    issues = [
+        {"number": 101, "title": "language mix drifted (sample data)", "label": "drift",
+         "opened_at": "2026-09-22T03:41:00Z"},
+        {"number": 104, "title": "data stale (sample data)", "label": "alert",
+         "opened_at": "2026-09-28T12:17:00Z"},
+    ]  # fmt: skip
+    return (json.dumps(issues, indent=2) + "\n").encode("utf-8")
 
 
 if __name__ == "__main__":

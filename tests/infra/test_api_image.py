@@ -45,3 +45,20 @@ def test_api_image_carries_the_encoder_and_the_config() -> None:
     # an agent that doesn't import.
     assert runtime.index("COPY build/encoder ") < runtime.index("embed_queries")
     assert "import patchpulse.agent.graph, patchpulse.api.app, langfuse" in runtime
+
+
+def test_the_telemetry_imports_with_only_the_api_image_groups() -> None:
+    # Phase 7 (design D8): the instrumentation and the exporter load only when Azure sets the
+    # connection string; the build checks them, and so does this.
+    result = run_with_only(
+        image_groups("Dockerfile"),
+        "import patchpulse.api.telemetry\n"
+        "import opentelemetry.instrumentation.fastapi, opentelemetry.instrumentation.httpx\n"
+        "import azure.monitor.opentelemetry.exporter\n"
+        "print('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "import patchpulse.api.telemetry, azure.monitor.opentelemetry.exporter" in text

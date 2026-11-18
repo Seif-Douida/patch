@@ -69,6 +69,42 @@ def ensure_registered_model(client: mlflow.MlflowClient, name: str) -> None:
             raise
 
 
+def _register(client: mlflow.MlflowClient, model_dir: Path, *, name: str) -> Registered:
+    """One checked model directory: uploaded to its own run, registered as a new version."""
+    artifact = read_artifact(model_dir)
+    family = artifact.family
+    with tracking_run(
+        REGISTRY_EXPERIMENT,
+        params={
+            "family": family,
+            "version": artifact.version,
+            "model_json_sha256": sha256_file(model_dir / MODEL_FILE),
+        },
+        run_name=f"{family}-{artifact.version}",
+    ) as run:
+        log_model_dir(model_dir)
+    ensure_registered_model(client, name)
+    # MLflow 3's `register_model("runs:/...")` wants an MLflow-format logged model; ours is a
+    # plain directory, so the version points at the run's artifacts directly.
+    version = client.create_model_version(
+        name,
+        source=f"{run.info.artifact_uri}/model",
+        run_id=run.info.run_id,
+        tags={"family": family, "model_version": artifact.version},
+    )
+    return Registered(family, int(version.version), run.info.run_id, artifact)
+
+
+def register_challenger(
+    client: mlflow.MlflowClient, model_dir: Path, *, name: str = REGISTERED_MODEL
+) -> int:
+    """A retrained model (Phase 7, pp-retrain): a new version with the `challenger` alias. The
+    champion alias and the pin move only when its promotion PR is merged."""
+    registered = _register(client, model_dir, name=name)
+    client.set_registered_model_alias(name, "challenger", str(registered.version))
+    return registered.version
+
+
 def register_models(
     model_dirs: Mapping[str, Path],
     *,
@@ -79,29 +115,9 @@ def register_models(
     """Register every model (each checked first) and set the aliases; returns them by family."""
     use_tracking()
     client = mlflow.MlflowClient()
-    registered: dict[str, Registered] = {}
-    for family, model_dir in model_dirs.items():
-        artifact = read_artifact(model_dir)
-        with tracking_run(
-            REGISTRY_EXPERIMENT,
-            params={
-                "family": family,
-                "version": artifact.version,
-                "model_json_sha256": sha256_file(model_dir / MODEL_FILE),
-            },
-            run_name=f"{family}-{artifact.version}",
-        ) as run:
-            log_model_dir(model_dir)
-        ensure_registered_model(client, name)
-        # MLflow 3's `register_model("runs:/...")` wants an MLflow-format logged model; ours is a
-        # plain directory, so the version points at the run's artifacts directly.
-        version = client.create_model_version(
-            name,
-            source=f"{run.info.artifact_uri}/model",
-            run_id=run.info.run_id,
-            tags={"family": family, "model_version": artifact.version},
-        )
-        registered[family] = Registered(family, int(version.version), run.info.run_id, artifact)
+    registered = {
+        family: _register(client, model_dir, name=name) for family, model_dir in model_dirs.items()
+    }
     client.set_registered_model_alias(name, "champion", str(registered[champion].version))
     if challenger is not None:
         client.set_registered_model_alias(name, "challenger", str(registered[challenger].version))

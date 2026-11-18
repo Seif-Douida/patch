@@ -296,3 +296,56 @@ def test_the_live_agents_trace_with_the_langfuse_keys(tmp_path: Path) -> None:
 
 
 NO_STEAM: Any = None  # the agents are built, never run
+
+
+def test_a_score_reaches_its_trace_and_counts_a_unit(capture: Capture) -> None:
+    # Phase 7 (design D4): the online evals put their numbers on the report's trace.
+    units = MonthUnits(MemoryLimitStore(), clock=FakeClock(OCTOBER))
+    traced = tracer(capture, units=units)
+    observer = traced.start(ReportRequest.for_bundle("p1", 7), data_version=52)
+    observer.finish(None)
+    before = units.used()
+
+    traced.score(observer.trace_id, "online.pre_verifier_pass_rate", 0.75)
+    traced.score(None, "online.pre_verifier_pass_rate", 0.75)  # untraced: nothing sent
+    NoTracer().score("abc", "online.pre_verifier_pass_rate", 0.75)
+
+    sent = [s for s in capture.scores() if s.get("name") == "online.pre_verifier_pass_rate"]
+    assert len(sent) == 1
+    assert sent[0]["traceId"] == observer.trace_id
+    assert sent[0]["value"] == 0.75
+    assert units.used() == before + 1
+
+
+def test_a_recorded_run_carries_its_trace_id(tmp_path: Path, capture: Capture) -> None:
+    # Phase 7 (design D4): the online evals score the trace of the run they judge.
+    from patchpulse.agent.graph import run_recorded
+
+    world = World(tmp_path, Scripted(), tracer=tracer(capture))
+    traced = run_recorded(ReportRequest.for_bundle("p1", 7), world.deps)
+    untraced = run_recorded(
+        ReportRequest.for_bundle("p1", 7), World(tmp_path / "b", Scripted()).deps
+    )
+
+    (root,) = [s for s in capture.spans() if s.parent is None]
+    assert traced.trace_id == format(root.context.trace_id, "032x")
+    assert untraced.trace_id is None
+
+
+def test_a_trace_never_inherits_the_apis_unsampled_request_span(capture: Capture) -> None:
+    # Final review I4 (18 Nov): pp-api's request span (App Insights, Task 13) is the current span
+    # when Ask starts its trace; one the rate limit didn't sample would make Langfuse's
+    # parent-based sampler drop the whole Ask trace.
+    from opentelemetry import trace
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+    unsampled = NonRecordingSpan(
+        SpanContext(trace_id=0x1234, span_id=0x5678, is_remote=False, trace_flags=TraceFlags(0))
+    )
+    with trace.use_span(unsampled):
+        traced = tracer(capture).start(ReportRequest.for_bundle("p1", 7), data_version=52)
+    traced.finish(None)
+
+    (root,) = capture.spans()
+    assert root.parent is None
+    assert root.context.trace_id != 0x1234

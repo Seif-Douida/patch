@@ -97,12 +97,12 @@ jobs:
           az monitor metrics list --resource "$id" --metrics Replicas --aggregation Average \
             --interval 1m --start-time "$start" --end-time "$end" -o json > replicas.json
 
-      - name: Job executions this month (pp-nightly, pp-migrate)
+      - name: Job executions this month (pp-nightly, pp-migrate, pp-retrain)
         id: executions
         run: |
           # `list` returns empty only when the job is absent (not created yet, or deleted by a
           # trip), and fails on real Azure errors. Azure keeps each job's recent executions.
-          for job in pp-nightly pp-migrate; do
+          for job in pp-nightly pp-migrate pp-retrain; do
             exists=$(az containerapp job list -g "$RG" --query "[?name=='$job'] | length(@)" -o tsv)
             if [ "$exists" = "0" ]; then
               echo '[]' > "$job-executions.json"
@@ -121,11 +121,13 @@ jobs:
           if [ "$COST_OK" = "true" ]; then cost_args=(--cost cost.json); fi
           uv run --no-dev python -m patchpulse.monitoring.cost_guard "${cost_args[@]}" \
             --replicas replicas.json --vcpu-per-replica 0.5 --cost-threshold "$THRESHOLD" \
-            --job-executions pp-nightly-executions.json --job-executions pp-migrate-executions.json
+            --job-executions pp-nightly-executions.json --job-executions pp-migrate-executions.json \
+            --job-executions pp-retrain-executions.json
           cat cost-guard-summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # First, so a failure to stop pp-api can't leave the nightly job scheduled. pp-migrate needs no
-      # action: only deploy.yml starts it, and deploy.yml refuses while pp-api is stopped.
+      # First, so a failure to stop pp-api can't leave the nightly job scheduled. pp-migrate and
+      # pp-retrain need no action: they run only when deploy.yml or retrain.yml starts them (45 min
+      # at most), and both refuse while pp-api is stopped.
       - name: Trip - delete pp-nightly
         id: trip_jobs
         if: steps.guard.outputs.tripped == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
@@ -250,6 +252,26 @@ jobs:
           fi
           gh label create alert --color B60205 --description "Automated alert (ADR-013)" --force
           gh issue create --title "$title" --label alert --body-file nightly-issue.md
+
+      # Phase 7 (design D7, `sql_allowance`): the free SQL offer's month, from Azure Monitor. Reading
+      # the metric never wakes or connects to the database (a connection would spend what it
+      # measures). After the kill switch's steps, whatever they did.
+      - name: SQL allowance
+        if: "!cancelled()"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          server=$(az sql server list -g "$RG" --query "[0].name" -o tsv)
+          id=$(az sql db show -g "$RG" -s "$server" -n patchpulse --query id -o tsv)
+          start=$(date -u +%Y-%m-01T00:00:00Z)
+          end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          az monitor metrics list --resource "$id" --metrics free_amount_consumed \
+            --aggregation Maximum --interval PT1H --start-time "$start" --end-time "$end" \
+            -o json > sql-metrics.json
+          uv run --no-dev --group pipeline python -m patchpulse.monitoring.sql_allowance \
+            sql-metrics.json --out sql-plan
+          bash .github/scripts/apply-issue-plan.sh sql-plan
 
       - name: Fail loudly if month-to-date cost was unavailable
         if: always() && (steps.cost.outcome == 'failure' || steps.guard.outputs.cost_available == 'false')

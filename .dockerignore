@@ -7,8 +7,14 @@
 .ruff_cache
 **/__pycache__
 data
+# Phase 7: the label files pp-retrain trains and tunes on (ids and labels, no text).
+!data/gold/sample.csv
+!data/gold/labels_claude.csv
+!data/silver/labels.csv
 docs
 evals
+# Phase 7: the online judge's rubric (the jobs image); every other eval file stays out.
+!evals/judge/rubric.md
 infra
 reports
 tests

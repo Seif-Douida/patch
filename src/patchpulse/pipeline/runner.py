@@ -56,7 +56,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -146,9 +146,11 @@ class Publisher(Protocol):
 
     def report(self, *, run_id: int, status: str, error: str | None) -> None: ...
 
-    def alert(self, *, title: str, body: str) -> None: ...
+    def alert(self, *, title: str, body: str, label: str = ...) -> None: ...
 
-    def resolve(self, *, title: str, comment: str) -> None: ...
+    def resolve(self, *, title: str, comment: str, label: str = ...) -> None: ...
+
+    def dispatch(self, event: str, payload: Mapping[str, Any]) -> None: ...
 
 
 class NoPublisher:
@@ -163,11 +165,14 @@ class NoPublisher:
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         log.info("run %d %s (not reported: local run)", run_id, status)
 
-    def alert(self, *, title: str, body: str) -> None:
+    def alert(self, *, title: str, body: str, label: str = "alert") -> None:
         log.warning("alert (not raised: local run): %s: %s", title, body)
 
-    def resolve(self, *, title: str, comment: str) -> None:
+    def resolve(self, *, title: str, comment: str, label: str = "alert") -> None:
         log.info("alert resolved (local run): %s", title)
+
+    def dispatch(self, event: str, payload: Mapping[str, Any]) -> None:
+        log.info("dispatch skipped (local run): %s %s", event, dict(payload))
 
 
 class DbtRunner(Protocol):
@@ -256,6 +261,10 @@ class _Run:
         self.night_end = night_end
         self.stages: dict[str, Any] = {"durations_s": {}}
         self.errors: dict[int, str] = {}
+        # Phase 7: the reports written tonight with their run records (for the online evals,
+        # never stored), and whether the drift stage opened a new drift issue.
+        self.scored: tuple[Any, ...] = ()
+        self.new_drift = False
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
@@ -325,6 +334,10 @@ def run_nightly(
     bundle: BundleBuilder | None = None,
     reports: ReportsStage | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    spotcheck: Callable[..., Any] | None = None,
+    monitor: Callable[..., Any] | None = None,
+    online_eval: Callable[..., Any] | None = None,
+    monitoring_file: Callable[..., bytes] | None = None,
 ) -> RunResult:
     """`index`, `effects`, `bundle` and `reports` replace those stages' work in tests; by default
     each is imported when needed."""
@@ -352,6 +365,10 @@ def run_nightly(
             bundle,
             reports,
             sleep,
+            spotcheck,
+            monitor,
+            online_eval,
+            monitoring_file,
         )
     except Exception as error:
         unrecorded = _finish(run, "failed", str(error))
@@ -368,6 +385,8 @@ def run_nightly(
         status, error_text = "failed", "; ".join(filter(None, (unrecorded, error_text)))
     log.info("nightly run %d %s", run_id, status)
     _report(publisher, run_id, status, error_text)
+    if status == "succeeded":
+        _request_retrain(run, publisher, now.date())
     if unrecorded is not None:
         raise PipelineError(f"run {run_id}: {error_text}")
     if run.errors:
@@ -411,6 +430,10 @@ def _run_stages(
     bundle: BundleBuilder | None,
     reports: ReportsStage | None,
     sleep: Callable[[float], None],
+    spotcheck: Callable[..., Any] | None = None,
+    monitor: Callable[..., Any] | None = None,
+    online_eval: Callable[..., Any] | None = None,
+    monitoring_file: Callable[..., bytes] | None = None,
 ) -> None:
     games = load_games(games_file, today=now.date())
     # Comparison games (Phase 4) get news and daily counts only: no reviews, prices or coverage.
@@ -480,6 +503,9 @@ def _run_stages(
     with run.stage("score"):
         run.stages["score"] = _score(run, settings, clock)
 
+    with run.stage("spotcheck"):
+        run.stages["spotcheck"] = _spotcheck(run, settings, publisher, spotcheck, now, clock)
+
     with run.stage("dbt"):
         target_path = target_root / f"run-{run.run_id}"
         result = dbt(["build"], settings=settings, target_path=target_path)
@@ -511,6 +537,9 @@ def _run_stages(
         health = (tracked or games)[0].appid
         run.stages["index"] = _index(run, settings, publisher, index, health, clock)
 
+    with run.stage("monitor"):
+        run.stages["monitor"] = _monitor(run, settings, publisher, monitor, now, clock)
+
     with run.stage("bundle"):
         agent_bundle, dumped, run.stages["bundle"] = _bundle(run, bundle, now, settings)
 
@@ -518,6 +547,9 @@ def _run_stages(
         run.stages["reports"] = _reports(
             run, settings, publisher, reports, agent_bundle, steam, clock
         )
+
+    with run.stage("online_eval"):
+        run.stages["online_eval"] = _online_eval(run, settings, publisher, online_eval, now, clock)
 
     with run.stage("agent_data"):
         run.stages["agent_data"] = _agent_data(run, publisher, agent_bundle, dumped, settings)
@@ -530,6 +562,9 @@ def _run_stages(
                 generated_at=now,
                 aspect_model=read_aspect_model(settings.model_dir),
             )
+        monitoring = _monitoring_file(run, settings, monitoring_file, now)
+        if monitoring is not None:
+            files = {**files, MONITORING_FILE: monitoring}
         run.stages["export"] = {"files": len(files)}
 
     with run.stage("publish"):
@@ -724,7 +759,8 @@ def _reports(
             title=BASIC_REPORTS,
             comment=f"Nightly run {run.run_id}: every report on the site was written by a model.",
         )
-    return asdict(outcome)
+    run.scored = outcome.runs
+    return {k: v for k, v in vars(outcome).items() if k != "runs"}
 
 
 def _agent_data(
@@ -1098,3 +1134,193 @@ def _backfill(
         "stopped": stopped,
     }
     return reached
+
+
+# --- Phase 7: the monitoring stages and the retrain request (design D1, D3, D4, D6) -------------
+
+RETRAIN_EVENT = "retrain-requested"
+
+
+def _apply_alerts(publisher: Publisher, outcomes: Sequence[Any]) -> None:
+    """Raise and resolve per config/alerts.yaml; an alert must never change the run's result."""
+    try:
+        from patchpulse.monitoring.alerts import apply_outcomes, load_rules
+
+        apply_outcomes(publisher, load_rules(), outcomes)
+    except Exception as failure:
+        log.error("could not apply the alerts: %s", failure)
+
+
+MONITORING_FILE = "monitoring.json"  # export.monitoring.MONITORING_FILE, imported lazily
+
+
+def _monitoring_file(
+    run: _Run, settings: Settings, builder: Callable[..., bytes] | None, now: datetime
+) -> bytes | None:
+    """The Monitoring page's data (Phase 7 design D10); a failure costs only this file."""
+    try:
+        if builder is None:
+            from patchpulse.export.monitoring import live_monitoring
+
+            builder = live_monitoring
+        with run.engine.connect() as connection:
+            return builder(connection, generated_at=now)
+    except Exception as failure:
+        log.error("monitoring.json not built: %s", type(failure).__name__)
+        _stage_failed(run, settings, "monitoring_export", failure)
+        return None
+
+
+def _stage_failed(run: _Run, settings: Settings, name: str, error: Exception) -> dict[str, Any]:
+    detail = scrub_secrets(f"{type(error).__name__}: {error}", settings)
+    _warn(run, f"{name}_failed", detail)
+    return {"skipped": detail[:500]}
+
+
+def _spotcheck(
+    run: _Run,
+    settings: Settings,
+    publisher: Publisher,
+    stage: Callable[..., Any] | None,
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The nightly teacher spot-check (design D3); never raises."""
+    if settings.spotcheck_budget_minutes <= 0:
+        return {"skipped": "turned off (PP_SPOTCHECK_BUDGET_MINUTES is 0)"}
+    if stage is None and settings.gemini_api_key is None:
+        return {"skipped": "no Gemini key (PP_GEMINI_API_KEY unset)"}
+    try:
+        from patchpulse.monitoring.alerts import load_rules
+        from patchpulse.pipeline.spotcheck import (
+            label_times,
+            run_live_spotcheck,
+            unavailable_outcome,
+        )
+
+        outcome = (stage or run_live_spotcheck)(
+            run.engine,
+            settings,
+            run_id=run.run_id,
+            clock=clock,
+            deadline=run.deadline(settings.spotcheck_budget_minutes * 60, clock),
+        )
+        with run.engine.connect() as connection:
+            first, last = label_times(connection)
+        rule = load_rules()["teacher_unavailable"]
+        naive_now = now.astimezone(UTC).replace(tzinfo=None)
+        _apply_alerts(publisher, [unavailable_outcome(first, last, naive_now, rule)])
+    except Exception as error:  # the spot-check waits a night
+        return _stage_failed(run, settings, "spotcheck", error)
+    return asdict(outcome)
+
+
+def _monitor(
+    run: _Run,
+    settings: Settings,
+    publisher: Publisher,
+    stage: Callable[..., Any] | None,
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The weekly drift check (design D2); never raises."""
+    if settings.monitor_budget_minutes <= 0:
+        return {"skipped": "turned off (PP_MONITOR_BUDGET_MINUTES is 0)"}
+    if stage is None and (
+        settings.qdrant_url is None or settings.qdrant_api_key is None or settings.model_dir is None
+    ):
+        return {"skipped": "no Qdrant settings or no model (PP_QDRANT_URL, PP_MODEL_DIR)"}
+    try:
+        from patchpulse.monitoring.alerts import load_rules
+        from patchpulse.pipeline.monitor import run_live_monitor
+
+        outcome = (stage or run_live_monitor)(
+            run.engine,
+            settings,
+            run_id=run.run_id,
+            today=now.date(),
+            publisher=publisher,
+            rules=load_rules(),
+            clock=clock,
+            deadline=run.deadline(settings.monitor_budget_minutes * 60, clock),
+        )
+    except Exception as error:  # the week is checked the next night
+        return _stage_failed(run, settings, "monitor", error)
+    run.new_drift = bool(outcome.new_drift)
+    return asdict(outcome)
+
+
+def _online_eval(
+    run: _Run,
+    settings: Settings,
+    publisher: Publisher,
+    stage: Callable[..., Any] | None,
+    now: datetime,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
+    """The online evals of tonight's reports (design D4); never raises."""
+    if settings.online_eval_budget_minutes <= 0:
+        return {"skipped": "turned off (PP_ONLINE_EVAL_BUDGET_MINUTES is 0)"}
+    if stage is None and settings.gemini_api_key is None:
+        return {"skipped": "no Gemini key (PP_GEMINI_API_KEY unset)"}
+    try:
+        from patchpulse.monitoring.alerts import load_rules
+        from patchpulse.pipeline.online_eval import (
+            langfuse_outcome,
+            run_live_online_evals,
+            verifier_outcome,
+        )
+
+        outcome = (stage or run_live_online_evals)(
+            run.engine,
+            settings,
+            run.scored,
+            run_id=run.run_id,
+            today=now.date(),
+            clock=clock,
+            deadline=run.deadline(settings.online_eval_budget_minutes * 60, clock),
+        )
+        rules = load_rules()
+        with run.engine.connect() as connection:
+            verifier = verifier_outcome(connection, rules["verifier_dropped"])
+        _apply_alerts(
+            publisher, [verifier, langfuse_outcome(outcome.units_used, rules["langfuse_units"])]
+        )
+    except Exception as error:  # the night's reports stand; their scores are missing
+        return _stage_failed(run, settings, "online_eval", error)
+    return asdict(outcome)
+
+
+def retrain_reason(*, today: date, new_drift: bool, last_request: date | None) -> str | None:
+    """`drift` when the drift stage opened a new drift issue; `monthly` on the first night of a
+    month with no request yet (design D6)."""
+    if new_drift:
+        return "drift"
+    if last_request is None or (last_request.year, last_request.month) != (today.year, today.month):
+        return "monthly"
+    return None
+
+
+def _request_retrain(run: _Run, publisher: Publisher, today: date) -> None:
+    """Ask retrain.yml for a challenger, after the night's publish; never raises. A new drift is
+    tonight's, or one a failed night stored and never asked about (read from SQL)."""
+    try:
+        from patchpulse.monitoring.alerts import load_rules
+        from patchpulse.monitoring.store import MetricRow, last_window_end, write_metrics
+        from patchpulse.pipeline.monitor import drift_pending
+
+        with run.engine.connect() as connection:
+            last = last_window_end(connection, family="retrain", scope="night")
+            new_drift = run.new_drift or drift_pending(connection, load_rules())
+        reason = retrain_reason(today=today, new_drift=new_drift, last_request=last)
+        if reason is None:
+            return
+        publisher.dispatch(RETRAIN_EVENT, {"reason": reason, "run_id": run.run_id})
+        row = MetricRow(
+            "retrain", f"requested.{reason}", "night", today, today, 1.0, None, None, None
+        )
+        with run.engine.begin() as connection:
+            write_metrics(connection, [row], run_id=run.run_id)
+        log.info("asked for a retrain (%s)", reason)
+    except Exception as failure:
+        log.error("could not ask for a retrain: %s", failure)

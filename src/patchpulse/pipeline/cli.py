@@ -5,6 +5,9 @@
     nightly          The nightly run, as pp_writer. Run by pp-nightly on its cron with --publish,
                      which sends the site data and the run's outcome to GitHub (ADR-018).
     create-local-db  Local and CI only: create PP_DB_NAME on the SQL Server container.
+    retrain          Train a challenger S0 on the silver and spot-check labels, compare it with
+                     the champion (PP_MODEL_DIR) by config/retrain.yaml's rule, log both to MLflow
+                     and register it as `challenger`. Run by pp-retrain; exits 0 either way.
 
 Exit codes: 0 success, 1 the run failed (details in ops.pipeline_run), 2 bad configuration.
 """
@@ -18,6 +21,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx2
 
@@ -61,11 +65,14 @@ class LocalDirPublisher:
     def report(self, *, run_id: int, status: str, error: str | None) -> None:
         log.info("run %d %s (not reported: local run)", run_id, status)
 
-    def alert(self, *, title: str, body: str) -> None:
+    def alert(self, *, title: str, body: str, label: str = "alert") -> None:
         log.warning("alert (not raised: local run): %s: %s", title, body)
 
-    def resolve(self, *, title: str, comment: str) -> None:
+    def resolve(self, *, title: str, comment: str, label: str = "alert") -> None:
         log.info("alert resolved (local run): %s", title)
+
+    def dispatch(self, event: str, payload: Mapping[str, Any]) -> None:
+        log.info("dispatch skipped (local run): %s %s", event, dict(payload))
 
 
 def configure_logging() -> None:
@@ -140,6 +147,40 @@ def _nightly(settings: Settings, export_dir: Path | None, games_file: Path, publ
     return 0
 
 
+def _retrain(settings: Settings) -> int:
+    """pp-retrain (Phase 7 design D5): 0 with either decision, 1 when the run fails."""
+    # Lazy: MLflow and the trainer are the `retrain` group, which the nightly doesn't need.
+    from patchpulse.models.promotion import load_rule
+    from patchpulse.models.retrain import run_retrain
+
+    if settings.model_dir is None:
+        raise SettingsError("retrain needs PP_MODEL_DIR: the champion to compare against")
+    rule = load_rule()
+    engine = make_engine(settings)
+    try:
+        connect_with_resume_retry(engine).close()  # wake a paused database first
+        result = run_retrain(
+            engine,
+            champion_dir=settings.model_dir,
+            out_dir=Path("build/models"),
+            today=datetime.now(UTC).date(),
+            rule=rule,
+            clock=lambda: datetime.now(UTC),
+        )
+    except Exception as error:
+        log.error("retrain failed: %s: %s", type(error).__name__, error)
+        return 1
+    finally:
+        engine.dispose()
+    decision = "promote" if result.decision.promote else "keep the champion"
+    print(
+        f"retrain {result.version}: decision: {decision}; registered version "
+        f"{result.registered_version}; MLflow run {result.mlflow_run_id}"
+    )
+    print(result.table)
+    return 0
+
+
 def _donor_candidates(appids: Sequence[int], games_file: Path) -> int:
     """Phase 4: check comparison-game candidates against Steam; prints, stores nothing."""
     tracked = [game for game in load_games(games_file) if game.tracked]
@@ -210,6 +251,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="publish to the site-data branch and report the outcome on GitHub (Azure)",
     )
     commands.add_parser("create-local-db", help="local/CI only: create PP_DB_NAME on the container")
+    commands.add_parser(
+        "retrain", help="train a challenger S0 and decide its promotion (pp-retrain, pp_writer)"
+    )
     candidates = commands.add_parser(
         "donor-candidates", help="Phase 4: check comparison-game candidates on Steam (no database)"
     )
@@ -246,6 +290,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _migrate(settings)
         if args.command == "nightly":
             return _nightly(settings, args.export_dir, args.games_file, args.publish)
+        if args.command == "retrain":
+            return _retrain(settings)
         return _create_local_db(settings)
     except SettingsError as error:
         print(f"patchpulse-pipeline: {error}", file=sys.stderr)

@@ -127,3 +127,28 @@ def test_settings_read_the_langfuse_variables(clean_env: pytest.MonkeyPatch) -> 
         assert loaded.langfuse_host == "https://cloud.langfuse.com"
         assert "hunter2" not in repr(loaded)
     assert scrub_secrets("refused hunter2-hunter2", settings) == "refused <langfuse>"
+
+
+def test_settings_read_the_monitoring_variables(clean_env: pytest.MonkeyPatch) -> None:
+    # Phase 7 (design D1, D11): the drift stage's budget and the acceptance drill.
+    for name, value in REQUIRED.items():
+        clean_env.setenv(name, value)
+    assert get_settings(env_file=None).monitor_budget_minutes == 2
+    assert get_settings(env_file=None).spotcheck_budget_minutes == 4
+    assert get_settings(env_file=None).drift_drill is None
+
+    clean_env.setenv("PP_MONITOR_BUDGET_MINUTES", "3")
+    clean_env.setenv("PP_DRIFT_DRILL", "language_shift")
+    settings = get_settings(env_file=None)
+
+    assert settings.monitor_budget_minutes == 3
+    assert settings.drift_drill == "language_shift"
+
+
+def test_an_unknown_drift_drill_is_refused(clean_env: pytest.MonkeyPatch) -> None:
+    for name, value in REQUIRED.items():
+        clean_env.setenv(name, value)
+    clean_env.setenv("PP_DRIFT_DRILL", "everything_on_fire")
+
+    with pytest.raises(SettingsError, match="PP_DRIFT_DRILL"):
+        get_settings(env_file=None)

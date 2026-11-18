@@ -15,11 +15,11 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --no-dev --group pipeline --group scoring --group retrieval --group causal --group agent
+    uv sync --locked --no-install-project --no-dev --group pipeline --group scoring --group retrieval --group causal --group agent --group retrain
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --group pipeline --group scoring --group retrieval --group causal --group agent --no-editable
+    uv sync --locked --no-dev --group pipeline --group scoring --group retrieval --group causal --group agent --group retrain --no-editable
 
 FROM python:3.12-slim-trixie
 ARG APP_VERSION=dev
@@ -48,6 +48,20 @@ RUN python -c "from pathlib import Path; from patchpulse.retrieval.embedders imp
 RUN python -c "import patchpulse.causal.estimate, patchpulse.pipeline.effects"
 # The reports stage too: the agent's graph (LangGraph), its models config and Langfuse's SDK.
 RUN python -c "import patchpulse.agent.graph, patchpulse.pipeline.reports, langfuse"
+# Phase 7: the drift reference next to the champion, the online judge's rubric, and the
+# monitoring stages' imports (they load at run time: a missing dependency fails here).
+COPY models/reference.json ./models/reference.json
+# The champion's registry version, for the Monitoring page's data (Phase 7 Task 15).
+COPY models/champion.yaml ./models/champion.yaml
+COPY evals/judge/rubric.md ./evals/judge/rubric.md
+RUN python -c "import patchpulse.pipeline.spotcheck, patchpulse.pipeline.monitor, patchpulse.pipeline.online_eval, patchpulse.monitoring.vectors"
+# pp-retrain (Phase 7, design D5): its labels (ids and labels only, the text comes from SQL), the
+# trainer, MLflow and the registry. It writes the model it registers and the reports it logs, so
+# those two directories are the app user's; the rest of /app stays read-only.
+COPY data/gold/sample.csv data/gold/labels_claude.csv ./data/gold/
+COPY data/silver/labels.csv ./data/silver/labels.csv
+RUN python -c "import patchpulse.models.retrain, patchpulse.models.promotion, mlflow"
+RUN mkdir -p /app/build/models /app/reports/retrain && chown -R app:app /app/build /app/reports
 USER app
 ENTRYPOINT ["patchpulse-pipeline"]
 CMD ["--help"]
