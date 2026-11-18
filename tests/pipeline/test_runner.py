@@ -71,6 +71,7 @@ class RecordingPublisher:
     resolved: list[tuple[str, str]] = field(default_factory=list)
     report_fails: bool = False
     branch_error: str | None = None
+    dispatches: list[tuple[str, dict[str, Any], int]] = field(default_factory=list)
 
     def publish(self, files: Mapping[str, bytes], *, data_version: int) -> None:
         self.calls.append((dict(files), data_version))
@@ -85,11 +86,15 @@ class RecordingPublisher:
             raise RuntimeError("GitHub is down")
         self.reports.append((run_id, status, error))
 
-    def alert(self, *, title: str, body: str) -> None:
+    def alert(self, *, title: str, body: str, label: str = "alert") -> None:
         self.alerts.append((title, body))
 
-    def resolve(self, *, title: str, comment: str) -> None:
+    def resolve(self, *, title: str, comment: str, label: str = "alert") -> None:
         self.resolved.append((title, comment))
+
+    def dispatch(self, event: str, payload: Mapping[str, Any]) -> None:
+        # Phase 7: the retrain request, after the publish (the order is checked below).
+        self.dispatches.append((event, dict(payload), len(self.calls)))
 
 
 def ok_dbt(args: Any, **_: Any) -> DbtResult:
@@ -919,13 +924,24 @@ def failing_bundle(connection: Connection, *, run_id: int, today: date) -> Bundl
 
 
 def with_gemini(settings: Settings, **changes: Any) -> Settings:
-    return settings.model_copy(update={"gemini_api_key": SecretStr("test-gemini-key"), **changes})
+    """A key for the reports stage. The spot-check and the online evals would ask Google for real
+    with it (and their limiter wait out a minute): they stay off unless a test turns them on."""
+    off = {"spotcheck_budget_minutes": 0, "online_eval_budget_minutes": 0}
+    return settings.model_copy(
+        update={"gemini_api_key": SecretStr("test-gemini-key"), **off, **changes}
+    )
 
 
 def tonight(**counts: int) -> ReportsOutcome:
     values = {"due": 0, "written": 0, "basic": 0, "failed": 0, "remaining": 0}
     values.update(counts)
-    return ReportsOutcome(**values)
+    return ReportsOutcome(
+        due=values["due"],
+        written=values["written"],
+        basic=values["basic"],
+        failed=values["failed"],
+        remaining=values["remaining"],
+    )
 
 
 @dataclass
@@ -1489,3 +1505,200 @@ def test_news_history_fetches_the_rest_of_the_start_day(env: Env) -> None:
 
     assert {"start-15h", "start-9h"} <= stored_gids(env, GAME_A)
     assert news_stage(env)["history_pages"] == 1
+
+
+# --- Phase 7 Task 8: the monitoring stages and the retrain request -------------------------------
+
+
+@dataclass
+class FakeStage:
+    """A monitoring stage replaced: records its deadline, returns or raises `result`."""
+
+    result: Any
+    deadlines: list[float] = field(default_factory=list)
+    runs: list[Any] = field(default_factory=list)
+
+    def __call__(self, *args: Any, deadline: float, **kwargs: Any) -> Any:
+        self.deadlines.append(deadline)
+        if len(args) > 2:  # the online evals get the night's scored runs
+            self.runs.append(args[2])
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def monitoring(
+    *, spot: Any = None, monitor: Any = None, online: Any = None
+) -> dict[str, FakeStage]:
+    from patchpulse.pipeline.monitor import MonitorOutcome
+    from patchpulse.pipeline.online_eval import OnlineOutcome
+    from patchpulse.pipeline.spotcheck import SpotcheckOutcome
+
+    return {
+        "spotcheck": FakeStage(spot or SpotcheckOutcome(200, 200, 0, None)),
+        "monitor": FakeStage(monitor or MonitorOutcome(ran=True)),
+        "online_eval": FakeStage(online or OnlineOutcome(0, 0, False)),
+    }
+
+
+def test_the_new_stages_run_in_order(env: Env) -> None:
+    stages = monitoring()
+    result = env.run(dbt=ok_dbt, export=stub_export, **stages)
+
+    assert result.status == "succeeded"
+    order = list(result.stages["durations_s"])
+    names = ["score", "spotcheck", "dbt", "index", "monitor", "reports", "online_eval", "export"]
+    assert [order.index(n) for n in names] == sorted(order.index(n) for n in names)
+    assert result.stages["spotcheck"] == {
+        "drawn": 200,
+        "labeled": 200,
+        "failed_batches": 0,
+        "stopped": None,
+    }
+
+
+@pytest.mark.parametrize("failing", ["spotcheck", "monitor", "online_eval"])
+def test_a_failing_monitoring_stage_is_a_warning_and_the_night_succeeds(
+    env: Env, failing: str
+) -> None:
+    stages = monitoring()
+    stages[failing].result = RuntimeError("PP_GEMINI_API_KEY=test-gemini-key broke")
+    settings = with_gemini(env.settings, spotcheck_budget_minutes=4, online_eval_budget_minutes=2)
+    result = env.run(settings=settings, dbt=ok_dbt, export=stub_export, **stages)
+
+    assert result.status == "succeeded"
+    assert "skipped" in result.stages[failing]
+    assert "test-gemini-key" not in json.dumps(result.stages)
+    checks = {r[0] for r in env.rows("SELECT check_name FROM ops.data_quality_result")}
+    assert f"{failing}_failed" in checks
+    assert len(env.publisher.calls) == 1
+
+
+def test_each_new_stage_stops_at_its_budget(env: Env) -> None:
+    stages = monitoring()
+    env.run(dbt=ok_dbt, export=stub_export, clock=lambda: 0.0, **stages)
+
+    assert stages["spotcheck"].deadlines == [4 * 60]
+    assert stages["monitor"].deadlines == [2 * 60]
+
+
+def test_the_reports_stage_record_never_holds_its_runs(env: Env) -> None:
+    from patchpulse.agent.graph import RunRecord
+    from patchpulse.agent.tools import Trace
+    from patchpulse.pipeline.reports import ScoredRun
+
+    record = RunRecord(
+        sample_report("p1", 7), None, [], None, None, Trace(retrieved={1: "secret review"}), False
+    )
+    night = replace(tonight(due=1, written=1), runs=(ScoredRun("p1-7d", record, "t1"),))
+    stages = monitoring()
+    result = env.run(
+        settings=with_gemini(env.settings, online_eval_budget_minutes=2), dbt=ok_dbt,
+        export=stub_export, bundle=fixture_bundle, reports=FakeReports([night]), **stages,
+    )  # fmt: skip
+
+    assert "runs" not in result.stages["reports"]
+    assert "secret review" not in json.dumps(result.stages, default=str)
+    (runs,) = stages["online_eval"].runs
+    assert [r.report_id for r in runs] == ["p1-7d"]
+
+
+def test_retrain_reason() -> None:
+    from patchpulse.pipeline.runner import retrain_reason
+
+    day = date(2026, 11, 23)
+    assert retrain_reason(today=day, new_drift=True, last_request=day) == "drift"
+    assert retrain_reason(today=day, new_drift=False, last_request=date(2026, 11, 1)) is None
+    assert retrain_reason(today=day, new_drift=False, last_request=date(2026, 10, 30)) == "monthly"
+    assert retrain_reason(today=day, new_drift=False, last_request=None) == "monthly"
+
+
+def test_a_lasting_drift_asks_for_a_retrain_once(env: Env) -> None:
+    from patchpulse.pipeline.monitor import MonitorOutcome
+
+    env.run(
+        dbt=ok_dbt,
+        export=stub_export,
+        **monitoring(monitor=MonitorOutcome(ran=True, new_drift=True)),
+    )
+    env.run(
+        dbt=ok_dbt,
+        export=stub_export,
+        **monitoring(monitor=MonitorOutcome(ran=True, new_drift=False)),
+    )
+
+    reasons = [payload["reason"] for _, payload, _ in env.publisher.dispatches]
+    assert reasons == ["drift"]  # the monthly request is covered by the drift one this month
+
+
+def storing_a_breach(engine: Engine, *args: Any, run_id: int, today: date, **_: Any) -> Any:
+    """The monitor stage, as far as SQL sees it: a stored week whose language mix breaches."""
+    from patchpulse.monitoring.store import MetricRow, write_metrics
+    from patchpulse.pipeline.monitor import MonitorOutcome, week_window
+
+    start, end = week_window(today)
+    row = MetricRow("drift", "language_psi", "week", start, end, 9.0, None, None, 1000)
+    with engine.begin() as connection:
+        write_metrics(connection, [row], run_id=run_id)
+    return MonitorOutcome(ran=True, new_drift=True)
+
+
+def test_a_drift_request_lost_to_a_failed_night_is_asked_the_next_night(env: Env) -> None:
+    # Final review I1 (18 Nov): the new drift lived only in memory, so a night that failed after
+    # storing the week never asked, and the next night saw a lasting drift.
+    from patchpulse.pipeline.monitor import MonitorOutcome
+
+    env.steam.failing.add(GAME_B)
+    with pytest.raises(PipelineError):
+        env.run(dbt=ok_dbt, export=stub_export, **(monitoring() | {"monitor": storing_a_breach}))
+    assert env.publisher.dispatches == []
+
+    env.steam.failing.discard(GAME_B)
+    quiet = monitoring(monitor=MonitorOutcome(ran=False, skipped="not due"))
+    env.run(dbt=ok_dbt, export=stub_export, **quiet)
+    env.run(dbt=ok_dbt, export=stub_export, **quiet)
+
+    reasons = [payload["reason"] for _, payload, _ in env.publisher.dispatches]
+    assert reasons == ["drift"]
+
+
+def test_the_request_is_sent_after_publish_and_only_on_success(env: Env) -> None:
+    from patchpulse.pipeline.monitor import MonitorOutcome
+
+    drifting = MonitorOutcome(ran=True, new_drift=True)
+    result = env.run(dbt=ok_dbt, export=stub_export, **monitoring(monitor=drifting))
+    ((event, payload, published),) = env.publisher.dispatches
+    assert (event, payload) == ("retrain-requested", {"reason": "drift", "run_id": result.run_id})
+    assert published == 1  # after the night's publish
+
+    env.steam.failing.add(GAME_B)  # a failed night asks for nothing
+    with pytest.raises(PipelineError):
+        env.run(dbt=ok_dbt, export=stub_export, **monitoring(monitor=drifting))
+    assert len(env.publisher.dispatches) == 1
+
+
+def test_the_export_adds_the_monitoring_file(env: Env) -> None:
+    # Phase 7 Task 15 (design D10): the Monitoring page's data, published with the rest.
+    env.run()
+    second = env.run()
+
+    files = env.publisher.calls[-1][0]
+    monitoring = json.loads(files["monitoring.json"])
+    assert monitoring["schema_version"] == 1
+    # The night being exported is still running: the page shows the nights before it.
+    assert [r["run_id"] for r in monitoring["pipeline"]] == [second.run_id - 1]
+    assert monitoring["champion"]["family"] == "s0"
+
+
+def test_a_failing_monitoring_file_costs_only_the_file(env: Env) -> None:
+    def broken(connection: Any, *, generated_at: datetime) -> bytes:
+        raise RuntimeError("monitoring broke")
+
+    result = env.run(monitoring_file=broken)
+
+    assert result.status == "succeeded"
+    files = env.publisher.calls[-1][0]
+    assert "monitoring.json" not in files
+    assert "index.json" in files
+    checks = [r[0] for r in env.rows("SELECT check_name FROM ops.data_quality_result")]
+    assert "monitoring_export_failed" in checks

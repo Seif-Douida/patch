@@ -190,3 +190,74 @@ export type PublicReport = {
 export type ReportFile = Header & {
   report: PublicReport;
 };
+
+// Phase 7 (design D10): monitoring.json, the Monitoring page's data (schema 1), and alerts.json,
+// the open alert and drift issues publish-site.yml lists at build time. Numbers and names only.
+export type RunStatus = "succeeded" | "failed";
+
+export type PipelineRun = {
+  run_id: number;
+  started_at: string | null;
+  status: RunStatus | string;
+  duration_s: number | null;
+  stages_s: Record<string, number>;
+};
+
+export type DriftPoint = { window_end: string; value: number | null; drill: boolean };
+
+export type DriftSection = {
+  rule: string;
+  metric: string;
+  threshold: number | null;
+  points: DriftPoint[];
+};
+
+export type AgreementWeek = {
+  window_end: string;
+  value: number | null;
+  lo: number | null;
+  hi: number | null;
+  n: number | null;
+};
+
+export type OnlineNight = {
+  date: string;
+  reports: number | null;
+  gemini_errors: number | null;
+  pass_rate: number | null;
+  withheld: Record<string, number>;
+  reworded: number;
+  judge: { uncalibrated: true; scores: Record<string, number | null> };
+};
+
+export type AlertRule = {
+  id: string;
+  title: string;
+  label: "alert" | "drift";
+  threshold: number | null;
+  meaning: string;
+};
+
+export type MonitoringFile = {
+  schema_version: number;
+  generated_at: string;
+  pipeline: PipelineRun[];
+  freshness: { last_success: string | null; age_hours: number | null };
+  data_quality: { check: string; severity: string; count: number }[];
+  drift: DriftSection[];
+  agreement: { reference: number | null; threshold: number | null; weeks: AgreementWeek[] };
+  online: { nights: OnlineNight[] };
+  retrain: {
+    last_request: { date: string | null; reason: string } | null;
+    last_decision: {
+      date: string | null;
+      decision: string;
+      recent_gain: number | null;
+      n: number | null;
+    } | null;
+  };
+  rules: AlertRule[];
+  champion: { version: number; family: string; model_version: string } | null;
+};
+
+export type OpenAlert = { number: number; title: string; label: "alert" | "drift"; opened_at: string };

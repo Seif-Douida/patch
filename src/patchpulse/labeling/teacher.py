@@ -25,16 +25,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from patchpulse.labeling.cache import LabelCache
 from patchpulse.labeling.limits import QuotaExhaustedError
 from patchpulse.labeling.llm import LLMResponse, TeacherRequestError, TeacherUnavailableError
 from patchpulse.labeling.taxonomy import ASPECTS
-from patchpulse.models.snapshot import Snapshot
 from patchpulse.models.text import CLEANING_VERSION, clean_text
+
+if TYPE_CHECKING:  # pandas: the jobs image's spot-check batches and labels without it
+    from patchpulse.labeling.cache import LabelCache
+    from patchpulse.models.snapshot import Snapshot
 
 log = logging.getLogger("patchpulse.labeling.teacher")
 
@@ -273,8 +275,12 @@ def _singles(batch: Batch) -> list[Batch]:
     return singles
 
 
-def label_batch(client: TextModel, batch: Batch) -> list[TeacherLabel]:
-    """Labels for the batch's reviews; a review that never validates is left out."""
+def label_batch(
+    client: TextModel, batch: Batch, *, stop: Callable[[], bool] | None = None
+) -> list[TeacherLabel]:
+    """Labels for the batch's reviews; a review that never validates is left out. `stop` is asked
+    before each review is relabeled alone: once it says so, the rest are left out too (the
+    nightly spot-check passes its deadline)."""
     try:
         labels = _ask(client, batch)
     except (AnswerError, TeacherRequestError) as error:
@@ -282,7 +288,13 @@ def label_batch(client: TextModel, batch: Batch) -> list[TeacherLabel]:
             log.warning("review %d skipped: %s", batch.review_ids[0], error)
             return []
         log.info("a batch of %d failed (%s); labeling each alone", len(batch.review_ids), error)
-        return [label for single in _singles(batch) for label in label_batch(client, single)]
+        found: list[TeacherLabel] = []
+        for single in _singles(batch):
+            if stop is not None and stop():
+                log.info("out of time: the batch's other reviews are left out")
+                break
+            found += label_batch(client, single)
+        return found
     return [
         TeacherLabel(batch.review_ids[alias - 1], aspects)
         for alias, aspects in sorted(labels.items())

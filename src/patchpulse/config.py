@@ -7,6 +7,7 @@ secrets, which Bicep fills from GitHub environment secrets. Nothing secret is st
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, ValidationError
@@ -60,6 +61,14 @@ class Settings(BaseSettings):
     github_repository: str | None = None
     github_app_id: str | None = None
     github_app_private_key: SecretStr | None = None
+    # Phase 7 (design D1, D11): the weekly drift stage's budget, and the acceptance drill, set on
+    # pp-nightly for one night only.
+    monitor_budget_minutes: int = 2
+    drift_drill: Literal["language_shift"] | None = None
+    # Phase 7 (design D3): the nightly teacher spot-check's budget (10 requests, tokens-bound).
+    spotcheck_budget_minutes: int = 4
+    # Phase 7 (design D4): the online evals of the night's reports (the judge's requests).
+    online_eval_budget_minutes: int = 2
 
 
 class LabSettings(BaseSettings):

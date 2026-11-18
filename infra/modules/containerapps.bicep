@@ -3,6 +3,7 @@
 param location string
 param tags object
 param logAnalyticsWorkspaceName string
+param appInsightsName string
 param apiImage string
 param allowedOrigin string
 
@@ -27,6 +28,13 @@ param langfuseSecretKey string
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-07-01' existing = {
   name: logAnalyticsWorkspaceName
+}
+
+// Phase 7 (design D8): pp-api's requests and dependencies go to the workspace-based App Insights
+// that monitoring.bicep creates, so they land in the capped workspace; pp-api samples at a fixed
+// rate (api/telemetry.py).
+resource insights 'Microsoft.Insights/components@2020-02-02' existing = {
+  name: appInsightsName
 }
 
 resource environment 'Microsoft.App/managedEnvironments@2025-07-01' = {
@@ -100,6 +108,10 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
           name: 'langfuse-secret-key'
           value: langfuseSecretKey
         }
+        {
+          name: 'appinsights-connection-string'
+          value: insights.properties.ConnectionString
+        }
       ]
     }
     template: {
@@ -137,6 +149,11 @@ resource api 'Microsoft.App/containerApps@2025-07-01' = {
             {
               name: 'PP_SITE_ORIGIN'
               value: allowedOrigin
+            }
+            {
+              // Phase 7 (design D8): requests and dependencies, scrubbed and rate-limited.
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              secretRef: 'appinsights-connection-string'
             }
             {
               // Ask's questions a day (design D9). Measured 4 Nov 2026: an isolated question

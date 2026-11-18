@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 import mlflow
@@ -25,23 +24,14 @@ from patchpulse.labeling.gold import CLAUDE_LABELS_FILE, SAMPLE_FILE, read_label
 from patchpulse.labeling.silver import LABELS_FILE, SILVER_DIR, load_silver
 from patchpulse.labeling.taxonomy import ASPECTS, TAXONOMY_VERSION
 from patchpulse.models.artifact import read_artifact
-from patchpulse.models.metrics import micro_f1, prf
 from patchpulse.models.snapshot import load_snapshot
+from patchpulse.models.split import Split  # re-exported: training's callers import it from here
 from patchpulse.models.text import CLEANING_VERSION
-from patchpulse.models.thresholds import cv_predictions, tune_thresholds
+from patchpulse.models.thresholds import CV_FOLDS, CV_SEED, DevScores
 from patchpulse.models.tracking import log_ids_hash, tracking_run
 
 EXPERIMENT = "students"
 MODELS_DIR = Path("build/models")
-CV_FOLDS = 5
-CV_SEED = 20261012
-
-
-@dataclass(frozen=True)
-class Split:
-    ids: list[int]
-    texts: list[str]
-    labels: NDArray[np.bool_]  # (reviews, aspects)
 
 
 @dataclass(frozen=True)
@@ -94,29 +84,6 @@ def load_training_data(data_dir: Path, gold_dir: Path) -> TrainingData:
         teacher=_one(source["model"], "teacher"),
         teacher_prompt_hash=_one(source["prompt_hash"], "prompt"),
     )
-
-
-@dataclass(frozen=True)
-class DevScores:
-    thresholds: NDArray[np.float64]  # tuned on all of dev: the ones the model ships with
-    cv_macro_f1: float  # out of fold: the number students are compared on
-    cv_micro_f1: float
-    cv_f1: dict[str, float]
-
-
-def score_on_dev(dev: Split, probs: NDArray[np.float64]) -> DevScores:
-    predicted = cv_predictions(dev.labels, probs, folds=CV_FOLDS, seed=CV_SEED)
-    per_aspect = prf(dev.labels, predicted).f1
-    return DevScores(
-        thresholds=tune_thresholds(dev.labels, probs),
-        cv_macro_f1=float(per_aspect.mean()),
-        cv_micro_f1=micro_f1(dev.labels, predicted),
-        cv_f1={code: float(f1) for code, f1 in zip(ASPECTS, per_aspect, strict=True)},
-    )
-
-
-def new_version(now: datetime | None = None) -> str:
-    return (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
 
 
 def log_student(

@@ -203,12 +203,19 @@ class Observer:
 class Tracer(Protocol):
     def start(self, request: ReportRequest, *, data_version: int) -> Observer: ...
 
+    def score(self, trace_id: str | None, name: str, value: float) -> None:
+        """A number on a finished trace (Phase 7's online evals); nothing for an untraced run."""
+        ...
+
     def close(self) -> None: ...
 
 
 class NoTracer:
     def start(self, request: ReportRequest, *, data_version: int) -> Observer:
         return Observer()
+
+    def score(self, trace_id: str | None, name: str, value: float) -> None:
+        return None
 
     def close(self) -> None:
         return None
@@ -339,6 +346,7 @@ class LangfuseTracer:
 
     def start(self, request: ReportRequest, *, data_version: int) -> Observer:
         from langfuse import propagate_attributes
+        from opentelemetry import context as otel_context  # Langfuse's own dependency
 
         from patchpulse.agent.prompts import PROMPT_VERSION
 
@@ -347,6 +355,10 @@ class LangfuseTracer:
             return Observer()
         name = "ask" if ask else f"report {request.bundle_id}-{request.horizon}d"
         kind = "ask" if ask else "report"
+        # The root starts in an empty context: in pp-api the current span is the request's (App
+        # Insights), and one its rate limit didn't sample would make Langfuse's parent-based
+        # sampler drop the whole trace (final review I4). Its children hang off it explicitly.
+        detached = otel_context.attach(otel_context.Context())
         try:
             with propagate_attributes(
                 trace_name=kind,
@@ -360,7 +372,19 @@ class LangfuseTracer:
             log.warning("trace of %s: Langfuse failed (%s); the run goes on untraced", name,
                         type(error).__name__)  # fmt: skip
             return Observer()
+        finally:
+            otel_context.detach(detached)
         return LangfuseObserver(root, name, self.units)
+
+    def score(self, trace_id: str | None, name: str, value: float) -> None:
+        """One unit each; a failure is logged, never raised (a score never fails a night)."""
+        if trace_id is None:
+            return
+        try:
+            self.client.create_score(name=name, value=float(value), trace_id=trace_id)
+            self.units.add(1)
+        except Exception as error:
+            log.warning("score %s: Langfuse failed (%s)", name, type(error).__name__)
 
     def close(self) -> None:
         """Send what's left (the nightly job and the backfill call it at the end)."""

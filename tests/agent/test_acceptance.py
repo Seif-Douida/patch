@@ -115,6 +115,9 @@ class Traces:
         self.started.append(request)
         return Numbered(f"t{len(self.started)}")
 
+    def score(self, trace_id: str | None, name: str, value: float) -> None:
+        return None
+
     def close(self) -> None:
         return None
 

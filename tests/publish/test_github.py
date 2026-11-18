@@ -316,3 +316,22 @@ def test_alert_opens_or_comments_and_resolve_closes(
     assert github.comments[1] == ["Run 8: 15 of 1000 points differ.", "Run 9: in sync."]
     assert out_of_sync["state"] == "closed"
     assert (unreachable["title"], unreachable["state"]) == ("Qdrant unreachable", "open")
+
+
+def test_drift_issues_carry_the_drift_label(
+    github: FakeGitHub, key_pair: tuple[str, rsa.RSAPublicKey]
+) -> None:
+    # Phase 7 (design D7): drift rules raise issues labelled `drift`, found and closed by it.
+    pem, _ = key_pair
+    publisher = GitHubPublisher(
+        app_id=APP_ID, private_key=SecretStr(pem), repo=REPO, http=github.client(), now=lambda: NOW
+    )
+
+    publisher.alert(title="drift: language mix", body="psi 0.41", label="drift")
+    publisher.alert(title="drift: language mix", body="psi 0.44", label="drift")
+    publisher.resolve(title="drift: language mix", comment="psi 0.10", label="drift")
+
+    (issue,) = github.issues
+    assert issue["labels"] == ["drift"]
+    assert github.comments[1] == ["psi 0.44", "psi 0.10"]
+    assert issue["state"] == "closed"

@@ -23,6 +23,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, get_args
 
@@ -33,6 +34,7 @@ from patchpulse.labeling.taxonomy import ASPECTS, TAXONOMY_VERSION
 from patchpulse.models.text import CLEANING_VERSION
 
 MODEL_FILE = "model.json"
+VERSION_FORMAT = "%Y%m%dT%H%M%SZ"  # a model's version: when it was trained, in UTC
 Family = Literal["s0", "s1a", "s1b"]
 FAMILIES: tuple[str, ...] = get_args(Family)
 
@@ -206,3 +208,7 @@ def load_scorer(model_dir: Path) -> Scorer:
 
         return S1bScorer.load(model_dir, artifact)
     raise ArtifactError(f"no scorer for model family {artifact.family!r} yet")
+
+
+def new_version(now: datetime | None = None) -> str:
+    return (now or datetime.now(UTC)).strftime(VERSION_FORMAT)

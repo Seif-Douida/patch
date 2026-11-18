@@ -86,6 +86,15 @@ def macro_f1(y_true: ArrayLike, y_pred: ArrayLike) -> float:
     return float(prf(y_true, y_pred).f1.mean())
 
 
+def assessable_macro_f1(y_true: ArrayLike, y_pred: ArrayLike) -> float:
+    """Macro-F1 over the aspects the truth has positives for (Phase 7's teacher-student
+    agreement): a week of a few hundred spot-check labels often has none of a rare aspect, and its
+    F1 of 0 would read as disagreement. nan when the truth has no positives at all."""
+    scores = prf(y_true, y_pred)
+    seen = scores.support > 0
+    return float(scores.f1[seen].mean()) if seen.any() else float("nan")
+
+
 def micro_f1(y_true: ArrayLike, y_pred: ArrayLike) -> float:
     """F1 over every (review, aspect) decision pooled: dominated by the common aspects."""
     tp, fp, fn = (int(count.sum()) for count in _counts(y_true, y_pred))

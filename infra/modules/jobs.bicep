@@ -1,6 +1,7 @@
 // Container Apps Jobs (ADR-009): pp-nightly runs the pipeline on a cron, pp-migrate applies
-// migrations when deploy.yml starts it. Both run the jobs image in the pp-api environment, so their
-// logs go to the same capped workspace.
+// migrations when deploy.yml starts it, pp-retrain trains a challenger when retrain.yml starts it
+// (Phase 7). All run the jobs image in the pp-api environment, so their logs go to the same capped
+// workspace.
 // $0 guard values are literals (ADR-017): at most 1 vCPU / 2 GiB, 45 min, no retries, one replica,
 // and at most one scheduled run a day. Worst case 31 x 2,700 s x 1 vCPU = 83.7k of the 180k vCPU-s
 // grant.
@@ -44,6 +45,15 @@ param langfusePublicKey string
 
 @secure()
 param langfuseSecretKey string
+
+@description('DagsHub\'s MLflow, where pp-retrain logs its runs and registers its challenger (Phase 7, design D5).')
+param mlflowTrackingUri string
+
+param mlflowTrackingUsername string
+
+@description('A DagsHub token with write access: pp-retrain only, never the nightly (design D5).')
+@secure()
+param dagshubToken string
 
 resource nightly 'Microsoft.App/jobs@2025-07-01' = {
   name: 'pp-nightly'
@@ -141,12 +151,14 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               secretRef: 'github-app-key'
             }
             {
-              // Of the 45 min: 20 backfill, 5 scoring, 5 indexing, 2 effects and 3 reports leave
-              // 10 for the incremental stages, dbt, the reconciliation and the export; the runner
-              // stops the budgeted stages 10 min before the timeout whatever their budgets
-              // (NIGHT_RESERVE_S). Backfill had 25 until the refill was over (Phase 5).
+              // Of the 45 min: 10 backfill, 5 scoring, 4 spot-check, 5 indexing, 2 effects,
+              // 2 drift, 3 reports and 2 online evals leave 12 for the incremental stages, dbt,
+              // the reconciliation and the export; the runner stops the budgeted stages 10 min
+              // before the timeout whatever their budgets (NIGHT_RESERVE_S). Backfill had 25
+              // until the refill was over (Phase 5) and 20 until Phase 7 (it ran 0 s on 17 Nov
+              // 2026: every game's history is complete).
               name: 'PP_BACKFILL_BUDGET_MINUTES'
-              value: '20'
+              value: '10'
             }
             {
               // Aspect scoring with the champion baked into the image (design D8).
@@ -170,6 +182,23 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               // what's left waits a night. 0 turns it off.
               name: 'PP_REPORTS_BUDGET_MINUTES'
               value: '3'
+            }
+            {
+              // Phase 7 (design D3): the teacher spot-check, 10 requests to Gemma 4 31B on the
+              // free tier (tokens-bound, ~3.5 min). 0 turns it off.
+              name: 'PP_SPOTCHECK_BUDGET_MINUTES'
+              value: '4'
+            }
+            {
+              // Phase 7 (design D4): the online evals judge tonight's reports. 0 turns it off.
+              name: 'PP_ONLINE_EVAL_BUDGET_MINUTES'
+              value: '2'
+            }
+            {
+              // Phase 7 (design D2): the weekly drift check, inside the night's wake (no
+              // separate job: design D1). 0 turns it off.
+              name: 'PP_MONITOR_BUDGET_MINUTES'
+              value: '2'
             }
             {
               name: 'PP_GEMINI_API_KEY'
@@ -267,6 +296,88 @@ resource migrate 'Microsoft.App/jobs@2025-07-01' = {
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
+          }
+        }
+      ]
+    }
+  }
+}
+
+// Phase 7 (design D5): retrain.yml starts it to train a challenger S0, compare it with the
+// champion baked into the image and register it on DagsHub. S0 trains in under a minute; the
+// 45 min cap is cost-guard's, which counts its executions with the other jobs'.
+resource retrain 'Microsoft.App/jobs@2025-07-01' = {
+  name: 'pp-retrain'
+  location: location
+  tags: tags
+  properties: {
+    environmentId: environmentId
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Manual'
+      manualTriggerConfig: {
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      replicaTimeout: 2700
+      replicaRetryLimit: 0
+      secrets: [
+        {
+          name: 'writer-password'
+          value: sqlWriterPassword
+        }
+        {
+          name: 'dagshub-token'
+          value: dagshubToken
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'retrain'
+          image: jobsImage
+          args: [
+            'retrain'
+          ]
+          env: [
+            {
+              name: 'PP_DB_HOST'
+              value: sqlServerFqdn
+            }
+            {
+              name: 'PP_DB_NAME'
+              value: sqlDatabaseName
+            }
+            {
+              name: 'PP_DB_USER'
+              value: 'pp_writer'
+            }
+            {
+              name: 'PP_DB_PASSWORD'
+              secretRef: 'writer-password'
+            }
+            {
+              // The champion baked into the image: what the challenger is compared with.
+              name: 'PP_MODEL_DIR'
+              value: '/app/model'
+            }
+            {
+              name: 'MLFLOW_TRACKING_URI'
+              value: mlflowTrackingUri
+            }
+            {
+              name: 'MLFLOW_TRACKING_USERNAME'
+              value: mlflowTrackingUsername
+            }
+            {
+              name: 'MLFLOW_TRACKING_PASSWORD'
+              secretRef: 'dagshub-token'
+            }
+          ]
+          resources: {
+            cpu: 1
+            memory: '2Gi'
           }
         }
       ]

@@ -36,6 +36,9 @@ RUN python -c "from pathlib import Path; from patchpulse.retrieval.embedders imp
 # The agent imports only when a question comes, and the tracer imports Langfuse's SDK only
 # when its keys are set: a missing dependency fails here instead.
 RUN python -c "import patchpulse.agent.graph, patchpulse.api.app, langfuse"
+# Phase 7 (design D8): the telemetry loads its instrumentation and exporter only when Azure sets
+# APPLICATIONINSIGHTS_CONNECTION_STRING.
+RUN python -c "import patchpulse.api.telemetry, azure.monitor.opentelemetry.exporter, opentelemetry.instrumentation.fastapi, opentelemetry.instrumentation.httpx"
 USER app
 EXPOSE 8000
 CMD ["uvicorn", "patchpulse.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -71,7 +71,11 @@ def test_cost_query_is_retried_when_throttled() -> None:
 
 def test_replicas_are_read_as_per_minute_averages() -> None:
     # Azure samples Replicas about twice a minute, so hourly Totals double-count.
-    (query,) = [line for line in shell_lines("cost-guard.yml") if "az monitor metrics list" in line]
+    (query,) = [
+        line
+        for line in shell_lines("cost-guard.yml")
+        if "az monitor metrics list" in line and "--metrics Replicas" in line
+    ]
     assert "--metrics Replicas" in query
     assert "--aggregation Average" in query
     assert "--interval 1m" in query
@@ -170,10 +174,14 @@ def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
         "PP_GEMINI_API_KEY",
         "PP_LANGFUSE_PUBLIC_KEY",
         "PP_LANGFUSE_SECRET_KEY",
+        "DAGSHUB_TOKEN",
     ):
         assert f"secrets.{secret}" in check
         assert f'missing="$missing {secret}"' in check
     assert "vars.PP_GITHUB_APP_ID" in check
+    for variable in ("MLFLOW_TRACKING_URI", "MLFLOW_TRACKING_USERNAME"):
+        assert f"vars.{variable}" in check
+        assert f'missing="$missing {variable}(variable)"' in check
     assert "exit 1" in check
     assert text.index("- name: Require the production secrets") < text.index(
         "az deployment group what-if"
@@ -200,6 +208,25 @@ def test_infra_passes_the_qdrant_secrets_to_what_if_and_deploy() -> None:
     assert "vars.PP_QDRANT" not in text
 
 
+def test_infra_passes_the_dagshub_settings_to_what_if_and_deploy() -> None:
+    # Phase 7 (design D5): pp-retrain logs to DagsHub's MLflow and registers its challenger.
+    text = read("infra.yml")
+    assert text.count("DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}") == 3
+    assert text.count("MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}") == 3
+    assert text.count("MLFLOW_TRACKING_USERNAME: ${{ vars.MLFLOW_TRACKING_USERNAME }}") == 3
+    params = (WORKFLOWS.parents[1] / "infra" / "main.bicepparam").read_text(encoding="utf-8")
+    assert "param dagshubToken = readEnvironmentVariable('DAGSHUB_TOKEN')" in params
+
+
+def test_the_retrain_job_gets_the_new_image_with_the_nightly() -> None:
+    # pp-retrain compares against the champion baked into its image: it must move with the nightly.
+    text = read("deploy.yml")
+    update = step("deploy.yml", "Point the jobs at this commit's image")
+    assert '-n pp-nightly --image "$JOBS_IMAGE:$GITHUB_SHA"' in update
+    assert '-n pp-retrain --image "$JOBS_IMAGE:$GITHUB_SHA"' in update
+    assert text.index("- name: Smoke test") < text.index("-n pp-retrain --image")
+
+
 def test_infra_passes_the_langfuse_keys_to_what_if_and_deploy() -> None:
     # Phase 5 Task 18: the traces of the nightly reports and of Ask.
     text = read("infra.yml")
@@ -207,14 +234,24 @@ def test_infra_passes_the_langfuse_keys_to_what_if_and_deploy() -> None:
     assert text.count("PP_LANGFUSE_SECRET_KEY: ${{ secrets.PP_LANGFUSE_SECRET_KEY }}") == 3
 
 
-def test_guard_counts_both_jobs_executions() -> None:
-    # The jobs share pp-api's vCPU grant (ADR-009); leaving them out would under-count the month.
+def template_jobs() -> list[str]:
+    """Every Container Apps Job the templates declare (infra/modules/jobs.bicep)."""
+    source = (WORKFLOWS.parents[1] / "infra" / "modules" / "jobs.bicep").read_text(encoding="utf-8")
+    return re.findall(r"'Microsoft\.App/jobs@[^']+' = \{\s*name: '([^']+)'", source)
+
+
+def test_cost_guard_counts_every_job_in_the_templates() -> None:
+    # The jobs share pp-api's vCPU grant (ADR-009); leaving one out would under-count the month.
+    jobs = template_jobs()
+    assert {"pp-nightly", "pp-migrate", "pp-retrain"} <= set(jobs)
     reading = step("cost-guard.yml", "Job executions this month")
     assert "az containerapp job execution list" in reading
-    for job in ("pp-nightly", "pp-migrate"):
-        assert job in reading
+    (loop,) = [line for line in reading.splitlines() if line.strip().startswith("for job in")]
+    assert set(loop.split(" in ", 1)[1].rstrip("; do").split()) == set(jobs)
     evaluate = step("cost-guard.yml", "Evaluate")
-    assert evaluate.count("--job-executions") == 2
+    assert evaluate.count("--job-executions") == len(jobs)
+    for job in jobs:
+        assert f"--job-executions {job}-executions.json" in evaluate
 
 
 def test_trip_deletes_the_nightly_job_and_verifies_it_is_gone() -> None:
@@ -310,3 +347,38 @@ def test_infra_passes_the_gemini_key_to_what_if_and_deploy() -> None:
     text = read("infra.yml")
     assert text.count("PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}") == 3
     assert "vars.PP_GEMINI" not in text
+
+
+def test_cost_guard_reads_the_sql_metric_and_never_connects_to_the_database() -> None:
+    # Phase 7 (design D7, `sql_allowance`): the free offer's use, from Azure Monitor. Reading the
+    # metric doesn't wake the database; a connection would spend the allowance it measures.
+    reading = step("cost-guard.yml", "SQL allowance")
+    assert "az monitor metrics list" in reading
+    assert "--metrics free_amount_consumed" in reading
+    assert "--aggregation Maximum" in reading
+    assert "patchpulse.monitoring.sql_allowance" in reading
+    assert ".github/scripts/apply-issue-plan.sh sql-plan" in reading
+    text = read("cost-guard.yml")
+    for connecting in ("sqlcmd", "PP_DB_PASSWORD", "show-connection-string", "patchpulse-pipeline"):
+        assert connecting not in text
+    # After the kill switch's steps, and never in their way.
+    assert text.index("- name: Trip - delete pp-nightly") < text.index("- name: SQL allowance")
+    assert "!cancelled()" in reading.split("run:", 1)[0]
+
+
+def test_publish_site_writes_the_open_alerts() -> None:
+    # Phase 7 (design D10): the Monitoring page lists the open alert and drift issues: number,
+    # title, label and opening time, never a body.
+    text = read("publish-site.yml")
+    listing = step("publish-site.yml", "List the open alerts")
+    for label in ("alert", "drift"):
+        assert f"gh issue list --state open --label {label}" in listing
+    assert "--json number,title,labels,createdAt" in listing
+    assert "body" not in listing
+    assert "web/public/data/alerts.json" in listing
+    assert "GH_TOKEN: ${{ github.token }}" in listing
+    assert "issues: read" in text
+    assert text.index("- name: List the open alerts") < text.index("- name: Build the site")
+    assert text.index("- name: Drop the data checkout's git metadata") < text.index(
+        "- name: List the open alerts"
+    )

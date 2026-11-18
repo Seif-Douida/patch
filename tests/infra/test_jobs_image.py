@@ -117,9 +117,10 @@ def jobs_image_groups() -> set[str]:
 def test_the_index_stage_imports_with_only_the_jobs_image_groups() -> None:
     # 20 Oct: retrieval/sync.py imported pandas and retrieval/pin.py MLflow, neither in the jobs
     # image, so the nightly index stage would have failed on import. Its modules must load with
-    # only the groups Dockerfile.jobs syncs.
+    # only the groups Dockerfile.jobs syncs. (MLflow is in the image since Phase 7, for pp-retrain:
+    # the `retrain` group.)
     installed = jobs_image_groups()
-    assert {"pandas", "mlflow", "pyarrow"} <= hidden_modules(installed)
+    assert {"pandas", "pyarrow"} <= hidden_modules(installed)
 
     result = run_with_only(
         installed,
@@ -198,3 +199,86 @@ def test_the_reports_stage_imports_with_only_the_jobs_image_groups() -> None:
 def test_jobs_image_checks_the_agent_imports_at_build() -> None:
     runtime = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8").split("\nFROM ", 2)[2]
     assert "import patchpulse.agent.graph, patchpulse.pipeline.reports, langfuse" in runtime
+
+
+def test_the_monitoring_stages_import_with_only_the_jobs_image_groups() -> None:
+    # Phase 7 (design D1): the spot-check, the drift check and the online evals run in the night.
+    result = run_with_only(
+        jobs_image_groups(),
+        "import patchpulse.pipeline.spotcheck, patchpulse.pipeline.monitor\n"
+        "import patchpulse.pipeline.online_eval, patchpulse.monitoring.vectors\n"
+        "from patchpulse.pipeline.spotcheck import run_live_spotcheck\n"
+        "from patchpulse.pipeline.monitor import run_live_monitor\n"
+        "from patchpulse.pipeline.online_eval import run_live_online_evals\n"
+        "from patchpulse.export.monitoring import live_monitoring\n"
+        "import patchpulse.models.champion\n"
+        "import sklearn.linear_model, sklearn.model_selection, sklearn.metrics\n"
+        "print('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"
+
+
+def test_jobs_image_has_the_monitoring_files_and_checks_their_imports() -> None:
+    runtime = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8").split("\nFROM ", 2)[2]
+    assert "COPY evals/judge/rubric.md ./evals/judge/rubric.md" in runtime  # the online judge
+    assert "COPY models/reference.json ./models/reference.json" in runtime  # the drift reference
+    assert "COPY models/champion.yaml ./models/champion.yaml" in runtime  # monitoring.json
+    assert (
+        "import patchpulse.pipeline.spotcheck, patchpulse.pipeline.monitor, "
+        "patchpulse.pipeline.online_eval" in runtime
+    )
+
+
+def test_the_retrain_data_imports_with_only_the_jobs_image_groups() -> None:
+    # Phase 7 (design D5): pp-retrain builds its splits in the jobs image, without pandas.
+    result = run_with_only(
+        jobs_image_groups(),
+        "from patchpulse.models.retrain_data import load_retrain_data\nprint('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"
+
+
+def test_jobs_image_has_the_label_files_the_retrain_reads() -> None:
+    runtime = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8").split("\nFROM ", 2)[2]
+    ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    files = ("data/gold/sample.csv", "data/gold/labels_claude.csv", "data/silver/labels.csv")
+    for path in files:
+        assert f"!{path}" in ignore  # data/ stays out of the build context but for these
+        assert (ROOT / path).is_file()
+    assert "COPY data/gold/sample.csv data/gold/labels_claude.csv ./data/gold/" in runtime
+    assert "COPY data/silver/labels.csv ./data/silver/labels.csv" in runtime
+
+
+def test_the_jobs_image_has_the_retrain_group_and_the_label_files() -> None:
+    # Phase 7 (design D5): pp-retrain trains, logs to MLflow and registers in the jobs image.
+    text = (ROOT / "Dockerfile.jobs").read_text(encoding="utf-8")
+    syncs = [line for line in text.splitlines() if "uv sync" in line]
+    assert len(syncs) == 2
+    assert all("--group retrain" in line for line in syncs)
+    runtime = text.split("\nFROM ", 2)[2]
+    assert "import patchpulse.models.retrain" in runtime
+    assert "COPY data/silver/labels.csv ./data/silver/labels.csv" in runtime
+    assert "COPY config ./config" in runtime  # config/retrain.yaml, the promotion rule
+    # /app is root's and read-only to the app user, but for the two directories the retrain writes
+    # (the model it registers, the reports it logs), made before the image drops to that user.
+    writable = (
+        "RUN mkdir -p /app/build/models /app/reports/retrain "
+        "&& chown -R app:app /app/build /app/reports"
+    )
+    assert writable in runtime
+    assert runtime.index(writable) < runtime.index("USER app")
+
+    result = run_with_only(
+        jobs_image_groups(),
+        "from patchpulse.models.retrain import run_retrain\n"
+        "from patchpulse.models.promotion import load_rule\n"
+        "import mlflow, threadpoolctl\n"
+        "print('imported')\n",
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert result.stdout.strip() == "imported"

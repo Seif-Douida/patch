@@ -50,6 +50,7 @@ from patchpulse.api.ask import (
 from patchpulse.api.bundle_source import BundleSource, http_fetch
 from patchpulse.api.limits import AskLimits, Refused
 from patchpulse.api.settings import ApiSettings
+from patchpulse.api.telemetry import configure_telemetry
 
 log = logging.getLogger("patchpulse.api")
 
@@ -88,6 +89,12 @@ def create_app(
             allow_methods=["GET", "POST"],
             allow_headers=["Content-Type"],
         )
+    try:  # telemetry must never keep the API from starting
+        configure_telemetry(
+            app, settings.applicationinsights_connection_string, qdrant_url=settings.qdrant_url
+        )
+    except Exception as error:
+        log.warning("telemetry: not configured (%s)", type(error).__name__)
 
     @app.get("/health")
     def health() -> dict[str, str]:

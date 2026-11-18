@@ -335,6 +335,10 @@ def test_stage_budgets_leave_time_for_the_rest(resources: list[dict[str, Any]]) 
             "PP_INDEX_BUDGET_MINUTES",
             "PP_EFFECTS_BUDGET_MINUTES",
             "PP_REPORTS_BUDGET_MINUTES",
+            # Phase 7 (design D1): the spot-check, the online evals and the weekly drift check.
+            "PP_SPOTCHECK_BUDGET_MINUTES",
+            "PP_ONLINE_EVAL_BUDGET_MINUTES",
+            "PP_MONITOR_BUDGET_MINUTES",
         )
     )
     timeout_minutes = literal_number(nightly["properties"]["configuration"]["replicaTimeout"]) / 60
@@ -417,7 +421,7 @@ def test_nightly_job_has_the_reports_budget(resources: list[dict[str, Any]]) -> 
     # what's left waits a night. The refill is over, so backfill gives up 5 of its 25 minutes.
     _, env = nightly_env(resources)
     assert env["PP_REPORTS_BUDGET_MINUTES"] == "3"
-    assert env["PP_BACKFILL_BUDGET_MINUTES"] == "20"
+    assert env["PP_BACKFILL_BUDGET_MINUTES"] == "10"  # Phase 7: 20 to 10 (design D1)
 
 
 def api_app(resources: list[dict[str, Any]]) -> dict[str, Any]:
@@ -477,3 +481,69 @@ def test_api_holds_only_the_ask_key_of_the_cluster(resources: list[dict[str, Any
         "pp-api": "[parameters('qdrantAskApiKey')]",
         "pp-nightly": "[parameters('qdrantApiKey')]",
     }
+
+
+def retrain_job(resources: list[dict[str, Any]]) -> dict[str, Any]:
+    (job,) = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] == "pp-retrain"]
+    return job
+
+
+def test_the_retrain_job_is_manual_capped_and_never_retried(
+    resources: list[dict[str, Any]],
+) -> None:
+    # Phase 7 (design D5): retrain.yml starts it; S0 trains in under a minute, so 45 min is plenty
+    # (the spec's 60 would pass cost-guard's 2,700 s cap on every execution).
+    job = retrain_job(resources)
+    config = job["properties"]["configuration"]
+    assert config["triggerType"] == "Manual"
+    assert literal_number(config["replicaTimeout"]) == 2700
+    assert literal_number(config["replicaRetryLimit"]) == 0
+    (container,) = job["properties"]["template"]["containers"]
+    assert container["args"] == ["retrain"]
+    assert literal_number(container["resources"]["cpu"]) == 1
+    assert gibibytes(container["resources"]["memory"]) == 2
+
+
+def test_the_retrain_credentials_come_from_secrets(resources: list[dict[str, Any]]) -> None:
+    job = retrain_job(resources)
+    secrets = {s["name"]: s["value"] for s in job["properties"]["configuration"]["secrets"]}
+    assert secrets == {
+        "writer-password": "[parameters('sqlWriterPassword')]",
+        "dagshub-token": "[parameters('dagshubToken')]",
+    }
+    (container,) = job["properties"]["template"]["containers"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    assert env["PP_DB_USER"]["value"] == "pp_writer"
+    assert env["PP_DB_PASSWORD"]["secretRef"] == "writer-password"
+    assert env["MLFLOW_TRACKING_PASSWORD"]["secretRef"] == "dagshub-token"
+    assert env["MLFLOW_TRACKING_URI"]["value"] == "[parameters('mlflowTrackingUri')]"
+    assert env["MLFLOW_TRACKING_USERNAME"]["value"] == "[parameters('mlflowTrackingUsername')]"
+    assert env["PP_MODEL_DIR"]["value"] == "/app/model"
+    # The DagsHub token writes to the registry: pp-retrain only (design D5), never the nightly.
+    for other in of_type(resources, "microsoft.app/jobs"):
+        if other["name"] != "pp-retrain":
+            names = {s["name"] for s in other["properties"]["configuration"].get("secrets", [])}
+            assert "dagshub-token" not in names, other["name"]
+
+
+def test_the_connection_string_is_a_container_app_secret(resources: list[dict[str, Any]]) -> None:
+    # Phase 7 (design D8): App Insights on pp-api, workspace-based, so what it ingests counts
+    # against the capped Log Analytics workspace, not a cap of its own.
+    (insights,) = of_type(resources, "microsoft.insights/components")
+    assert insights["name"] == "appi-patchpulse"
+    assert insights["properties"]["IngestionMode"] == "LogAnalytics"
+    assert "workspaces" in insights["properties"]["WorkspaceResourceId"]
+    api = api_app(resources)
+    secrets = {s["name"]: s["value"] for s in api["properties"]["configuration"]["secrets"]}
+    assert "appinsights-connection-string" in secrets
+    assert "ConnectionString" in secrets["appinsights-connection-string"]
+    (container,) = api["properties"]["template"]["containers"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    assert env["APPLICATIONINSIGHTS_CONNECTION_STRING"] == {
+        "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "secretRef": "appinsights-connection-string",
+    }
+    # The jobs don't send to it: their console logs already reach the workspace.
+    for job in of_type(resources, "microsoft.app/jobs"):
+        names = {s["name"] for s in job["properties"]["configuration"].get("secrets", [])}
+        assert "appinsights-connection-string" not in names, job["name"]

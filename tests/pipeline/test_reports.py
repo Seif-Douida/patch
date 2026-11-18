@@ -12,9 +12,10 @@ import pytest
 from agent_fixtures import SAMPLE_QUOTE, make_bundle, sample_report
 from sqlalchemy import Engine
 
-from patchpulse.agent.graph import ReportRequest
+from patchpulse.agent.graph import ReportRequest, RunRecord
 from patchpulse.agent.report import Report
 from patchpulse.agent.store import latest_reports, write_report
+from patchpulse.agent.tools import Trace
 from patchpulse.config import Settings
 from patchpulse.pipeline.reports import ReportsOutcome, reports_file, run_reports
 
@@ -45,7 +46,7 @@ def run(
     engine: Engine,
     settings: Settings,
     clock: Clock,
-    agent: Callable[[ReportRequest], Report] | None = None,
+    agent: Callable[[ReportRequest], Report | RunRecord] | None = None,
 ) -> ReportsOutcome:
     return run_reports(
         engine,
@@ -126,3 +127,26 @@ def test_reports_file_leaves_out_reports_of_vanished_bundles(
     assert ("p9", 7) in stored
     assert "p9" not in document["reports"]
     assert "p1" in document["reports"]
+
+
+def recorded_agent() -> Callable[[ReportRequest], RunRecord]:
+    """A live agent's shape since Phase 7: the run's record, with its trace id."""
+
+    def write(request: ReportRequest) -> RunRecord:
+        report = sample_report(str(request.bundle_id), int(request.horizon or 0))
+        trace_id = f"trace-{request.bundle_id}-{request.horizon}"
+        return RunRecord(report, None, [], None, None, Trace(run="r1"), False, trace_id)
+
+    return write
+
+
+def test_the_reports_stage_keeps_each_run_record_and_trace_id(
+    migrated_engine: Engine, sql_settings: Settings
+) -> None:
+    outcome = run(migrated_engine, sql_settings, Clock(0.0, 0.0), agent=recorded_agent())
+
+    assert outcome.written > 0
+    assert len(outcome.runs) == outcome.written
+    first = outcome.runs[0]
+    assert first.report_id == first.record.result.report_id  # type: ignore[union-attr]
+    assert first.trace_id == f"trace-{first.record.result.bundle_id}-{first.record.result.horizon}"  # type: ignore[union-attr]

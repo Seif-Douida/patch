@@ -1,0 +1,14 @@
+[
+  {
+    "number": 101,
+    "title": "language mix drifted (sample data)",
+    "label": "drift",
+    "opened_at": "2026-09-22T03:41:00Z"
+  },
+  {
+    "number": 104,
+    "title": "data stale (sample data)",
+    "label": "alert",
+    "opened_at": "2026-09-28T12:17:00Z"
+  }
+]

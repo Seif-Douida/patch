@@ -37,7 +37,8 @@ def test_web_fixtures_match_the_exporter() -> None:
 def test_sample_data_is_invented_not_steam_data() -> None:
     # The fixtures are committed to the public repo; they must never carry real reviews or titles.
     for name, content in sample_files().items():
-        assert b"(sample data)" in content or name.startswith("games/"), name
+        # monitoring.json holds numbers and rule names only (no game, no review).
+        assert b"(sample data)" in content or name.startswith("games/") or name == "monitoring.json"
         assert b"steamcommunity" not in content
         assert b"store.steampowered" not in content
 
@@ -93,3 +94,26 @@ def test_sample_shows_each_kind_of_report() -> None:
     for content in (files[name] for name in reports):
         assert b"progression grind" not in content
         assert b"910006" not in content
+
+
+def test_sample_shows_each_part_of_the_monitoring_page() -> None:
+    # Phase 7 (design D10): the Monitoring page has a case for each of these.
+    files = sample_files()
+    monitoring = json.loads(files["monitoring.json"])
+    assert monitoring["schema_version"] == 1
+    assert len(monitoring["pipeline"]) == 30
+    assert {r["status"] for r in monitoring["pipeline"]} == {"succeeded", "failed"}
+    drift = {s["rule"]: s for s in monitoring["drift"]}
+    assert all(s["threshold"] is not None and s["points"] for s in drift.values())
+    language = drift["drift_language"]
+    assert any(p["value"] > language["threshold"] for p in language["points"] if not p["drill"])
+    assert any(p["drill"] for p in language["points"])
+    assert monitoring["agreement"]["weeks"]
+    assert monitoring["agreement"]["reference"] is not None
+    nights = monitoring["online"]["nights"]
+    assert nights
+    assert all(n["judge"]["uncalibrated"] for n in nights)
+    assert monitoring["retrain"]["last_decision"] is not None
+    alerts = json.loads(files["alerts.json"])
+    assert {a["label"] for a in alerts} == {"alert", "drift"}
+    assert set(alerts[0]) == {"number", "title", "opened_at", "label"}

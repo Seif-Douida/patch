@@ -1,0 +1,15 @@
+# The promotion rule for pp-retrain's challenger (Phase 7 design D5), fixed before the first run.
+# A challenger is promoted (a pull request Seif merges) only when every check passes:
+# - its macro-F1 on the recent holdout (the last 8 weeks' spot-check holdout, teacher labels) is at
+#   least `margin` above the champion's, and the paired bootstrap's 95% lower bound is above 0;
+# - no language with at least `language_min_reviews` recent reviews is more than `language_drop`
+#   lower;
+# - its out-of-fold gold dev macro-F1 is no more than `dev_drop` lower;
+# - it scores at least `min_reviews_per_second` reviews a second on one thread.
+# Gold test is reported only: deciding on it would make it a tuning set.
+margin: 0.01
+language_drop: 0.02
+language_min_reviews: 100
+dev_drop: 0.02
+min_reviews_per_second: 70
+bootstrap_seed: 20261117

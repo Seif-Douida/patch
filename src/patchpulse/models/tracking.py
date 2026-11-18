@@ -100,8 +100,12 @@ def _may_leave(path: Path) -> Path:
     return resolved
 
 
-def log_report(path: Path) -> None:
-    mlflow.log_artifact(str(_may_leave(path)))
+def log_report(path: Path, *, run_id: str | None = None) -> None:
+    """To the active run, or to `run_id` once that run has ended."""
+    if run_id is None:
+        mlflow.log_artifact(str(_may_leave(path)))
+    else:
+        mlflow.MlflowClient().log_artifact(run_id, str(_may_leave(path)))
 
 
 # Trained models (Phase 2) and the review encoder's int8 build (Phase 3, a public model).

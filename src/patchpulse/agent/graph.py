@@ -134,6 +134,7 @@ class RunRecord:
     raw_summary: str | None
     trace: Trace
     basic: bool
+    trace_id: str | None = None  # the Langfuse trace, when traced (Phase 7's online evals)
 
 
 class _State(TypedDict, total=False):
@@ -594,4 +595,5 @@ def run_recorded(request: ReportRequest, deps: AgentDeps) -> RunRecord:
         raw_summary=final.get("raw_summary"),
         trace=trace,
         basic=bool(final.get("basic")),
+        trace_id=observer.trace_id,
     )

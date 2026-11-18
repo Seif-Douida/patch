@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from patchpulse.agent.tracing import ASK_SAMPLE
@@ -39,3 +39,8 @@ class ApiSettings(BaseSettings):
     # sets the measured cap (45, infra/modules/containerapps.bicep); 15 is for local runs.
     ask_per_visitor_hour: int = 3
     ask_daily_cap: int = 15
+    # Phase 7 (design D8): App Insights, under the name Azure's SDKs read (no PP_ prefix). None
+    # means no telemetry.
+    applicationinsights_connection_string: SecretStr | None = Field(
+        default=None, validation_alias="APPLICATIONINSIGHTS_CONNECTION_STRING"
+    )

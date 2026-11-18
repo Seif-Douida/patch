@@ -9,6 +9,9 @@ repos:
       - id: check-json
       - id: check-added-large-files
         args: ["--maxkb=500"]
+        # The silver labels (ids and labels, no text; pp-retrain's training set, Phase 7) are
+        # 3.5 MB: the one file allowed past the limit.
+        exclude: ^data/silver/labels\.csv$
       - id: mixed-line-ending
         args: ["--fix=no"]
       - id: detect-private-key

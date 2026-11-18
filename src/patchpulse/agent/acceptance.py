@@ -179,6 +179,9 @@ class _Recording:
         self.last = _Recorder(self.inner.start(request, data_version=data_version))
         return self.last
 
+    def score(self, trace_id: str | None, name: str, value: float) -> None:
+        self.inner.score(trace_id, name, value)
+
     def close(self) -> None:
         return None
 

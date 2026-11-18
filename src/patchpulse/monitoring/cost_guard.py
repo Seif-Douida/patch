@@ -6,8 +6,8 @@
 * the pp-api `Replicas` metric from the 1st of the month, Average per minute (near real time).
   Azure samples it about twice a minute, so the per-minute Average is the replica count and the
   sum of the Averages is replica-minutes; summing Totals would double-count.
-* the executions of the Container Apps Jobs (pp-nightly, pp-migrate), which share the grant
-  (ADR-009). Each execution runs one replica; its start and end times give its run time.
+* the executions of the Container Apps Jobs (pp-nightly, pp-migrate, pp-retrain), which share the
+  grant (ADR-009). Each execution runs one replica; its start and end times give its run time.
 
 The guard trips on cost, on 80% of the monthly vCPU grant (pp-api and the jobs together), or on a
 pp-api replica that ran for most of the last hour (a request flood or a stuck replica; Azure's

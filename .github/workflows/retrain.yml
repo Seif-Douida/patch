@@ -1,0 +1,181 @@
+name: retrain
+
+# Phase 7 (design D5-D6): train a challenger S0 in pp-retrain and promote it through a pull request.
+# - The nightly sends `retrain-requested` (a new drift issue, or the first night of a month), right
+#   after its run, so pp-retrain reads the database while it is still awake. By hand: Run workflow.
+# - One run at a time; a second request within 12 hours of an execution is refused unless started
+#   by hand with `force`. Like deploy.yml, it refuses while cost-guard has stopped pp-api.
+# - pp-retrain logs both models to MLflow (experiment `retraining`) and registers the challenger.
+#   If it passed the promotion rule (config/retrain.yaml), the GitHub App opens a PR changing
+#   models/champion.yaml and models/reference.json: the App, because pull requests opened with
+#   GITHUB_TOKEN start no workflows and the required checks would never run. Merging is the human
+#   approval. Otherwise the comparison goes to the open drift issue and the job summary.
+on:
+  repository_dispatch:
+    types: [retrain-requested]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why (the PR title says it)
+        type: choice
+        options: [manual, drift, monthly, drill]
+        default: manual
+      force:
+        description: Start pp-retrain even if it ran in the last 12 hours
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
+# `shell: bash` runs with -eo pipefail.
+defaults:
+  run:
+    shell: bash
+
+env:
+  RG: rg-patchpulse
+  # The nightly's payload or the input; checked against the known reasons before it is used.
+  REASON: ${{ github.event.client_payload.reason || inputs.reason || 'manual' }}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-24.04
+    # pp-retrain's 45 min cap, its start, and the reading and the PR around it.
+    timeout-minutes: 70
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Refuse while pp-api is stopped
+        run: |
+          # A stopped app means cost-guard tripped (ADR-017); only infra.yml brings it back.
+          id=$(az containerapp list -g "$RG" --query "[?name=='pp-api'].id | [0]" -o tsv)
+          status=$(az containerapp show --ids "$id" --query properties.runningStatus -o tsv)
+          if [ "$status" = "Stopped" ]; then
+            echo "::error::pp-api is stopped by cost-guard; pp-retrain stays off until infra.yml starts it again."
+            exit 1
+          fi
+
+      - name: Refuse a second run within 12 hours
+        id: guard
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          az containerapp job execution list -g "$RG" -n pp-retrain -o json > executions.json
+          line=$(uv run --no-dev --group retrain --group pipeline --group causal \
+            python -m patchpulse.monitoring.retrain_result guard executions.json)
+          recent="${line#recent=}"
+          if [ -n "$recent" ] && [ "$FORCE" != "true" ]; then
+            echo "::notice::pp-retrain already ran in the last 12 hours ($recent); not starting it again. Run this workflow by hand with force to override."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start pp-retrain and wait for it
+        id: job
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          execution=$(az containerapp job start -g "$RG" -n pp-retrain --query name -o tsv)
+          echo "started $execution ($REASON)"
+          echo "execution=$execution" >> "$GITHUB_OUTPUT"
+          # 210 x 15 s = 52.5 min: the job's own 45 min cap, its start and a paused database's wake.
+          for attempt in $(seq 1 210); do
+            status=$(az containerapp job execution show -g "$RG" -n pp-retrain \
+              --job-execution-name "$execution" --query properties.status -o tsv)
+            echo "attempt $attempt: $status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded)
+                echo "::error::pp-retrain execution $execution ended $status. Its logs are in Log Analytics (ContainerAppConsoleLogs_CL, ContainerJobName_s == 'pp-retrain'). No PR opened."
+                exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::pp-retrain execution $execution did not finish in 52 minutes. No PR opened."
+          exit 1
+
+      - name: Read the result from MLflow
+        id: result
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+          EXECUTION: ${{ steps.job.outputs.execution }}
+        run: |
+          # A public read of DagsHub's MLflow: no token.
+          uv run --no-dev --group retrain --group pipeline --group causal \
+            python -m patchpulse.monitoring.retrain_result result \
+            --execution "$EXECUTION" --reason "$REASON" --out retrain-out >> "$GITHUB_OUTPUT"
+          {
+            echo "## pp-retrain ($REASON)"
+            cat retrain-out/table.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Get a token from the GitHub App
+        id: app
+        if: steps.result.outputs.promote == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.PP_GITHUB_APP_ID }}
+          private-key: ${{ secrets.PP_GITHUB_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open the promotion pull request
+        if: steps.result.outputs.promote == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          VERSION: ${{ steps.result.outputs.version }}
+          REGISTERED: ${{ steps.result.outputs.registered }}
+        run: |
+          cp retrain-out/champion.yaml models/champion.yaml
+          cp retrain-out/reference.json models/reference.json
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+          git switch -c "retrain/$VERSION"
+          git add models/champion.yaml models/reference.json
+          git commit -m "Promote aspect-classifier v$REGISTERED ($REASON)"
+          git push "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "retrain/$VERSION"
+          gh pr create --base main --head "retrain/$VERSION" \
+            --title "Promote aspect-classifier v$REGISTERED ($REASON)" \
+            --body-file retrain-out/body.md
+
+      - name: Report on the drift issue
+        if: steps.result.outputs.promote == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.result.outputs.version }}
+        run: |
+          # The open drift issue (a drill's included); a monthly run may have none: the summary has it.
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --label drift --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            echo "No open drift issue; the comparison is in this run's summary."
+            exit 0
+          fi
+          {
+            echo "pp-retrain ($REASON) kept the champion: challenger $VERSION did not pass the promotion rule."
+            echo
+            cat retrain-out/table.md
+          } > comment.md
+          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file comment.md

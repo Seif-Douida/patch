@@ -65,7 +65,10 @@ jobs:
   # CI never connects to Azure SQL (spec §5) or the Qdrant cluster.
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 10.6 min on main before Phase 7. Phase 7's first run hit 20 min: 13 runner tests asked Google
+    # for real and waited out its rate limit (fixed; tests/conftest.py now fails any such request).
+    # The durations below keep naming the slowest tests.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,7 +114,7 @@ jobs:
           exit 1
 
       - run: uv sync --locked
-      - run: uv run pytest -m "integration or qdrant"
+      - run: uv run pytest -m "integration or qdrant" --durations=30
 
   # The dashboard (Task 14). It builds against the invented sample in web/fixtures, never live data.
   web:
