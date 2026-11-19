@@ -46,6 +46,13 @@ param langfusePublicKey string
 @secure()
 param langfuseSecretKey string
 
+@description('The friend\'s Gemma 4 31B server (ADR-020, amended 19 Nov): the spot-check and the online judge ask it first, Google\'s copy when it is down. The address is a secret too.')
+@secure()
+param llmServerUrl string
+
+@secure()
+param llmServerKey string
+
 @description('DagsHub\'s MLflow, where pp-retrain logs its runs and registers its challenger (Phase 7, design D5).')
 param mlflowTrackingUri string
 
@@ -105,6 +112,14 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
         {
           name: 'langfuse-secret-key'
           value: langfuseSecretKey
+        }
+        {
+          name: 'llm-server-url'
+          value: llmServerUrl
+        }
+        {
+          name: 'llm-server-key'
+          value: llmServerKey
         }
       ]
     }
@@ -185,7 +200,8 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
             }
             {
               // Phase 7 (design D3): the teacher spot-check, 10 requests to Gemma 4 31B on the
-              // free tier (tokens-bound, ~3.5 min). 0 turns it off.
+              // friend's server (~2 min), or on Google's free tier when it's down (tokens-bound,
+              // ~3.5 min; ADR-020, amended 19 Nov). 0 turns it off.
               name: 'PP_SPOTCHECK_BUDGET_MINUTES'
               value: '4'
             }
@@ -225,6 +241,15 @@ resource nightly 'Microsoft.App/jobs@2025-07-01' = {
               // The EU region, where the Langfuse project is.
               name: 'PP_LANGFUSE_HOST'
               value: 'https://cloud.langfuse.com'
+            }
+            {
+              // ADR-020, amended 19 Nov: the spot-check's and the online judge's first teacher.
+              name: 'PP_LLM_SERVER_URL'
+              secretRef: 'llm-server-url'
+            }
+            {
+              name: 'PP_LLM_SERVER_KEY'
+              secretRef: 'llm-server-key'
             }
           ]
           resources: {

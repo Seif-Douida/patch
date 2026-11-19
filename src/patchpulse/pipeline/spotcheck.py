@@ -2,7 +2,9 @@
 
 Each night 200 reviews first seen in that run are labeled by the teacher (prompt v1, the silver
 set's batching and validation), and the labels stored in `raw.teacher_label` (source `spotcheck`).
-The teacher in Azure is Google's free Gemma 4 31B, never the friend's server (ADR-020).
+The teacher is Gemma 4 31B on the friend's server, the silver set's own teacher (ADR-020, amended
+19 Nov: Google's free copy kept answering 503). When the server is down, Google's copy labels the
+rest of that night; each label names the model that gave it.
 
 Each week the champion's labels are compared with the teacher's on that week's spot-check reviews
 (the online accuracy proxy), against the same comparison on the silver holdout (the reference).
@@ -49,7 +51,11 @@ from patchpulse.monitoring.store import MetricRow, StoredTeacherLabel, write_tea
 log = logging.getLogger("patchpulse.pipeline.spotcheck")
 
 SPOTCHECK_SIZE = 200
-SPOTCHECK_MODEL = "gemma-4-31b"  # config/models.yaml: Google's gemma-4-31b-it
+SERVER_MODEL = "selfhosted-gemma-4-31b"  # config/models.yaml: the friend's server (gemma-31b)
+GOOGLE_MODEL = "gemma-4-31b"  # config/models.yaml: Google's gemma-4-31b-it, the backup
+# A server that's off costs 10 s, not the 5 minutes a busy GPU may take (offline labeling's
+# timeout); a 20-review batch takes ~12 s (ADR-020).
+SERVER_TIMEOUT = httpx2.Timeout(90.0, connect=10.0)
 SPOTCHECK_SOURCE = "spotcheck"
 HOLDOUT_SHARE = 0.2
 SPOTCHECK_ATTEMPTS = 2  # the second only waits out a per-minute limit; errors raise at once
@@ -96,6 +102,12 @@ _TIMES = "SELECT MIN(created_at), MAX(created_at) FROM raw.teacher_label WHERE s
 
 
 @dataclass(frozen=True)
+class SpotcheckTeacher:
+    client: TextModel
+    model_id: str  # what its labels are stored under (`raw.teacher_label.model`)
+
+
+@dataclass(frozen=True)
 class SpotcheckOutcome:
     drawn: int
     labeled: int
@@ -138,15 +150,14 @@ def make_spotcheck_client(
     clock: Callable[[], datetime],
     sleep: Callable[[float], None] = time.sleep,
 ) -> TextModel:
-    """Google's Gemma 4 31B with its limiter. Nothing else labels with it in Azure, so the
-    spot-check uses the model's whole free quota (Phase 2 split it between two runs)."""
+    """Google's Gemma 4 31B with its limiter, the backup teacher. The online judge's copy counts
+    its own day apart, so each uses the model's whole free quota (Phase 2 split it between two
+    runs)."""
     from patchpulse.labeling.gemini import GeminiClient
 
     if settings.gemini_api_key is None:
         raise ValueError("the spot-check needs PP_GEMINI_API_KEY")
-    config = (
-        load_model_config().candidates[SPOTCHECK_MODEL].model_copy(update={"use_fraction": 1.0})
-    )
+    config = load_model_config().candidates[GOOGLE_MODEL].model_copy(update={"use_fraction": 1.0})
     limiter = RequestLimiter(config, state_path=state_path, clock=clock, sleep=sleep)
     return GeminiClient(
         settings.gemini_api_key.get_secret_value(),
@@ -160,6 +171,60 @@ def make_spotcheck_client(
         # there's time to pause and try again.
         retry_errors=False,
     )
+
+
+def make_server_client(
+    settings: Settings,
+    http: httpx2.Client,
+    *,
+    model: str = SERVER_MODEL,
+    sleep: Callable[[float], None] = time.sleep,
+) -> TextModel:
+    """The friend's server (ADR-020): one attempt and a short connect timeout. Its caller decides
+    what an outage means: the spot-check pauses or hands the night to Google, the online judge's
+    router moves on and rests it."""
+    from patchpulse.labeling.openai_compat import OpenAICompatClient
+
+    if settings.llm_server_url is None or settings.llm_server_key is None:
+        raise ValueError("the friend's server needs PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY")
+    return OpenAICompatClient(
+        settings.llm_server_key.get_secret_value(),
+        settings.llm_server_url,
+        http,
+        load_model_config().candidates[model],
+        sleep=sleep,
+        max_attempts=1,
+        timeout=SERVER_TIMEOUT,
+    )
+
+
+def spotcheck_teachers(
+    settings: Settings,
+    http: httpx2.Client,
+    *,
+    state_path: Path,
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[SpotcheckTeacher, SpotcheckTeacher | None]:
+    """The friend's server, and Google's copy as its backup; either alone when the other's
+    settings are missing."""
+    candidates = load_model_config().candidates
+    found: list[SpotcheckTeacher] = []
+    if settings.llm_server_url is not None and settings.llm_server_key is not None:
+        client = make_server_client(settings, http, sleep=sleep)
+        found.append(SpotcheckTeacher(client, candidates[SERVER_MODEL].id))
+    else:
+        log.warning("spot-check: no PP_LLM_SERVER_URL or PP_LLM_SERVER_KEY; Google's copy alone")
+    if settings.gemini_api_key is not None:
+        google = make_spotcheck_client(
+            settings, http, state_path=state_path, clock=clock, sleep=sleep
+        )
+        found.append(SpotcheckTeacher(google, candidates[GOOGLE_MODEL].id))
+    if not found:
+        raise ValueError(
+            "the spot-check needs PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY, or PP_GEMINI_API_KEY"
+        )
+    return found[0], found[1] if len(found) > 1 else None
 
 
 def _label_through_outages(
@@ -190,6 +255,14 @@ def _label_through_outages(
             sleep(SPOTCHECK_OUTAGE_PAUSE_S)
 
 
+def _stop(error: Exception) -> tuple[str, str]:
+    """The outcome's `stopped`, and the log's reason: the teacher's message for an outage (never
+    review text; the server's address and key are scrubbed by its client)."""
+    if isinstance(error, QuotaExhaustedError):
+        return "quota", ""
+    return "outage", f": {error}"
+
+
 def run_spotcheck(
     engine: Engine,
     *,
@@ -200,27 +273,40 @@ def run_spotcheck(
     clock: Callable[[], float],
     n: int = SPOTCHECK_SIZE,
     sleep: Callable[[float], None] = time.sleep,
+    backup: SpotcheckTeacher | None = None,
 ) -> SpotcheckOutcome:
+    """Label tonight's draw with `client`; when it stays unavailable through its tries (or runs
+    out of quota), `backup` labels the rest of the night, while there's time."""
     with engine.connect() as connection:
         drawn = new_reviews(connection, run_id=run_id, n=n, seed=run_id)
     versions = {review.review_id: updated for review, updated in drawn}
     digest = prompt_hash()
     labeled = failed = 0
     stopped: str | None = None
-    reason = ""  # Google's message for an outage: never review text
+    reason = ""
+    teacher = SpotcheckTeacher(client, model_id)
     for batch in make_batches([review for review, _ in drawn]):
         if clock() >= deadline:
             stopped = "deadline"
             break
-        try:
-            labels = _label_through_outages(
-                client, batch, deadline=deadline, clock=clock, sleep=sleep
-            )
-        except QuotaExhaustedError:
-            stopped = "quota"
-            break
-        except TeacherUnavailableError as error:
-            stopped, reason = "outage", f": {error}"
+        labels: list[TeacherLabel] | None = None
+        while labels is None:
+            try:
+                labels = _label_through_outages(
+                    teacher.client, batch, deadline=deadline, clock=clock, sleep=sleep
+                )
+            except (QuotaExhaustedError, TeacherUnavailableError) as error:
+                if backup is None or clock() >= deadline:
+                    stopped, reason = _stop(error)
+                    break
+                log.warning(
+                    "spot-check: %s is unavailable (%s); %s labels the rest of the night",
+                    teacher.model_id,
+                    error,
+                    backup.model_id,
+                )
+                teacher, backup = backup, None
+        if labels is None:
             break
         if len(labels) < len(batch.review_ids):
             failed += 1
@@ -228,7 +314,7 @@ def run_spotcheck(
             StoredTeacherLabel(
                 recommendation_id=label.review_id,
                 timestamp_updated=versions[label.review_id],
-                model=model_id,
+                model=teacher.model_id,
                 prompt_hash=digest,
                 source=SPOTCHECK_SOURCE,
                 aspects=label.aspects,
@@ -356,19 +442,19 @@ def run_live_spotcheck(
     clock: Callable[[], float],
     deadline: float,
 ) -> SpotcheckOutcome:
-    """The nightly stage: Google's Gemma 4 31B, its day count in a temporary file (the job's file
-    system is gone by morning)."""
+    """The nightly stage: the friend's server, Google's Gemma 4 31B as the backup with its day
+    count in a temporary file (the job's file system is gone by morning)."""
     import tempfile
     from datetime import UTC
 
     def now() -> datetime:
         return datetime.now(UTC)
 
-    model_id = load_model_config().candidates[SPOTCHECK_MODEL].id
     with httpx2.Client() as http, tempfile.TemporaryDirectory() as scratch:
-        client = make_spotcheck_client(
+        first, backup = spotcheck_teachers(
             settings, http, state_path=Path(scratch) / "gemini-requests.json", clock=now
         )
         return run_spotcheck(
-            engine, run_id=run_id, client=client, model_id=model_id, deadline=deadline, clock=clock
-        )
+            engine, run_id=run_id, client=first.client, model_id=first.model_id, backup=backup,
+            deadline=deadline, clock=clock,
+        )  # fmt: skip

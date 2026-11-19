@@ -285,7 +285,10 @@ def test_the_live_agents_trace_with_the_langfuse_keys(tmp_path: Path) -> None:
     with ExitStack() as stack:
         for traced in (True, False):
             langfuse = keys if traced else {"gemini_api_key": keys["gemini_api_key"]}
-            nightly = _live_agent(stack, Settings(**db, **langfuse), bundle, steam=NO_STEAM)
+            nightly = _live_agent(
+                stack, Settings(**db, **langfuse), bundle, steam=NO_STEAM,
+                clock=lambda: 0.0, deadline=float("inf"),
+            )  # fmt: skip
             backfill = _live_deps(stack, LabSettings(**langfuse), tmp_path)(bundle)
             api = LiveDeps(ApiSettings(ask_trace_sample=0.5, **langfuse), SecretStr("k"))(bundle)
             tracers = [cast(Any, nightly).keywords["deps"].tracer, backfill.tracer, api.tracer]

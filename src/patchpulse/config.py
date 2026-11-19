@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     drift_drill: Literal["language_shift"] | None = None
     # Phase 7 (design D3): the nightly teacher spot-check's budget (10 requests, tokens-bound).
     spotcheck_budget_minutes: int = 4
+    # The friend's server (ADR-020, amended 19 Nov): the spot-check and the online judge ask it
+    # first, Google's Gemma when it's down. Its /v1 address is as secret as its key.
+    llm_server_url: str | None = None
+    llm_server_key: SecretStr | None = None
     # Phase 7 (design D4): the online evals of the night's reports (the judge's requests).
     online_eval_budget_minutes: int = 2
 
@@ -114,12 +118,17 @@ class LabSettings(BaseSettings):
 
 
 def scrub_secrets(detail: str, settings: Settings) -> str:
-    """`detail` without the Qdrant cluster's URL, host or key, the Gemini key or Langfuse's secret
-    key: a stage's error can carry them into logs and ops.data_quality_result."""
+    """`detail` without the Qdrant cluster's URL, host or key, the teacher server's address or key,
+    the Gemini key or Langfuse's secret key: a stage's error can carry them into logs and
+    ops.data_quality_result."""
     url = settings.qdrant_url or ""
     found = [(url, "<qdrant>"), (urlsplit(url).hostname or "", "<qdrant>")]
     if settings.qdrant_api_key is not None:
         found.append((settings.qdrant_api_key.get_secret_value(), "<qdrant>"))
+    server = (settings.llm_server_url or "").rstrip("/")
+    found += [(server, "<llm-server>"), (urlsplit(server).hostname or "", "<llm-server>")]
+    if settings.llm_server_key is not None:
+        found.append((settings.llm_server_key.get_secret_value(), "<llm-server>"))
     if settings.gemini_api_key is not None:
         found.append((settings.gemini_api_key.get_secret_value(), "<gemini>"))
     if settings.langfuse_secret_key is not None:

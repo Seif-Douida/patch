@@ -333,6 +333,94 @@ def test_unusable_answers_are_not_an_outage(tmp_path: Path) -> None:
     assert models.outages == 0
 
 
+PAUSE = 20.0
+
+
+def pausing(
+    tmp_path: Path, clients: dict[str, Any], *, allowed: bool = True, clock: FakeClock | None = None
+) -> tuple[ModelRouter, list[float]]:
+    """The nightly reports' router: an outage of every model pauses once, when `allowed`."""
+    slept: list[float] = []
+    models = ModelRouter(
+        CHAIN,
+        clients,
+        ReplayCache(tmp_path / "answers.sqlite", "live"),
+        clock=clock or FakeClock(START),
+        outage_pause_s=PAUSE,
+        pause_allowed=lambda seconds: allowed,
+        sleep=slept.append,
+    )
+    return models, slept
+
+
+def test_a_nightly_outage_is_waited_out_once(tmp_path: Path) -> None:
+    # 19 Nov: both Flash Lite models answered 503 for about 2.5 minutes and a report went basic;
+    # their 503s came and went.
+    first, second = FakeClient(down(), answer(YES)), FakeClient(down())
+    models, slept = pausing(tmp_path, {FIRST: first, SECOND: second})
+
+    assert models.generate("draft", "s", "u", SCHEMA).model_id == FIRST
+    assert slept == [PAUSE]
+    assert models.outages == 0
+
+
+def test_the_pause_happens_once_a_call(tmp_path: Path) -> None:
+    first, second = FakeClient(down(), down()), FakeClient(down(), down())
+    models, slept = pausing(tmp_path, {FIRST: first, SECOND: second})
+
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+
+    assert slept == [PAUSE]
+    assert (first.calls, second.calls) == (2, 2)
+    assert models.outages == 1
+
+
+def test_no_pause_when_a_model_answered(tmp_path: Path) -> None:
+    # An unusable answer isn't an outage: waiting wouldn't change it.
+    clients = {FIRST: FakeClient(answer("not json")), SECOND: FakeClient(down())}
+    models, slept = pausing(tmp_path, clients)
+
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+
+    assert slept == []
+
+
+def test_no_pause_past_the_stage_budget(tmp_path: Path) -> None:
+    models, slept = pausing(
+        tmp_path, {FIRST: FakeClient(down()), SECOND: FakeClient(down())}, allowed=False
+    )
+
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+
+    assert slept == []
+
+
+def test_no_pause_when_every_model_rests_past_it(tmp_path: Path) -> None:
+    # Three failures in a row rest a model for ten minutes: a 20 s pause would find it resting.
+    first, second = FakeClient(*[down()] * 3), FakeClient(*[down()] * 3)
+    models, slept = pausing(tmp_path, {FIRST: first, SECOND: second})
+
+    for _ in range(2):
+        with pytest.raises(AllModelsDownError):
+            models.generate("draft", "s", "u", SCHEMA)
+
+    assert slept == [PAUSE]  # the second call's third failures rested both models
+    assert (first.calls, second.calls) == (3, 3)
+
+
+def test_the_default_router_never_pauses(tmp_path: Path) -> None:
+    # Ask's router (pp-api): someone is waiting for the answer.
+    models = router(tmp_path, {FIRST: FakeClient(down()), SECOND: FakeClient(down())})
+
+    with pytest.raises(AllModelsDownError):
+        models.generate("draft", "s", "u", SCHEMA)
+
+    assert models.outage_pause_s == 0
+
+
 def test_next_ready_is_the_end_of_the_shortest_rest(tmp_path: Path) -> None:
     clock = FakeClock(START)
     first = FakeClient(*[down()] * 3)

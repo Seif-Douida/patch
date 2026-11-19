@@ -126,6 +126,58 @@ def test_a_server_error_that_clears_is_retried() -> None:
     assert len(seen) == 2
 
 
+def nightly(handler: Any, **options: Any) -> OpenAICompatClient:
+    return OpenAICompatClient(
+        KEY, BASE, httpx2.Client(transport=httpx2.MockTransport(handler)), model(), **options
+    )
+
+
+def test_the_nightly_client_raises_an_outage_at_once() -> None:
+    # In Azure the spot-check pauses and tries again, or hands the night to Google's copy; a
+    # client's own retries would spend the stage's minutes first.
+    seen: list[httpx2.Request] = []
+
+    def down(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(503, text="model is loading")
+
+    slept: list[float] = []
+    server = nightly(down, sleep=slept.append, max_attempts=1)
+
+    with pytest.raises(TeacherUnavailableError, match="503"):
+        server.generate("system", "user", json_schema=SCHEMA)
+
+    assert len(seen) == 1
+    assert slept == []
+
+
+def test_the_timeout_is_the_callers() -> None:
+    # A server that's off must cost seconds, not the 5 minutes a busy GPU may take to answer.
+    timeouts: list[Any] = []
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        timeouts.append(request.extensions["timeout"])
+        return completion("{}")
+
+    nightly(answer, timeout=httpx2.Timeout(90.0, connect=10.0)).generate(
+        "system", "user", json_schema=SCHEMA
+    )
+
+    assert timeouts == [{"connect": 10.0, "read": 90.0, "write": 90.0, "pool": 90.0}]
+
+
+def test_an_error_never_shows_the_servers_address() -> None:
+    # The address is a secret (.env, a GitHub secret in Azure); a proxy's error page names it.
+    def proxy(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(502, text="<title>llm.example.net | 502: Bad gateway</title>")
+
+    with pytest.raises(TeacherUnavailableError) as raised:
+        nightly(proxy, max_attempts=1).generate("system", "user", json_schema=SCHEMA)
+
+    assert "502" in str(raised.value)
+    assert "llm.example.net" not in str(raised.value)
+
+
 def test_a_refused_request_is_a_request_error_and_never_shows_the_key() -> None:
     refused = httpx2.Response(401, json={"error": {"message": f"invalid key {KEY}"}})
     server, _, _ = client([refused])

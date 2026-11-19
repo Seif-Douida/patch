@@ -108,6 +108,27 @@ def test_settings_read_the_agent_variables(clean_env: pytest.MonkeyPatch) -> Non
     assert "hunter2" not in repr(settings)
 
 
+def test_settings_read_the_teacher_server_and_scrub_it(clean_env: pytest.MonkeyPatch) -> None:
+    # The friend's server (ADR-020, amended 19 Nov): the nightly's spot-check and online judge ask
+    # it first. Its address is a secret like its key: a stage's error must not carry either.
+    for name, value in REQUIRED.items():
+        clean_env.setenv(name, value)
+    assert get_settings(env_file=None).llm_server_url is None
+    clean_env.setenv("PP_LLM_SERVER_URL", "https://llm.example.net/v1")
+    clean_env.setenv("PP_LLM_SERVER_KEY", "hunter2-server")
+
+    settings = get_settings(env_file=None)
+
+    assert settings.llm_server_url == "https://llm.example.net/v1"
+    assert settings.llm_server_key is not None
+    assert "hunter2" not in repr(settings)
+    scrubbed = scrub_secrets(
+        "POST https://llm.example.net/v1/chat/completions (llm.example.net) key hunter2-server",
+        settings,
+    )
+    assert scrubbed == "POST <llm-server>/chat/completions (<llm-server>) key <llm-server>"
+
+
 def test_settings_read_the_langfuse_variables(clean_env: pytest.MonkeyPatch) -> None:
     # Phase 5 Task 18: the agent's traces. No keys: the reports aren't traced.
     for name, value in REQUIRED.items():

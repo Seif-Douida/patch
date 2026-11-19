@@ -15,6 +15,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx2
 
@@ -50,14 +51,23 @@ class OpenAICompatClient:
         model: ModelConfig,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        max_attempts: int = MAX_ATTEMPTS,
+        timeout: float | httpx2.Timeout = REQUEST_TIMEOUT_S,
     ) -> None:
+        """`max_attempts=1` raises an outage at once, for a caller that decides itself whether to
+        wait (the nightly's spot-check and online judge); `timeout` bounds each request."""
         if not api_key:
             raise ValueError("the server's API key is required (PP_LLM_SERVER_KEY in .env)")
         self._api_key = api_key
-        self.url = f"{base_url.rstrip('/')}/chat/completions"
+        base = base_url.rstrip("/")
+        self.url = f"{base}/chat/completions"
+        # The address is a secret like the key (ADR-020): a proxy's error page can name it.
+        self._address = [part for part in (base, urlsplit(base).hostname) if part]
         self.http = http
         self.model = model
         self.sleep = sleep
+        self.max_attempts = max_attempts
+        self.timeout = timeout
 
     def __repr__(self) -> str:
         return f"OpenAICompatClient(model={self.model.id!r})"
@@ -86,13 +96,13 @@ class OpenAICompatClient:
         if self.model.json_mode:
             body["response_format"] = {"type": "json_object"}
         last = OpenAICompatUnavailableError(0, "no attempt made")
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, self.max_attempts + 1):
             try:
                 response = self.http.post(
                     self.url,
                     json=body,
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    timeout=REQUEST_TIMEOUT_S,
+                    timeout=self.timeout,
                 )
             except httpx2.TransportError as error:  # includes timeouts
                 last = OpenAICompatUnavailableError(0, f"network error: {type(error).__name__}")
@@ -110,7 +120,7 @@ class OpenAICompatClient:
         raise last
 
     def _wait(self, attempt: int, problem: Exception) -> None:
-        if attempt == MAX_ATTEMPTS:
+        if attempt >= self.max_attempts:
             return
         seconds = BACKOFF_S[min(attempt, len(BACKOFF_S)) - 1]
         log.warning(
@@ -135,4 +145,7 @@ class OpenAICompatClient:
         )
 
     def _scrub(self, text: str) -> str:
-        return text.replace(self._api_key, "***")
+        text = text.replace(self._api_key, "***")
+        for part in self._address:  # the whole address first, then its host
+            text = text.replace(part, "<llm-server>")
+        return text

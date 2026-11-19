@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,7 @@ from patchpulse.pipeline.spotcheck import (
     SPOTCHECK_OUTAGE_PAUSE_S,
     SPOTCHECK_OUTAGE_TRIES,
     SPOTCHECK_SIZE,
+    SpotcheckTeacher,
     is_holdout,
     run_spotcheck,
     teacher_outcomes,
@@ -168,6 +170,90 @@ def test_an_outage_never_pauses_past_the_deadline(migrated_engine: Engine) -> No
 
     assert teacher.calls == 2  # a second pause would end past the deadline
     assert now[0] == SPOTCHECK_OUTAGE_PAUSE_S
+    assert (outcome.labeled, outcome.stopped) == (0, "outage")
+
+
+SERVER_MODEL_ID, GOOGLE_MODEL_ID = "gemma-31b", "gemma-4-31b-it"
+
+
+@pytest.mark.integration
+def test_a_server_outage_hands_the_night_to_the_backup(
+    migrated_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Seif, 19 Nov: the friend's server first, Google's Gemma when it's down (ADR-020 amended).
+    seed(migrated_engine)
+    server, google = FakeTeacher(fail_from=1), FakeTeacher()
+
+    with caplog.at_level(logging.INFO, logger="patchpulse.pipeline.spotcheck"):
+        outcome = run_spotcheck(
+            migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
+            backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=float("inf"),
+            clock=lambda: 0.0, sleep=lambda _: None,
+        )  # fmt: skip
+
+    assert (outcome.labeled, outcome.stopped) == (SPOTCHECK_SIZE, None)
+    assert server.calls == SPOTCHECK_OUTAGE_TRIES  # its tries, then never again tonight
+    assert google.calls == 10
+    assert f"{SERVER_MODEL_ID} is unavailable" in caplog.text
+    assert f"{GOOGLE_MODEL_ID} labels the rest of the night" in caplog.text
+
+
+@pytest.mark.integration
+def test_each_label_names_the_teacher_that_gave_it(migrated_engine: Engine) -> None:
+    seed(migrated_engine)
+    server, google = FakeTeacher(fail_from=4), FakeTeacher()
+
+    run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
+        backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=float("inf"),
+        clock=lambda: 0.0, sleep=lambda _: None,
+    )  # fmt: skip
+
+    with migrated_engine.connect() as connection:
+        labels = read_teacher_labels(connection, source="spotcheck")
+    assert Counter(label.model for label in labels) == {SERVER_MODEL_ID: 60, GOOGLE_MODEL_ID: 140}
+
+
+@pytest.mark.integration
+def test_the_backup_failing_too_ends_the_night_as_an_outage(migrated_engine: Engine) -> None:
+    seed(migrated_engine)
+    server, google = FakeTeacher(fail_from=1), FakeTeacher(fail_from=1)
+
+    outcome = run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
+        backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=float("inf"),
+        clock=lambda: 0.0, sleep=lambda _: None,
+    )  # fmt: skip
+
+    assert (outcome.labeled, outcome.stopped) == (0, "outage")
+    assert (server.calls, google.calls) == (SPOTCHECK_OUTAGE_TRIES, SPOTCHECK_OUTAGE_TRIES)
+
+
+class StalledTeacher(FakeTeacher):
+    """Fails every request after `seconds` (a server that accepts and never answers)."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(fail_from=1)
+        self.now = 0.0
+        self.seconds = seconds
+
+    def generate(self, system: str, user: str, **kwargs: Any) -> LLMResponse:
+        self.now += self.seconds
+        return super().generate(system, user, **kwargs)
+
+
+@pytest.mark.integration
+def test_the_backup_never_starts_past_the_deadline(migrated_engine: Engine) -> None:
+    seed(migrated_engine)
+    server, google = StalledTeacher(seconds=60.0), FakeTeacher()
+
+    outcome = run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
+        backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=30.0,
+        clock=lambda: server.now, sleep=lambda _: None,
+    )  # fmt: skip
+
+    assert (server.calls, google.calls) == (1, 0)
     assert (outcome.labeled, outcome.stopped) == (0, "outage")
 
 
@@ -370,3 +456,65 @@ def test_the_spotcheck_client_never_retries_a_stalled_request(tmp_path: Path) ->
     )
 
     assert client.retry_errors is False  # type: ignore[attr-defined]
+
+
+def teacher_settings(*, server: bool, google: bool) -> Any:
+    from pydantic import SecretStr
+
+    from patchpulse.config import Settings
+
+    return Settings.model_construct(
+        gemini_api_key=SecretStr("k-test") if google else None,
+        llm_server_url="https://llm.example.net/v1" if server else None,
+        llm_server_key=SecretStr("s-test") if server else None,
+    )
+
+
+def test_the_nightly_asks_the_server_first_and_keeps_google_as_the_backup(tmp_path: Path) -> None:
+    import httpx2
+
+    from patchpulse.labeling.openai_compat import OpenAICompatClient
+    from patchpulse.pipeline.spotcheck import SERVER_TIMEOUT, spotcheck_teachers
+
+    first, backup = spotcheck_teachers(
+        teacher_settings(server=True, google=True), None,  # type: ignore[arg-type]
+        state_path=tmp_path / "s.json", clock=lambda: CREATED,
+    )  # fmt: skip
+
+    assert first.model_id == SERVER_MODEL_ID
+    assert isinstance(first.client, OpenAICompatClient)
+    assert first.client.max_attempts == 1  # an outage is the spot-check's to wait out or hand over
+    assert first.client.timeout == SERVER_TIMEOUT
+    assert isinstance(SERVER_TIMEOUT, httpx2.Timeout)
+    assert SERVER_TIMEOUT.connect == 10.0
+    assert backup is not None
+    assert backup.model_id == GOOGLE_MODEL_ID
+    assert backup.client.retry_errors is False  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("server", "google", "first_model"),
+    [(True, False, SERVER_MODEL_ID), (False, True, GOOGLE_MODEL_ID)],
+    ids=["server only", "google only"],
+)
+def test_one_teacher_has_no_backup(
+    tmp_path: Path, server: bool, google: bool, first_model: str
+) -> None:
+    from patchpulse.pipeline.spotcheck import spotcheck_teachers
+
+    first, backup = spotcheck_teachers(
+        teacher_settings(server=server, google=google), None,  # type: ignore[arg-type]
+        state_path=tmp_path / "s.json", clock=lambda: CREATED,
+    )  # fmt: skip
+
+    assert (first.model_id, backup) == (first_model, None)
+
+
+def test_no_teacher_names_both_settings(tmp_path: Path) -> None:
+    from patchpulse.pipeline.spotcheck import spotcheck_teachers
+
+    with pytest.raises(ValueError, match=r"PP_LLM_SERVER_URL.*PP_GEMINI_API_KEY"):
+        spotcheck_teachers(
+            teacher_settings(server=False, google=False), None,  # type: ignore[arg-type]
+            state_path=tmp_path / "s.json", clock=lambda: CREATED,
+        )  # fmt: skip

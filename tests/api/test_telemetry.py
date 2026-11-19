@@ -219,6 +219,26 @@ def test_the_rate_keeps_a_flood_under_a_third_of_the_daily_cap(
     assert TRACES_PER_SECOND * 5 * 3600 * telemetry.TRACE_BYTES <= 0.05e9
 
 
+def test_the_azure_exporter_sends_no_resource_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    # pp-api, 19 Nov: an export logged "Failed to derive Resource from Tracer Provider" (it
+    # reads the global provider, and ours isn't). The record is the exporter's own, like Statsbeat.
+    from azure.monitor.opentelemetry.exporter import AzureMonitorTraceExporter
+
+    name = "APPLICATIONINSIGHTS_OPENTELEMETRY_RESOURCE_METRIC_DISABLED"
+    monkeypatch.setenv(name, "placeholder")
+    monkeypatch.delenv(name)  # unset now, and unset again after the test
+    app = FastAPI()
+    assert configure_telemetry(app, CONNECTION)
+    try:
+        exporter = AzureMonitorTraceExporter(
+            connection_string=CONNECTION.get_secret_value(), disable_offline_storage=True
+        )
+        collects = exporter._should_collect_otel_resource_metric()  # type: ignore[no-untyped-call]
+        assert collects is False
+    finally:
+        telemetry.shutdown(app)
+
+
 def test_the_app_is_traced_when_azure_sets_the_connection_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

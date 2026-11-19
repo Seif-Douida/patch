@@ -34,7 +34,7 @@ from patchpulse.agent.graph import AgentDeps, Refusal, ReportRequest, RunRecord,
 from patchpulse.agent.llm_cache import AGENT_CACHE_FILE, ReplayCache
 from patchpulse.agent.patch_notes import agent_steam
 from patchpulse.agent.report import Report, public_copy
-from patchpulse.agent.router import ModelRouter, make_agent_clients
+from patchpulse.agent.router import ModelClient, ModelRouter, make_agent_clients
 from patchpulse.agent.search import ReviewSearch, open_pinned_search
 from patchpulse.agent.store import (
     Key,
@@ -54,6 +54,10 @@ from patchpulse.ingest.load import record_dq
 from patchpulse.labeling.teachers import load_model_config
 
 log = logging.getLogger("patchpulse.pipeline.reports")
+
+# 19 Nov: both Flash Lite models answered 503 for about 2.5 minutes, coming and going, and one
+# report of three went basic. An outage of both pauses this long and asks once more.
+REPORTS_OUTAGE_PAUSE_S = 20.0
 
 # The live agent returns the run's record (Phase 7: the online evals judge its citations); a fake
 # may return the report alone.
@@ -120,7 +124,38 @@ def _tracer(stack: ExitStack, settings: Settings, search: ReviewSearch | None) -
     return tracer
 
 
-def _live_agent(stack: ExitStack, settings: Settings, bundle: Bundle, steam: SteamHttp) -> Agent:
+def reports_router(
+    chain: list[str],
+    clients: Mapping[str, ModelClient],
+    cache: ReplayCache,
+    *,
+    now: Callable[[], datetime],
+    clock: Callable[[], float],
+    deadline: float,
+    sleep: Callable[[float], None] = time.sleep,
+) -> ModelRouter:
+    """The agent's router for the nightly reports: when every model is unavailable it pauses once
+    and asks again, if the pause ends inside the stage's budget (Ask's router never pauses)."""
+    return ModelRouter(
+        chain,
+        clients,
+        cache,
+        clock=now,
+        outage_pause_s=REPORTS_OUTAGE_PAUSE_S,
+        pause_allowed=lambda seconds: clock() + seconds < deadline,
+        sleep=sleep,
+    )
+
+
+def _live_agent(
+    stack: ExitStack,
+    settings: Settings,
+    bundle: Bundle,
+    steam: SteamHttp,
+    *,
+    clock: Callable[[], float],
+    deadline: float,
+) -> Agent:
     """The graph with the Gemini chain of config/models.yaml, live (no cache), traced."""
     if settings.gemini_api_key is None:
         raise ValueError("the reports stage needs PP_GEMINI_API_KEY")
@@ -142,9 +177,10 @@ def _live_agent(stack: ExitStack, settings: Settings, bundle: Bundle, steam: Ste
         clock=now,
         sleep=time.sleep,
     )
-    router = ModelRouter(
-        models.agent.chain, clients, ReplayCache(Path(AGENT_CACHE_FILE), "live"), clock=now
-    )
+    router = reports_router(
+        models.agent.chain, clients, ReplayCache(Path(AGENT_CACHE_FILE), "live"),
+        now=now, clock=clock, deadline=deadline,
+    )  # fmt: skip
     search = _search(stack, settings)
     deps = AgentDeps(
         bundle=bundle,
@@ -177,7 +213,7 @@ def run_reports(
     runs: list[ScoredRun] = []
     with ExitStack() as stack:
         if due and agent is None:
-            agent = _live_agent(stack, settings, bundle, steam)
+            agent = _live_agent(stack, settings, bundle, steam, clock=clock, deadline=deadline)
         for bundle_id, horizon in due:
             if agent is None or clock() >= deadline:
                 break

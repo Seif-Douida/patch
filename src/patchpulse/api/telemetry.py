@@ -233,6 +233,9 @@ def configure_telemetry(
     if exporter is None:
         # Statsbeat is the exporter's own usage telemetry to Microsoft; nothing of ours needs it.
         os.environ.setdefault("APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL", "true")
+        # So is its resource record, which it reads from the global provider: ours isn't global,
+        # and each export logged a traceback for it (19 Nov).
+        os.environ.setdefault("APPLICATIONINSIGHTS_OPENTELEMETRY_RESOURCE_METRIC_DISABLED", "true")
         from azure.monitor.opentelemetry.exporter import AzureMonitorTraceExporter
 
         inner: SpanExporter = AzureMonitorTraceExporter(
