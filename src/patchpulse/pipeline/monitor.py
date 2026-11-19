@@ -35,6 +35,7 @@ from patchpulse.monitoring.drift import (
 )
 from patchpulse.monitoring.reference import REFERENCE_FILE, read_reference
 from patchpulse.monitoring.store import MetricRow, last_window_end, read_metrics, write_metrics
+from patchpulse.pipeline.scoring import scores_version
 from patchpulse.pipeline.spotcheck import teacher_outcomes, weekly_agreement
 
 log = logging.getLogger("patchpulse.pipeline.monitor")
@@ -84,16 +85,15 @@ def week_window(today: date) -> tuple[date, date]:
     return today - timedelta(days=WEEK_DAYS), today - timedelta(days=1)
 
 
-def load_week(
-    connection: Connection, window: tuple[date, date], *, model_version: str
-) -> WeekSample:
+def load_week(connection: Connection, window: tuple[date, date], *, scored_as: str) -> WeekSample:
+    """The week's reviews with the scores stored under `scored_as` (`scoring.scores_version`)."""
     start, end = window
     rows = connection.execute(
         text(_WEEK),
         {
             "start": datetime.combine(start, time()),
             "stop": datetime.combine(end + timedelta(days=1), time()),
-            "model": model_version,
+            "model": scored_as,
         },
     ).all()
     k = len(ASPECTS)
@@ -168,6 +168,7 @@ def run_monitor(
     *,
     run_id: int,
     today: date,
+    family: str,
     model_version: str,
     vectors: VectorSource,
     publisher: AlertPublisher,
@@ -190,10 +191,12 @@ def run_monitor(
         log.warning("drift: skipped, the reference doesn't match: %s", skipped)
         return MonitorOutcome(ran=False, skipped=skipped)
     window = week_window(today)
+    # The reference names the champion's version; its scores are stored under family-version.
+    scored_as = scores_version(family, model_version)
     with engine.connect() as connection:
         if drill is None and not week_due(last_window_end(connection, family="drift"), today):
             return MonitorOutcome(ran=False, skipped="not due")
-        week = load_week(connection, window, model_version=model_version)
+        week = load_week(connection, window, scored_as=scored_as)
         previous = [] if drill else _previous_week(connection, window[1])
     if len(week.review_ids) < MIN_WEEK_REVIEWS:
         skipped = f"{len(week.review_ids)} reviews this week, fewer than {MIN_WEEK_REVIEWS}"
@@ -210,7 +213,7 @@ def run_monitor(
     new_drift = any(o.breached and o.rule_id not in before for o in outcomes)
     if not drill:  # the teacher-student agreement (Task 6), on the same week
         with engine.begin() as connection:
-            agreement = weekly_agreement(connection, window, model_version=model_version)
+            agreement = weekly_agreement(connection, window, scored_as=scored_as)
             write_metrics(connection, agreement, run_id=run_id)
         outcomes += [
             o
@@ -263,6 +266,7 @@ def run_live_monitor(
             engine,
             run_id=run_id,
             today=today,
+            family=model.family,
             model_version=model.version,
             vectors=QdrantVectors(client, read_pin().collection),
             publisher=publisher,

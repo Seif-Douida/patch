@@ -131,8 +131,13 @@ def _iso(value: object) -> str:
     raise TypeError(f"not JSON serialisable: {type(value).__name__}")
 
 
+def scores_version(family: str, version: str) -> str:
+    """The name a model's scores are stored under (`raw.review_aspect_score.model_version`)."""
+    return f"{family}-{version}"
+
+
 def model_version_of(scorer: Scorer) -> str:
-    return f"{scorer.artifact.family}-{scorer.artifact.version}"
+    return scores_version(scorer.artifact.family, scorer.artifact.version)
 
 
 def _score_page(

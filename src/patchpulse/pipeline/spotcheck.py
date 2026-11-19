@@ -32,7 +32,9 @@ from patchpulse.labeling.limits import QuotaExhaustedError, RequestLimiter
 from patchpulse.labeling.llm import TeacherUnavailableError
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.labeling.teacher import (
+    Batch,
     ReviewIn,
+    TeacherLabel,
     TextModel,
     label_batch,
     make_batches,
@@ -51,6 +53,11 @@ SPOTCHECK_MODEL = "gemma-4-31b"  # config/models.yaml: Google's gemma-4-31b-it
 SPOTCHECK_SOURCE = "spotcheck"
 HOLDOUT_SHARE = 0.2
 SPOTCHECK_ATTEMPTS = 2  # the second only waits out a per-minute limit; errors raise at once
+# An outage (an overloaded Gemma's 503, a timeout) pauses and tries the same batch again, up to
+# this many tries in all, while the pause ends before the deadline (the first night, 19 Nov: one
+# 503 ended the spot-check with 0 of 200 labeled).
+SPOTCHECK_OUTAGE_TRIES = 3
+SPOTCHECK_OUTAGE_PAUSE_S = 20.0
 AGREEMENT_SEED = 20261117
 
 _CANDIDATES = """
@@ -148,10 +155,39 @@ def make_spotcheck_client(
         config,
         sleep=sleep,
         max_attempts=SPOTCHECK_ATTEMPTS,
-        # A timeout or an outage stops the night's spot-check at once (final review C1): two
-        # tries of a stalled request cost the night four minutes past the stage's budget.
+        # A timeout or an outage raises at once (final review C1: two tries of a stalled request
+        # cost the night four minutes past the stage's budget); `run_spotcheck` decides whether
+        # there's time to pause and try again.
         retry_errors=False,
     )
+
+
+def _label_through_outages(
+    client: TextModel,
+    batch: Batch,
+    *,
+    deadline: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> list[TeacherLabel]:
+    """The batch's labels. An outage pauses and tries the batch again, `SPOTCHECK_OUTAGE_TRIES`
+    tries in all, and only while the pause ends before the deadline; then it's raised."""
+    tries = 1
+    while True:
+        try:
+            return label_batch(client, batch, stop=lambda: clock() >= deadline)
+        except TeacherUnavailableError as error:
+            if tries >= SPOTCHECK_OUTAGE_TRIES or clock() + SPOTCHECK_OUTAGE_PAUSE_S >= deadline:
+                raise
+            tries += 1
+            log.warning(
+                "spot-check: the teacher is unavailable (%s); try %d of %d in %.0f s",
+                error,
+                tries,
+                SPOTCHECK_OUTAGE_TRIES,
+                SPOTCHECK_OUTAGE_PAUSE_S,
+            )
+            sleep(SPOTCHECK_OUTAGE_PAUSE_S)
 
 
 def run_spotcheck(
@@ -163,6 +199,7 @@ def run_spotcheck(
     deadline: float,
     clock: Callable[[], float],
     n: int = SPOTCHECK_SIZE,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> SpotcheckOutcome:
     with engine.connect() as connection:
         drawn = new_reviews(connection, run_id=run_id, n=n, seed=run_id)
@@ -170,17 +207,20 @@ def run_spotcheck(
     digest = prompt_hash()
     labeled = failed = 0
     stopped: str | None = None
+    reason = ""  # Google's message for an outage: never review text
     for batch in make_batches([review for review, _ in drawn]):
         if clock() >= deadline:
             stopped = "deadline"
             break
         try:
-            labels = label_batch(client, batch, stop=lambda: clock() >= deadline)
+            labels = _label_through_outages(
+                client, batch, deadline=deadline, clock=clock, sleep=sleep
+            )
         except QuotaExhaustedError:
             stopped = "quota"
             break
-        except TeacherUnavailableError:
-            stopped = "outage"
+        except TeacherUnavailableError as error:
+            stopped, reason = "outage", f": {error}"
             break
         if len(labels) < len(batch.review_ids):
             failed += 1
@@ -202,7 +242,7 @@ def run_spotcheck(
         len(drawn),
         labeled,
         failed,
-        f", stopped ({stopped})" if stopped else "",
+        f", stopped ({stopped}{reason})" if stopped else "",
     )
     return SpotcheckOutcome(
         drawn=len(drawn), labeled=labeled, failed_batches=failed, stopped=stopped
@@ -217,14 +257,15 @@ def _matrix(rows: Sequence[Sequence[object]], start: int) -> NDArray[np.bool_]:
 
 
 def weekly_agreement(
-    connection: Connection, window: tuple[date, date], *, model_version: str
+    connection: Connection, window: tuple[date, date], *, scored_as: str
 ) -> list[MetricRow]:
-    """The champion's labels against the teacher's on the window's spot-check labels."""
+    """The champion's labels against the teacher's on the window's spot-check labels; `scored_as`
+    is the name its scores are stored under (`scoring.scores_version`)."""
     start, end = window
     rows = connection.execute(
         text(_PAIRS),
         {
-            "model": model_version,
+            "model": scored_as,
             "start": datetime.combine(start, datetime.min.time()),
             "stop": datetime.combine(end + timedelta(days=1), datetime.min.time()),
         },
