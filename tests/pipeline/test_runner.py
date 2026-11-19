@@ -1603,6 +1603,17 @@ def test_the_reports_stage_record_never_holds_its_runs(env: Env) -> None:
     assert [r.report_id for r in runs] == ["p1-7d"]
 
 
+def test_the_spotcheck_is_skipped_without_a_teacher(env: Env) -> None:
+    # The friend's server or Google's Gemma (ADR-020, amended 19 Nov); with neither, nothing to ask.
+    settings = with_gemini(env.settings, gemini_api_key=None, spotcheck_budget_minutes=4)
+
+    result = env.run(settings=settings, dbt=ok_dbt, export=stub_export)
+
+    assert result.stages["spotcheck"] == {
+        "skipped": "no teacher (PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY, or PP_GEMINI_API_KEY)"
+    }
+
+
 def test_retrain_reason() -> None:
     from patchpulse.pipeline.runner import retrain_reason
 
@@ -1656,10 +1667,35 @@ def test_a_drift_request_lost_to_a_failed_night_is_asked_the_next_night(env: Env
     env.steam.failing.discard(GAME_B)
     quiet = monitoring(monitor=MonitorOutcome(ran=False, skipped="not due"))
     env.run(dbt=ok_dbt, export=stub_export, **quiet)
+    pp_retrain_decides(env.engine)
     env.run(dbt=ok_dbt, export=stub_export, **quiet)
 
     reasons = [payload["reason"] for _, payload, _ in env.publisher.dispatches]
     assert reasons == ["drift"]
+
+
+def pp_retrain_decides(engine: Engine) -> None:
+    """pp-retrain's last step (models/retrain.py): its decision, after the request it answered."""
+    from patchpulse.monitoring.store import MetricRow, write_metrics
+
+    row = MetricRow("retrain", "decision.keep", "run", NOW.date(), NOW.date(), 0.0, None, None, 9)
+    with engine.begin() as connection:
+        write_metrics(connection, [row], run_id=None)
+
+
+def test_a_drift_request_that_got_no_decision_is_asked_once_more(env: Env) -> None:
+    # 19 Nov: retrain.yml refuses a second pp-retrain within 12 hours, and the nightly had already
+    # recorded the request, so a drift found that close to a retrain was never asked about again.
+    # Once more only: a pp-retrain that keeps failing would spend the SQL allowance every night.
+    from patchpulse.pipeline.monitor import MonitorOutcome
+
+    env.run(dbt=ok_dbt, export=stub_export, **(monitoring() | {"monitor": storing_a_breach}))
+    quiet = monitoring(monitor=MonitorOutcome(ran=False, skipped="not due"))
+    env.run(dbt=ok_dbt, export=stub_export, **quiet)
+    env.run(dbt=ok_dbt, export=stub_export, **quiet)
+
+    reasons = [payload["reason"] for _, payload, _ in env.publisher.dispatches]
+    assert reasons == ["drift", "drift"]
 
 
 def test_the_request_is_sent_after_publish_and_only_on_success(env: Env) -> None:

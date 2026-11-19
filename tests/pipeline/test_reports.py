@@ -150,3 +150,48 @@ def test_the_reports_stage_keeps_each_run_record_and_trace_id(
     first = outcome.runs[0]
     assert first.report_id == first.record.result.report_id  # type: ignore[union-attr]
     assert first.trace_id == f"trace-{first.record.result.bundle_id}-{first.record.result.horizon}"  # type: ignore[union-attr]
+
+
+class Flaky:
+    """An agent model that answers 503 `outages` times, then a valid draft."""
+
+    def __init__(self, outages: int) -> None:
+        self.outages = outages
+        self.calls = 0
+
+    def generate(self, system: str, user: str, **_: Any) -> Any:
+        from patchpulse.labeling.llm import LLMResponse, TeacherUnavailableError
+
+        self.calls += 1
+        if self.calls <= self.outages:
+            raise TeacherUnavailableError(503, "high demand")
+        return LLMResponse('{"verdict": "yes"}', 10, 5, "STOP")
+
+
+@pytest.mark.parametrize(("now", "pauses"), [(0.0, 1), (170.0, 0)], ids=["early", "near the end"])
+def test_the_reports_router_waits_out_an_outage_inside_the_stage_budget(
+    tmp_path: Any, now: float, pauses: int
+) -> None:
+    # 19 Nov: both Flash Lite models answered 503 for about 2.5 minutes and one report of three
+    # went basic. The nightly pauses and asks once more while its budget allows; Ask never does.
+    from datetime import UTC, datetime
+
+    from patchpulse.agent.llm_cache import ReplayCache
+    from patchpulse.agent.router import AllModelsDownError
+    from patchpulse.pipeline.reports import REPORTS_OUTAGE_PAUSE_S, reports_router
+
+    clients = {"a": Flaky(1), "b": Flaky(1)}
+    slept: list[float] = []
+    router = reports_router(
+        ["a", "b"], clients, ReplayCache(tmp_path / "c.sqlite", "live"),
+        now=lambda: datetime(2026, 11, 19, 16, 26, tzinfo=UTC), clock=lambda: now,
+        deadline=180.0, sleep=slept.append,
+    )  # fmt: skip
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}}
+
+    if pauses:
+        assert router.generate("draft", "s", "u", schema).model_id == "a"
+    else:
+        with pytest.raises(AllModelsDownError):
+            router.generate("draft", "s", "u", schema)
+    assert slept == [REPORTS_OUTAGE_PAUSE_S] * pauses

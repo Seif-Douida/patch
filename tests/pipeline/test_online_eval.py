@@ -246,3 +246,38 @@ def test_the_online_judge_never_retries_a_stalled_request(tmp_path: Any) -> None
 
     (client,) = judge.clients.values()
     assert client.retry_errors is False  # type: ignore[attr-defined]
+
+
+def test_the_online_judge_asks_the_server_first_then_google(tmp_path: Any) -> None:
+    # Seif, 19 Nov: Google's Gemma judged 0 items that night (503s); the friend's server first.
+    from pydantic import SecretStr
+
+    from patchpulse.config import Settings
+    from patchpulse.pipeline.online_eval import online_judge_router
+    from patchpulse.pipeline.spotcheck import SERVER_TIMEOUT
+
+    settings = Settings.model_construct(
+        gemini_api_key=SecretStr("k-test"),
+        llm_server_url="https://llm.example.net/v1",
+        llm_server_key=SecretStr("s-test"),
+    )
+    judge = online_judge_router(
+        settings, None, state_path=tmp_path / "s.json", cache_path=tmp_path / "c.sqlite",  # type: ignore[arg-type]
+        clock=now,
+    )  # fmt: skip
+
+    assert judge.chain == ["selfhosted-gemma-4-31b", "gemma-4-31b"]
+    server = judge.clients["selfhosted-gemma-4-31b"]
+    assert server.max_attempts == 1  # type: ignore[attr-defined]  # the breaker moves on to Google
+    assert server.timeout == SERVER_TIMEOUT  # type: ignore[attr-defined]
+
+
+def test_the_online_judge_needs_one_of_its_models(tmp_path: Any) -> None:
+    from patchpulse.config import Settings
+    from patchpulse.pipeline.online_eval import online_judge_router
+
+    with pytest.raises(ValueError, match=r"PP_LLM_SERVER_URL.*PP_GEMINI_API_KEY"):
+        online_judge_router(
+            Settings.model_construct(), None, state_path=tmp_path / "s.json",  # type: ignore[arg-type]
+            cache_path=tmp_path / "c.sqlite", clock=now,
+        )  # fmt: skip

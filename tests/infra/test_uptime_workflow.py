@@ -41,6 +41,22 @@ def test_uptime_never_logs_in_to_azure_and_waits_sixty_seconds() -> None:
     assert f'"$SITE_URL{INDEX_PATH}"' in index["run"]
 
 
+def test_the_addresses_are_trimmed_before_use() -> None:
+    # 19 Nov: /health failed in under a second and pp-api saw no request; re-pasting the same
+    # address fixed it (most likely a stray space or line break, which curl refuses). A trailing
+    # slash would double the one in front of the path.
+    for name, variable in (
+        ("Call /health", "API_URL"),
+        ("Read the published data's index", "SITE_URL"),
+    ):
+        run = step(name)["run"]
+        trim = f"{variable}=$(printf '%s' \"${variable}\" | tr -d '[:space:]')"
+        slash = f'{variable}="${{{variable}%/}}"'
+        assert trim in run
+        assert slash in run
+        assert run.index(trim) < run.index(slash) < run.index(f'[ -z "${variable}" ]')
+
+
 def test_the_issues_go_through_the_shared_plan_script() -> None:
     apply = step("Open or close the issues")
     assert apply["env"]["GH_TOKEN"] == "${{ github.token }}"

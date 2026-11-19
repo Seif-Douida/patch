@@ -41,6 +41,9 @@ jobs:
         env:
           API_URL: ${{ vars.PP_API_URL }}
         run: |
+          # A stray space or line break in the variable makes curl refuse the URL (19 Nov).
+          API_URL=$(printf '%s' "$API_URL" | tr -d '[:space:]')
+          API_URL="${API_URL%/}"
           if [ -z "$API_URL" ]; then
             echo "::error::Set the repository variable PP_API_URL (https://<pp-api's address>)."
             exit 1
@@ -60,6 +63,8 @@ jobs:
         env:
           SITE_URL: ${{ vars.PP_SITE_URL }}
         run: |
+          SITE_URL=$(printf '%s' "$SITE_URL" | tr -d '[:space:]')
+          SITE_URL="${SITE_URL%/}"
           if [ -z "$SITE_URL" ]; then
             echo "::error::Set the repository variable PP_SITE_URL (https://<the site's address>)."
             exit 1

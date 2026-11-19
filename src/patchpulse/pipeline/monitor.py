@@ -148,19 +148,40 @@ def _previous_week(connection: Connection, before: date) -> list[MetricRow]:
 
 
 def drift_pending(connection: Connection, rules: Mapping[str, AlertRule]) -> bool:
-    """The latest stored week breached a drift rule the week before didn't, and no drift retrain
-    was asked for since it ended: a request lost to a failed night is asked the next one (final
-    review I1)."""
+    """A drift retrain is owed:
+
+    - the latest stored week breached a drift rule the week before didn't, and no drift retrain
+      was asked for since it ended: a request lost to a failed night is asked the next one (final
+      review I1);
+    - or the latest week still breaches, and the last drift request got no decision from
+      pp-retrain (retrain.yml refuses a second run within 12 hours, 19 Nov). Asked once more only:
+      a pp-retrain that keeps failing would spend the SQL allowance every night.
+    """
     rows = read_metrics(connection, family="drift", scope="week")
     ends = sorted({r.window_end for r in rows if r.window_end is not None})
     if not ends:
         return False
     latest = [r for r in rows if r.window_end == ends[-1]]
     before = [r for r in rows if len(ends) > 1 and r.window_end == ends[-2]]
-    if not _breached(latest, rules) - _breached(before, rules):
+    breached = _breached(latest, rules)
+    if not breached:
         return False
-    asked = read_metrics(connection, family="retrain", scope="night", since=ends[-1])
-    return not any(r.metric == "requested.drift" for r in asked)
+    retrain = read_metrics(connection, family="retrain")  # requests and decisions, oldest first
+    if breached - _breached(before, rules):
+        asked = [
+            r.window_end
+            for r in retrain
+            if r.scope == "night" and r.metric == "requested.drift" and r.window_end is not None
+        ]
+        if not any(end >= ends[-1] for end in asked):
+            return True
+    unanswered = 0  # drift requests since pp-retrain's last decision
+    for row in retrain:
+        if row.metric.startswith("decision."):
+            unanswered = 0
+        elif row.metric == "requested.drift":
+            unanswered += 1
+    return unanswered == 1
 
 
 def run_monitor(

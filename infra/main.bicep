@@ -68,6 +68,14 @@ param langfusePublicKey string
 @secure()
 param langfuseSecretKey string
 
+@description('Address (/v1) of the friend\'s Gemma 4 31B server (ADR-020, amended 19 Nov), from the secret PP_LLM_SERVER_URL. Secret like its key. It reaches pp-nightly only (the spot-check and the online judge), as a Container Apps secret. No billing relationship: nothing in Azure.')
+@secure()
+param llmServerUrl string
+
+@description('API key of that server, from the secret PP_LLM_SERVER_KEY. It reaches pp-nightly only, as a Container Apps secret.')
+@secure()
+param llmServerKey string
+
 @description('DagsHub\'s MLflow tracking URI for pp-retrain (Phase 7), from the variable MLFLOW_TRACKING_URI (the one deploy.yml downloads the champion from).')
 param mlflowTrackingUri string
 
@@ -152,6 +160,8 @@ module jobs 'modules/jobs.bicep' = {
     geminiApiKey: geminiApiKey
     langfusePublicKey: langfusePublicKey
     langfuseSecretKey: langfuseSecretKey
+    llmServerUrl: llmServerUrl
+    llmServerKey: llmServerKey
     mlflowTrackingUri: mlflowTrackingUri
     mlflowTrackingUsername: mlflowTrackingUsername
     dagshubToken: dagshubToken

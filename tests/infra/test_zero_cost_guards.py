@@ -483,6 +483,26 @@ def test_api_holds_only_the_ask_key_of_the_cluster(resources: list[dict[str, Any
     }
 
 
+def test_the_teacher_server_reaches_the_nightly_only(resources: list[dict[str, Any]]) -> None:
+    # ADR-020, amended 19 Nov: the spot-check and the online judge ask the friend's server first.
+    # Its address is as secret as its key, and no other app or job gets either.
+    nightly, _ = nightly_env(resources)
+    secrets = {s["name"]: s["value"] for s in nightly["properties"]["configuration"]["secrets"]}
+    assert secrets["llm-server-url"] == "[parameters('llmServerUrl')]"
+    assert secrets["llm-server-key"] == "[parameters('llmServerKey')]"
+    (container,) = nightly["properties"]["template"]["containers"]
+    env = {variable["name"]: variable for variable in container["env"]}
+    assert env["PP_LLM_SERVER_URL"] == {"name": "PP_LLM_SERVER_URL", "secretRef": "llm-server-url"}
+    assert env["PP_LLM_SERVER_KEY"] == {"name": "PP_LLM_SERVER_KEY", "secretRef": "llm-server-key"}
+    jobs = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] != "pp-nightly"]
+    for other in [api_app(resources), *jobs]:
+        names = {s["name"] for s in other["properties"]["configuration"].get("secrets", [])}
+        assert not names & {"llm-server-url", "llm-server-key"}, other["name"]
+        for box in other["properties"]["template"]["containers"]:
+            variables = [variable["name"] for variable in box.get("env", [])]
+            assert not [v for v in variables if v.startswith("PP_LLM_SERVER")], other["name"]
+
+
 def retrain_job(resources: list[dict[str, Any]]) -> dict[str, Any]:
     (job,) = [j for j in of_type(resources, "microsoft.app/jobs") if j["name"] == "pp-retrain"]
     return job

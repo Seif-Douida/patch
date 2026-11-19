@@ -1188,8 +1188,11 @@ def _spotcheck(
     """The nightly teacher spot-check (design D3); never raises."""
     if settings.spotcheck_budget_minutes <= 0:
         return {"skipped": "turned off (PP_SPOTCHECK_BUDGET_MINUTES is 0)"}
-    if stage is None and settings.gemini_api_key is None:
-        return {"skipped": "no Gemini key (PP_GEMINI_API_KEY unset)"}
+    server = settings.llm_server_url is not None and settings.llm_server_key is not None
+    if stage is None and not server and settings.gemini_api_key is None:
+        return {
+            "skipped": "no teacher (PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY, or PP_GEMINI_API_KEY)"
+        }
     try:
         from patchpulse.monitoring.alerts import load_rules
         from patchpulse.pipeline.spotcheck import (

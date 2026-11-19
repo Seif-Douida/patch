@@ -175,6 +175,8 @@ def test_infra_refuses_to_deploy_without_the_production_secrets() -> None:
         "PP_LANGFUSE_PUBLIC_KEY",
         "PP_LANGFUSE_SECRET_KEY",
         "DAGSHUB_TOKEN",
+        "PP_LLM_SERVER_URL",
+        "PP_LLM_SERVER_KEY",
     ):
         assert f"secrets.{secret}" in check
         assert f'missing="$missing {secret}"' in check
@@ -347,6 +349,14 @@ def test_infra_passes_the_gemini_key_to_what_if_and_deploy() -> None:
     text = read("infra.yml")
     assert text.count("PP_GEMINI_API_KEY: ${{ secrets.PP_GEMINI_API_KEY }}") == 3
     assert "vars.PP_GEMINI" not in text
+
+
+def test_infra_passes_the_teacher_server_to_what_if_and_deploy() -> None:
+    # ADR-020, amended 19 Nov: pp-nightly's spot-check and online judge; the address is a secret.
+    text = read("infra.yml")
+    for secret in ("PP_LLM_SERVER_URL", "PP_LLM_SERVER_KEY"):
+        assert text.count(f"{secret}: ${{{{ secrets.{secret} }}}}") == 3
+        assert f"vars.{secret}" not in text
 
 
 def test_cost_guard_reads_the_sql_metric_and_never_connects_to_the_database() -> None:

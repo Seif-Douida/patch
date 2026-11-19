@@ -6,8 +6,10 @@ step's schema. Anything else counts as that model failing and the next model is 
 a broken answer, an outage, a timeout, a refusal. The client waits once for a per-minute limit; a
 daily-quota refusal retires the model until midnight Pacific, when Google resets the free quota;
 three failures in a row skip a model for ten minutes. With every model failing, AllModelsDownError,
-and the caller writes a basic report. Logs and errors name the step, the model and the reason,
-never the prompt.
+and the caller writes a basic report. A router given `outage_pause_s` (the nightly reports') first
+waits once when every model was unavailable, if its `pause_allowed` says the pause fits and a model
+will be ready by its end; Ask's never waits, someone is waiting for the answer. Logs and errors
+name the step, the model and the reason, never the prompt.
 
 The cache's `replay` mode answers only from the file: a miss raises ModelNotRecordedError, an
 AllModelsDownError, so the graph degrades it as it would an outage (a refusal, a basic report, the
@@ -20,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -158,6 +161,9 @@ class ModelRouter:
         clock: Callable[[], datetime],
         breaker_failures: int = 3,
         breaker_minutes: int = 10,
+        outage_pause_s: float = 0.0,
+        pause_allowed: Callable[[float], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.chain = list(chain)
         self.clients = dict(clients)
@@ -165,6 +171,9 @@ class ModelRouter:
         self.clock = clock
         self.breaker_failures = breaker_failures
         self.breaker = timedelta(minutes=breaker_minutes)
+        self.outage_pause_s = outage_pause_s
+        self.pause_allowed = pause_allowed
+        self.sleep = sleep
         self._failures: dict[str, int] = {}
         self._resting_until: dict[str, datetime] = {}  # a breaker or a daily quota
         self._quota_until: dict[str, datetime] = {}  # a daily quota only
@@ -191,6 +200,44 @@ class ModelRouter:
                 return recorded
         reasons: dict[str, str] = {}
         answered = False  # a model answered (unusably) or refused the request: not an outage
+        for attempt in (1, 2):
+            routed, answered = self._ask(
+                step, system, user, schema, key, expected_output_tokens, reasons
+            )
+            if routed is not None:
+                return routed
+            if attempt == 2 or answered or not self._may_pause():
+                break
+            log.warning(
+                "%s: every model is unavailable; asking again in %.0f s", step, self.outage_pause_s
+            )
+            self.sleep(self.outage_pause_s)
+        summary = "; ".join(f"{m}: {r}" for m, r in reasons.items())
+        if not answered:
+            self.outages += 1
+        raise AllModelsDownError(f"{step}: every model failed ({summary})")
+
+    def _may_pause(self) -> bool:
+        """A pause is set, fits (`pause_allowed`), and a model will be ready by its end."""
+        pause = self.outage_pause_s
+        if pause <= 0 or self.pause_allowed is None or not self.pause_allowed(pause):
+            return False
+        ready = self.next_ready()
+        return ready is not None and ready <= self.clock() + timedelta(seconds=pause)
+
+    def _ask(
+        self,
+        step: str,
+        system: str,
+        user: str,
+        schema: Mapping[str, Any],
+        key: str,
+        expected_output_tokens: int,
+        reasons: dict[str, str],
+    ) -> tuple[Routed | None, bool]:
+        """One pass through the chain: the first usable answer, else None and whether a model
+        answered (unusably) or refused, which isn't an outage. `reasons` collects each failure."""
+        answered = False
         for model in self.chain:
             now = self.clock()
             resting = self._resting_until.get(model)
@@ -230,11 +277,9 @@ class ModelRouter:
                 key,
                 CachedAnswer(response.text, response.input_tokens, response.output_tokens),
             )
-            return Routed(model, data, response.input_tokens, response.output_tokens, cached=False)
-        summary = "; ".join(f"{m}: {r}" for m, r in reasons.items())
-        if not answered:
-            self.outages += 1
-        raise AllModelsDownError(f"{step}: every model failed ({summary})")
+            tokens = (response.input_tokens, response.output_tokens)
+            return Routed(model, data, *tokens, cached=False), answered
+        return None, answered
 
     def quota_spent(self) -> bool:
         """Whether every model in the chain has used up its daily quota (it rests until a Pacific

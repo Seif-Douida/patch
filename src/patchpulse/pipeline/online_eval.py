@@ -2,9 +2,10 @@
 
 Every report the night wrote is scored: the verifier's numbers from the report itself (the share
 of drafted claims that shipped, withheld claims by rule, rewordings), and the Phase 6 judge on its
-shipped claims (citation support, figure faithfulness), by Google's free Gemma 4 31B. The judge
-failed its calibration (Phase 6), so its numbers are named `judge.` and never alert. Everything
-goes to `ops.eval_metric` and, as scores, onto the report's Langfuse trace.
+shipped claims (citation support, figure faithfulness), by Gemma 4 31B: the judge's chain, the
+friend's server first and Google's free copy after it (ADR-020, amended 19 Nov). The judge failed
+its calibration (Phase 6), so its numbers are named `judge.` and never alert. Everything goes to
+`ops.eval_metric` and, as scores, onto the report's Langfuse trace.
 
 A night's rows (scope `night`) pool its reports, and count its basic reports as `gemini_errors`:
 the router doesn't keep a count of failed attempts, and a basic report is what an outage or a
@@ -25,7 +26,7 @@ from sqlalchemy import Connection, Engine, text
 
 from patchpulse.agent.llm_cache import ReplayCache
 from patchpulse.agent.report import Report
-from patchpulse.agent.router import ModelRouter
+from patchpulse.agent.router import ModelClient, ModelRouter
 from patchpulse.agent.tracing import Tracer
 from patchpulse.config import Settings
 from patchpulse.evals.judge import METRIC_KEYS, judge, judge_items, judge_metrics
@@ -40,7 +41,6 @@ from patchpulse.pipeline.reports import ScoredRun
 log = logging.getLogger("patchpulse.pipeline.online_eval")
 
 ONLINE_ARM = "online"
-JUDGE_MODEL = "gemma-4-31b"  # Google's copy; the friend's server never runs in Azure (ADR-020)
 VERIFIER_REPORTS = 10  # the verifier alert pools the last 10 reports
 SCORE_PREFIX = "online."
 
@@ -69,26 +69,42 @@ def online_judge_router(
     clock: Callable[[], datetime],
     sleep: Callable[[float], None] = time.sleep,
 ) -> ModelRouter:
-    """Google's Gemma 4 31B alone, live (nothing cached across nights). A timeout or an outage
-    raises at once, as in the agent's router: with the deadline checked before each item, a stall
-    costs the stage one request past its budget, not the night (final review C1)."""
+    """The judge's chain (config/models.yaml), live (nothing cached across nights): the friend's
+    server, then Google's Gemma 4 31B; a model whose settings are missing is left out. Each raises
+    a timeout or an outage at once: the router moves on and its breaker rests a model that keeps
+    failing, and with the deadline checked before each item a stall costs the stage one request
+    past its budget, not the night (final review C1)."""
+    from patchpulse.evals.judge import judge_chain
     from patchpulse.labeling.gemini import GeminiClient
+    from patchpulse.pipeline.spotcheck import make_server_client
 
-    if settings.gemini_api_key is None:
-        raise ValueError("the online judge needs PP_GEMINI_API_KEY")
-    config = load_model_config().candidates[JUDGE_MODEL].model_copy(update={"use_fraction": 1.0})
-    limiter = RequestLimiter(config, state_path=state_path, clock=clock, sleep=sleep)
-    client = GeminiClient(
-        settings.gemini_api_key.get_secret_value(),
-        http,
-        limiter,
-        config,
-        sleep=sleep,
-        max_attempts=2,  # the second attempt only waits out a per-minute limit
-        retry_errors=False,
-    )
-    return ModelRouter([JUDGE_MODEL], {JUDGE_MODEL: client}, ReplayCache(cache_path, "live"),
-                       clock=clock)  # fmt: skip
+    models = load_model_config()
+    clients: dict[str, ModelClient] = {}
+    for name in judge_chain(models):
+        config = models.candidates[name]
+        if config.provider == "openai_compat":
+            if settings.llm_server_url is not None and settings.llm_server_key is not None:
+                clients[name] = make_server_client(settings, http, model=name, sleep=sleep)
+            continue
+        if settings.gemini_api_key is None:
+            continue
+        config = config.model_copy(update={"use_fraction": 1.0})
+        limiter = RequestLimiter(config, state_path=state_path, clock=clock, sleep=sleep)
+        clients[name] = GeminiClient(
+            settings.gemini_api_key.get_secret_value(),
+            http,
+            limiter,
+            config,
+            sleep=sleep,
+            max_attempts=2,  # the second attempt only waits out a per-minute limit
+            retry_errors=False,
+        )
+    if not clients:
+        raise ValueError(
+            "the online judge needs PP_LLM_SERVER_URL and PP_LLM_SERVER_KEY, or PP_GEMINI_API_KEY"
+        )
+    chain = [name for name in judge_chain(models) if name in clients]
+    return ModelRouter(chain, clients, ReplayCache(cache_path, "live"), clock=clock)
 
 
 def _stored(run: ScoredRun) -> StoredCase:
@@ -238,17 +254,18 @@ def run_live_online_evals(
     with ExitStack() as stack:
         http = stack.enter_context(httpx2.Client())
         scratch = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-        router = (
-            online_judge_router(
+        router: ModelRouter | None
+        try:
+            router = online_judge_router(
                 settings,
                 http,
                 state_path=scratch / "gemini-requests.json",
                 cache_path=scratch / "judge.sqlite",
                 clock=now,
             )
-            if settings.gemini_api_key is not None
-            else None
-        )
+        except ValueError as error:  # no judge tonight; the verifier's numbers still count
+            log.warning("online judge: %s", error)
+            router = None
         tracer = _tracer(stack, settings, _search(stack, settings))
         outcome = run_online_evals(
             engine, runs, router=router, tracer=tracer, run_id=run_id, today=today,
