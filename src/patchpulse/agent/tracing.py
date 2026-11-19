@@ -387,11 +387,17 @@ class LangfuseTracer:
             log.warning("score %s: Langfuse failed (%s)", name, type(error).__name__)
 
     def close(self) -> None:
-        """Send what's left (the nightly job and the backfill call it at the end)."""
+        """Send what's left (the nightly's reports and online evals and the backfill, at the end).
+
+        A flush, never a shutdown: the SDK keeps one client per public key for the whole process,
+        and a shut-down one comes back to every later tracer with the same keys (the first night,
+        19 Nov: the reports stage closed it and the online evals' scores were all dropped). The
+        SDK shuts its client down itself when the process exits.
+        """
         try:
-            self.client.shutdown()
+            self.client.flush()
         except Exception as error:
-            log.warning("Langfuse shutdown failed (%s)", type(error).__name__)
+            log.warning("Langfuse flush failed (%s)", type(error).__name__)
 
 
 def make_tracer(

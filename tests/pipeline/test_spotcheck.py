@@ -22,6 +22,8 @@ from patchpulse.monitoring.alerts import load_rules
 from patchpulse.monitoring.reference import Reference
 from patchpulse.monitoring.store import MetricRow, read_teacher_labels
 from patchpulse.pipeline.spotcheck import (
+    SPOTCHECK_OUTAGE_PAUSE_S,
+    SPOTCHECK_OUTAGE_TRIES,
     SPOTCHECK_SIZE,
     is_holdout,
     run_spotcheck,
@@ -35,18 +37,22 @@ CREATED = datetime(2026, 11, 22, 10, 0)
 
 
 class FakeTeacher:
-    """Labels every review `content`; can fail from a given call on."""
+    """Labels every review `content`; can fail from a given call on, or on given calls only."""
 
-    def __init__(self, *, fail_from: int | None = None) -> None:
+    def __init__(
+        self, *, fail_from: int | None = None, fail_on: frozenset[int] = frozenset()
+    ) -> None:
         self.calls = 0
         self.fail_from = fail_from
+        self.fail_on = fail_on
         self.users: list[str] = []
 
     def generate(
         self, system: str, user: str, *, json_schema: Mapping[str, Any] | None, **_: Any
     ) -> LLMResponse:
         self.calls += 1
-        if self.fail_from is not None and self.calls >= self.fail_from:
+        failing = self.fail_from is not None and self.calls >= self.fail_from
+        if failing or self.calls in self.fail_on:
             raise TeacherUnavailableError(503, "high demand")
         self.users.append(user)
         items = json.loads(user[user.index("[") :])
@@ -105,18 +111,64 @@ def test_two_hundred_new_reviews_in_ten_batches(migrated_engine: Engine) -> None
 
 
 @pytest.mark.integration
-def test_an_outage_keeps_the_batches_already_labeled(migrated_engine: Engine) -> None:
+def test_an_outage_keeps_the_batches_already_labeled(
+    migrated_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
     seed(migrated_engine)
+    teacher = FakeTeacher(fail_from=4)
+    pauses: list[float] = []
 
-    outcome = run_spotcheck(
-        migrated_engine, run_id=RUN_ID, client=FakeTeacher(fail_from=4), model_id="m",
-        deadline=float("inf"), clock=lambda: 0.0,
-    )  # fmt: skip
+    with caplog.at_level(logging.INFO, logger="patchpulse.pipeline.spotcheck"):
+        outcome = run_spotcheck(
+            migrated_engine, run_id=RUN_ID, client=teacher, model_id="m",
+            deadline=float("inf"), clock=lambda: 0.0, sleep=pauses.append,
+        )  # fmt: skip
 
     assert outcome.labeled == 60
     assert outcome.stopped == "outage"
+    assert teacher.calls == 3 + SPOTCHECK_OUTAGE_TRIES  # the fourth batch, tried and given up
+    assert pauses == [SPOTCHECK_OUTAGE_PAUSE_S] * (SPOTCHECK_OUTAGE_TRIES - 1)
+    # The first night's line said only "stopped (outage)": the reason is in it now.
+    assert "stopped (outage: 503: high demand)" in caplog.text
     with migrated_engine.connect() as connection:
         assert len(read_teacher_labels(connection)) == 60
+
+
+@pytest.mark.integration
+def test_a_passing_outage_is_waited_out_and_the_batch_tried_again(migrated_engine: Engine) -> None:
+    # The first night (19 Nov): one 503 from an overloaded Gemma ended the spot-check at once,
+    # 0 of 200 labeled, and the month's retrain had no recent labels to judge on.
+    seed(migrated_engine)
+    teacher = FakeTeacher(fail_on=frozenset({4}))
+    pauses: list[float] = []
+
+    outcome = run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=teacher, model_id="m",
+        deadline=float("inf"), clock=lambda: 0.0, sleep=pauses.append,
+    )  # fmt: skip
+
+    assert (outcome.labeled, outcome.stopped) == (SPOTCHECK_SIZE, None)
+    assert teacher.calls == 11
+    assert pauses == [SPOTCHECK_OUTAGE_PAUSE_S]
+
+
+@pytest.mark.integration
+def test_an_outage_never_pauses_past_the_deadline(migrated_engine: Engine) -> None:
+    seed(migrated_engine)
+    teacher = FakeTeacher(fail_from=1)
+    now = [0.0]
+
+    def pause(seconds: float) -> None:
+        now[0] += seconds
+
+    outcome = run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=teacher, model_id="m",
+        deadline=1.5 * SPOTCHECK_OUTAGE_PAUSE_S, clock=lambda: now[0], sleep=pause,
+    )  # fmt: skip
+
+    assert teacher.calls == 2  # a second pause would end past the deadline
+    assert now[0] == SPOTCHECK_OUTAGE_PAUSE_S
+    assert (outcome.labeled, outcome.stopped) == (0, "outage")
 
 
 @pytest.mark.integration
@@ -189,9 +241,7 @@ def test_weekly_agreement_compares_the_champion_with_the_teacher(migrated_engine
     today = datetime.now(UTC).date()
 
     with migrated_engine.connect() as connection:
-        rows = weekly_agreement(
-            connection, (today - timedelta(days=7), today), model_version=CHAMPION
-        )
+        rows = weekly_agreement(connection, (today - timedelta(days=7), today), scored_as=CHAMPION)
 
     by_name = {row.metric: row for row in rows}
     assert by_name["macro_f1"].n == 40

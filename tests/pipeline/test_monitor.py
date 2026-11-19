@@ -27,6 +27,9 @@ from patchpulse.pipeline.monitor import (
 
 TODAY = date(2026, 11, 23)  # a Monday
 CHAMPION = "20261012T223218Z"
+# The champion's scores as the scoring stage stores them (family-version). The first night (19 Nov)
+# looked them up by the bare version: 0 reviews every week, the drift check never ran.
+SCORED_AS = f"s0-{CHAMPION}"
 
 
 def test_week_due_after_six_days() -> None:
@@ -73,7 +76,7 @@ def seed(
 ) -> None:
     ids = range(first, first + n)
     reviews = [review_row(i, created, language=language) for i in ids]
-    scores = [score_row(i, created, model_version=CHAMPION, aspects=["content"]) for i in ids]
+    scores = [score_row(i, created, model_version=SCORED_AS, aspects=["content"]) for i in ids]
     # Another model's scores on the same reviews must never be read.
     scores += [score_row(i, created, model_version="other", aspects=["performance"]) for i in ids]
     old = datetime(2026, 11, 1, 12, 0)  # outside the week
@@ -84,7 +87,7 @@ def seed(
 def test_the_week_uses_only_the_current_models_scores(migrated_engine: Engine) -> None:
     seed(migrated_engine)
     with migrated_engine.connect() as connection:
-        week = load_week(connection, week_window(TODAY), model_version=CHAMPION)
+        week = load_week(connection, week_window(TODAY), scored_as=SCORED_AS)
 
     assert len(week.review_ids) == 300
     assert week.labels[:, ASPECTS.index("content")].all()
@@ -103,7 +106,7 @@ def test_the_week_never_selects_review_text(migrated_engine: Engine) -> None:
     event.listen(migrated_engine, "before_cursor_execute", record)
     try:
         with migrated_engine.connect() as connection:
-            load_week(connection, week_window(TODAY), model_version=CHAMPION)
+            load_week(connection, week_window(TODAY), scored_as=SCORED_AS)
     finally:
         event.remove(migrated_engine, "before_cursor_execute", record)
 
@@ -174,6 +177,7 @@ def run(
         engine,
         run_id=9,
         today=today,
+        family="s0",
         model_version=model_version,
         vectors=FakeVectors(),
         publisher=issues,

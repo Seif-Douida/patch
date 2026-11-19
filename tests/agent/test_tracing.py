@@ -55,8 +55,9 @@ class Capture:
             return httpx.Response(200, json={})
 
         # The SDK keeps one set of resources per public key: a new key per test.
+        self.public_key = f"pk-lf-test-{uuid.uuid4().hex}"
         self.client = Langfuse(
-            public_key=f"pk-lf-test-{uuid.uuid4().hex}",
+            public_key=self.public_key,
             secret_key="sk-lf-test",
             base_url="https://langfuse.test",
             span_exporter=self.exporter,
@@ -315,6 +316,25 @@ def test_a_score_reaches_its_trace_and_counts_a_unit(capture: Capture) -> None:
     assert sent[0]["traceId"] == observer.trace_id
     assert sent[0]["value"] == 0.75
     assert units.used() == before + 1
+
+
+def test_closing_a_tracer_leaves_a_later_one_with_the_same_keys_working(capture: Capture) -> None:
+    # The first night (19 Nov): the reports stage closed its tracer, the online evals made their
+    # own with the same keys, and the SDK (one client per public key) handed back the closed one:
+    # every score was dropped.
+    first = tracer(capture)
+    observer = first.start(ReportRequest.for_bundle("p1", 7), data_version=52)
+    observer.finish(None)
+    first.close()
+
+    key = SecretStr("sk-lf-test")
+    second = make_tracer(capture.public_key, key, "https://langfuse.test", store=MemoryLimitStore())
+    second.score(observer.trace_id, "online.pre_verifier_pass_rate", 0.75)
+
+    sent = [s for s in capture.scores() if s.get("name") == "online.pre_verifier_pass_rate"]
+    assert [s["traceId"] for s in sent] == [observer.trace_id]
+    roots = [s for s in capture.spans() if s.parent is None]
+    assert len(roots) == 1  # the closed tracer sent its trace
 
 
 def test_a_recorded_run_carries_its_trace_id(tmp_path: Path, capture: Capture) -> None:
