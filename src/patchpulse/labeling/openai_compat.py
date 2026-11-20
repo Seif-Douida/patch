@@ -110,7 +110,9 @@ class OpenAICompatClient:
                 continue
             if response.status_code == httpx2.codes.OK:
                 return self._answer(response)
-            message = self._scrub(response.text[:300] or response.reason_phrase)
+            # Scrubbed before the cut, which could otherwise leave the start of the address; on
+            # one line, as a proxy's error page split into several log lines (19 Nov).
+            message = " ".join(self._scrub(response.text or response.reason_phrase).split())[:300]
             retryable = response.status_code == httpx2.codes.TOO_MANY_REQUESTS
             if retryable or response.status_code >= httpx2.codes.INTERNAL_SERVER_ERROR:
                 last = OpenAICompatUnavailableError(response.status_code, message)

@@ -178,6 +178,34 @@ def test_an_error_never_shows_the_servers_address() -> None:
     assert "llm.example.net" not in str(raised.value)
 
 
+def test_an_address_cut_by_the_length_limit_is_still_scrubbed() -> None:
+    # The message keeps 300 characters: a cut through the address must not leave its start.
+    def proxy(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(502, text=f"{'x' * 290} llm.example.net is down")
+
+    with pytest.raises(TeacherUnavailableError) as raised:
+        nightly(proxy, max_attempts=1).generate("system", "user", json_schema=SCHEMA)
+
+    assert "llm.exam" not in str(raised.value)
+
+
+def test_an_error_page_is_one_line() -> None:
+    # Night 62 (19 Nov): a proxy's 503 page split into three log lines, out of order.
+    page = (
+        "<html><body><h1>503 Service Unavailable</h1>\n"
+        "No server is available to handle this request.\n</body></html>\n"
+    )
+
+    def proxy(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(503, text=page)
+
+    with pytest.raises(TeacherUnavailableError) as raised:
+        nightly(proxy, max_attempts=1).generate("system", "user", json_schema=SCHEMA)
+
+    assert "\n" not in str(raised.value)
+    assert "No server is available to handle this request." in str(raised.value)
+
+
 def test_a_refused_request_is_a_request_error_and_never_shows_the_key() -> None:
     refused = httpx2.Response(401, json={"error": {"message": f"invalid key {KEY}"}})
     server, _, _ = client([refused])

@@ -132,6 +132,8 @@ def test_an_outage_keeps_the_batches_already_labeled(
     assert pauses == [SPOTCHECK_OUTAGE_PAUSE_S] * (SPOTCHECK_OUTAGE_TRIES - 1)
     # The first night's line said only "stopped (outage)": the reason is in it now.
     assert "stopped (outage: 503: high demand)" in caplog.text
+    # Night 62 (19 Nov) said "the teacher is unavailable" with two teachers: the line names it.
+    assert "spot-check: m is unavailable (503: high demand); try 2 of 3 in 20 s" in caplog.text
     with migrated_engine.connect() as connection:
         assert len(read_teacher_labels(connection)) == 60
 
@@ -183,19 +185,39 @@ def test_a_server_outage_hands_the_night_to_the_backup(
     # Seif, 19 Nov: the friend's server first, Google's Gemma when it's down (ADR-020 amended).
     seed(migrated_engine)
     server, google = FakeTeacher(fail_from=1), FakeTeacher()
+    pauses: list[float] = []
 
     with caplog.at_level(logging.INFO, logger="patchpulse.pipeline.spotcheck"):
         outcome = run_spotcheck(
             migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
             backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=float("inf"),
-            clock=lambda: 0.0, sleep=lambda _: None,
+            clock=lambda: 0.0, sleep=pauses.append,
         )  # fmt: skip
 
     assert (outcome.labeled, outcome.stopped) == (SPOTCHECK_SIZE, None)
-    assert server.calls == SPOTCHECK_OUTAGE_TRIES  # its tries, then never again tonight
+    # One try with Google's copy ready behind it, no pause, and never again tonight.
+    assert (server.calls, pauses) == (1, [])
     assert google.calls == 10
     assert f"{SERVER_MODEL_ID} is unavailable" in caplog.text
     assert f"{GOOGLE_MODEL_ID} labels the rest of the night" in caplog.text
+
+
+@pytest.mark.integration
+def test_the_backup_waits_out_its_own_outage(migrated_engine: Engine) -> None:
+    # The last teacher in line keeps the pause and the tries.
+    seed(migrated_engine)
+    server, google = FakeTeacher(fail_from=1), FakeTeacher(fail_on=frozenset({1}))
+    pauses: list[float] = []
+
+    outcome = run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
+        backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=float("inf"),
+        clock=lambda: 0.0, sleep=pauses.append,
+    )  # fmt: skip
+
+    assert (outcome.labeled, outcome.stopped) == (SPOTCHECK_SIZE, None)
+    assert (server.calls, google.calls) == (1, 11)
+    assert pauses == [SPOTCHECK_OUTAGE_PAUSE_S]
 
 
 @pytest.mark.integration
@@ -226,7 +248,7 @@ def test_the_backup_failing_too_ends_the_night_as_an_outage(migrated_engine: Eng
     )  # fmt: skip
 
     assert (outcome.labeled, outcome.stopped) == (0, "outage")
-    assert (server.calls, google.calls) == (SPOTCHECK_OUTAGE_TRIES, SPOTCHECK_OUTAGE_TRIES)
+    assert (server.calls, google.calls) == (1, SPOTCHECK_OUTAGE_TRIES)
 
 
 class StalledTeacher(FakeTeacher):
@@ -255,6 +277,26 @@ def test_the_backup_never_starts_past_the_deadline(migrated_engine: Engine) -> N
 
     assert (server.calls, google.calls) == (1, 0)
     assert (outcome.labeled, outcome.stopped) == (0, "outage")
+
+
+@pytest.mark.integration
+def test_a_hanging_server_leaves_the_backup_its_time(migrated_engine: Engine) -> None:
+    # Night 62 (19 Nov): the server took the full 90 s read timeout on its first and third
+    # tries; with the pauses, they ran past the 4-minute budget and Google's copy never started.
+    seed(migrated_engine)
+    server, google = StalledTeacher(seconds=90.0), FakeTeacher()
+
+    def pause(seconds: float) -> None:
+        server.now += seconds
+
+    outcome = run_spotcheck(
+        migrated_engine, run_id=RUN_ID, client=server, model_id=SERVER_MODEL_ID,
+        backup=SpotcheckTeacher(google, GOOGLE_MODEL_ID), deadline=240.0,
+        clock=lambda: server.now, sleep=pause,
+    )  # fmt: skip
+
+    assert (server.calls, google.calls) == (1, 10)
+    assert (outcome.labeled, outcome.stopped) == (SPOTCHECK_SIZE, None)
 
 
 @pytest.mark.integration
