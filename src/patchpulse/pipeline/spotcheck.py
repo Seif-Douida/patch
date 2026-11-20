@@ -3,8 +3,8 @@
 Each night 200 reviews first seen in that run are labeled by the teacher (prompt v1, the silver
 set's batching and validation), and the labels stored in `raw.teacher_label` (source `spotcheck`).
 The teacher is Gemma 4 31B on the friend's server, the silver set's own teacher (ADR-020, amended
-19 Nov: Google's free copy kept answering 503). When the server is down, Google's copy labels the
-rest of that night; each label names the model that gave it.
+19 Nov: Google's free copy kept answering 503). From the server's first failed request, Google's
+copy labels the rest of that night; each label names the model that gave it.
 
 Each week the champion's labels are compared with the teacher's on that week's spot-check reviews
 (the online accuracy proxy), against the same comparison on the silver holdout (the reference).
@@ -61,7 +61,9 @@ HOLDOUT_SHARE = 0.2
 SPOTCHECK_ATTEMPTS = 2  # the second only waits out a per-minute limit; errors raise at once
 # An outage (an overloaded Gemma's 503, a timeout) pauses and tries the same batch again, up to
 # this many tries in all, while the pause ends before the deadline (the first night, 19 Nov: one
-# 503 ended the spot-check with 0 of 200 labeled).
+# 503 ended the spot-check with 0 of 200 labeled). Only the last teacher in line waits: one with a
+# backup behind it hands over at its first outage (night 62, 19 Nov: a hanging server's tries
+# spent the 4-minute budget, and Google's copy never started).
 SPOTCHECK_OUTAGE_TRIES = 3
 SPOTCHECK_OUTAGE_PAUSE_S = 20.0
 AGREEMENT_SEED = 20261117
@@ -228,28 +230,30 @@ def spotcheck_teachers(
 
 
 def _label_through_outages(
-    client: TextModel,
+    teacher: SpotcheckTeacher,
     batch: Batch,
     *,
+    tries: int,
     deadline: float,
     clock: Callable[[], float],
     sleep: Callable[[float], None],
 ) -> list[TeacherLabel]:
-    """The batch's labels. An outage pauses and tries the batch again, `SPOTCHECK_OUTAGE_TRIES`
-    tries in all, and only while the pause ends before the deadline; then it's raised."""
-    tries = 1
+    """The batch's labels. An outage pauses and tries the batch again, `tries` tries in all, and
+    only while the pause ends before the deadline; then it's raised."""
+    tried = 1
     while True:
         try:
-            return label_batch(client, batch, stop=lambda: clock() >= deadline)
+            return label_batch(teacher.client, batch, stop=lambda: clock() >= deadline)
         except TeacherUnavailableError as error:
-            if tries >= SPOTCHECK_OUTAGE_TRIES or clock() + SPOTCHECK_OUTAGE_PAUSE_S >= deadline:
+            if tried >= tries or clock() + SPOTCHECK_OUTAGE_PAUSE_S >= deadline:
                 raise
-            tries += 1
+            tried += 1
             log.warning(
-                "spot-check: the teacher is unavailable (%s); try %d of %d in %.0f s",
+                "spot-check: %s is unavailable (%s); try %d of %d in %.0f s",
+                teacher.model_id,
                 error,
+                tried,
                 tries,
-                SPOTCHECK_OUTAGE_TRIES,
                 SPOTCHECK_OUTAGE_PAUSE_S,
             )
             sleep(SPOTCHECK_OUTAGE_PAUSE_S)
@@ -275,8 +279,9 @@ def run_spotcheck(
     sleep: Callable[[float], None] = time.sleep,
     backup: SpotcheckTeacher | None = None,
 ) -> SpotcheckOutcome:
-    """Label tonight's draw with `client`; when it stays unavailable through its tries (or runs
-    out of quota), `backup` labels the rest of the night, while there's time."""
+    """Label tonight's draw with `client`; at its first outage (or out of quota), `backup` labels
+    the rest of the night, while there's time. The last teacher in line waits out an outage
+    (`SPOTCHECK_OUTAGE_TRIES`)."""
     with engine.connect() as connection:
         drawn = new_reviews(connection, run_id=run_id, n=n, seed=run_id)
     versions = {review.review_id: updated for review, updated in drawn}
@@ -293,7 +298,12 @@ def run_spotcheck(
         while labels is None:
             try:
                 labels = _label_through_outages(
-                    teacher.client, batch, deadline=deadline, clock=clock, sleep=sleep
+                    teacher,
+                    batch,
+                    tries=SPOTCHECK_OUTAGE_TRIES if backup is None else 1,
+                    deadline=deadline,
+                    clock=clock,
+                    sleep=sleep,
                 )
             except (QuotaExhaustedError, TeacherUnavailableError) as error:
                 if backup is None or clock() >= deadline:
