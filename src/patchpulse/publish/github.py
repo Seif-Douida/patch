@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -41,6 +42,11 @@ ALERT_LABEL = "alert"
 _JWT_LIFETIME = timedelta(minutes=9)
 _CLOCK_SKEW = timedelta(seconds=60)
 _TIMEOUT_S = 30.0
+# GitHub's Git Data API can refuse a tree naming a blob it created a moment earlier ("tree.sha ...
+# is not a valid blob", night 63): its reads lag its writes. The tree is retried after these pauses;
+# the blobs are already stored and aren't sent again.
+_TREE_RETRY_PAUSES_S = (2.0, 5.0, 10.0)
+_BLOB_LAG = "is not a valid blob"
 
 
 class GitHubError(RuntimeError):
@@ -121,6 +127,29 @@ def installation_token(
     return token
 
 
+def _post_tree(
+    token: str,
+    repo: str,
+    entries: list[dict[str, str]],
+    http: httpx2.Client,
+    sleep: Callable[[float], None],
+) -> Any:
+    attempt = 0
+    while True:
+        try:
+            return _call(
+                http, "POST", f"/repos/{repo}/git/trees", bearer=token, body={"tree": entries}
+            )
+        except GitHubError as error:
+            lag = "HTTP 422" in str(error) and _BLOB_LAG in str(error)
+            if not lag or attempt == len(_TREE_RETRY_PAUSES_S):
+                raise
+            pause = _TREE_RETRY_PAUSES_S[attempt]
+            attempt += 1
+            log.warning("%s; retrying the tree in %.0f s", error, pause)
+            sleep(pause)
+
+
 def replace_branch(
     token: str,
     repo: str,
@@ -128,6 +157,8 @@ def replace_branch(
     files: Mapping[str, bytes],
     message: str,
     http: httpx2.Client,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Point `branch` at a new parentless commit holding exactly `files`; returns its SHA."""
     entries = []
@@ -140,7 +171,7 @@ def replace_branch(
             body={"content": base64.b64encode(files[path]).decode(), "encoding": "base64"},
         )
         entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
-    tree = _call(http, "POST", f"/repos/{repo}/git/trees", bearer=token, body={"tree": entries})
+    tree = _post_tree(token, repo, entries, http, sleep)
     commit = _call(
         http,
         "POST",

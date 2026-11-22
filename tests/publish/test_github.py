@@ -58,6 +58,8 @@ class FakeGitHub:
         self.blobs: dict[str, bytes] = {}
         self.trees: dict[str, list[dict[str, Any]]] = {}
         self.fail_token = False
+        # Messages for the next tree POSTs to refuse with HTTP 422, first one first.
+        self.tree_refusals: list[str] = []
 
     def client(self) -> httpx2.Client:
         return httpx2.Client(transport=httpx2.MockTransport(self))
@@ -83,6 +85,8 @@ class FakeGitHub:
             self.blobs[sha] = base64.b64decode(payload["content"])
             return httpx2.Response(201, json={"sha": sha})
         if path == f"/repos/{REPO}/git/trees":
+            if self.tree_refusals:
+                return httpx2.Response(422, json={"message": self.tree_refusals.pop(0)})
             sha = f"tree{len(self.trees)}"
             self.trees[sha] = payload["tree"]
             return httpx2.Response(201, json={"sha": sha})
@@ -169,6 +173,76 @@ def test_replace_branch_creates_the_ref_when_missing(github: FakeGitHub) -> None
     )
 
     assert github.refs == {SITE_BRANCH: commit}
+
+
+# Night 63: GitHub refused the tree a moment after creating its blobs ("tree.sha ... is not a valid
+# blob"), though the blob was there when looked up later: its Git Data API lags behind its writes.
+LAG = "tree.sha blob0 is not a valid blob"
+
+
+def _tree_posts(github: FakeGitHub) -> int:
+    return sum(1 for r in github.requests if r.url.path.endswith("/git/trees"))
+
+
+def test_replace_branch_retries_a_tree_github_says_has_no_blob_yet(
+    github: FakeGitHub, caplog: pytest.LogCaptureFixture
+) -> None:
+    github.refs[SITE_BRANCH] = "old"
+    github.tree_refusals = [LAG, LAG]
+    files = {"index.json": b"{}\n", "games/553850.json": b"{}\n"}
+    pauses: list[float] = []
+
+    with caplog.at_level(logging.WARNING, logger="patchpulse.publish"):
+        commit = replace_branch(
+            "ghs", REPO, SITE_BRANCH, files, "v8", github.client(), sleep=pauses.append
+        )
+
+    assert github.refs[SITE_BRANCH] == commit
+    assert pauses == [2.0, 5.0]
+    assert _tree_posts(github) == 3
+    assert len(github.blobs) == len(files)  # the blobs are sent once, never again
+    retries = [r for r in caplog.records if "not a valid blob" in r.getMessage()]
+    assert [r.levelname for r in retries] == ["WARNING", "WARNING"]
+
+
+def test_replace_branch_gives_up_after_its_retries(github: FakeGitHub) -> None:
+    github.refs[SITE_BRANCH] = "old"
+    github.tree_refusals = [LAG] * 10
+    pauses: list[float] = []
+
+    with pytest.raises(GitHubError, match="is not a valid blob"):
+        replace_branch(
+            "ghs",
+            REPO,
+            SITE_BRANCH,
+            {"index.json": b"{}\n"},
+            "v8",
+            github.client(),
+            sleep=pauses.append,
+        )
+
+    assert pauses == [2.0, 5.0, 10.0]
+    assert _tree_posts(github) == 4
+    assert github.refs[SITE_BRANCH] == "old"
+
+
+def test_replace_branch_does_not_retry_other_tree_errors(github: FakeGitHub) -> None:
+    github.tree_refusals = ["Invalid tree info"]
+    pauses: list[float] = []
+
+    with pytest.raises(GitHubError, match="HTTP 422 Invalid tree info"):
+        replace_branch(
+            "ghs",
+            REPO,
+            SITE_BRANCH,
+            {"index.json": b"{}\n"},
+            "v8",
+            github.client(),
+            sleep=pauses.append,
+        )
+
+    assert pauses == []
+    assert _tree_posts(github) == 1
 
 
 def test_dispatch_sends_the_event_type_and_payload(github: FakeGitHub) -> None:
