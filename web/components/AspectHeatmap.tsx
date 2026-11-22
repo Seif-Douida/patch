@@ -2,7 +2,7 @@
 
 import { type CSSProperties, type KeyboardEvent, useMemo, useRef, useState } from "react";
 
-import { WeakMark } from "@/components/PatchAspectTable";
+import { WeakMark } from "@/components/WeakMark";
 import {
   MIN_WEEK_SCORED,
   type Polarity,
@@ -157,6 +157,7 @@ export function AspectHeatmap({
             role="grid"
             aria-label={`Share of ${noun} reviews mentioning each aspect, by week`}
             className="heatmap"
+            data-polarity={polarity}
             onPointerLeave={() => setActive(null)}
           >
             {aspects.codes.map((code, row) => (
@@ -227,7 +228,7 @@ export function AspectHeatmap({
           )}
         </p>
 
-        <ul className="chart-key heatmap-key" aria-label="Colour key">
+        <ul className="chart-key heatmap-key" aria-label="Colour key" data-polarity={polarity}>
           {[1, 2, 3, 4, 5].map((level) => (
             <li key={level}>
               <span className={`key-heat heat-${level}`} aria-hidden="true" />
@@ -243,36 +244,6 @@ export function AspectHeatmap({
           <p className="chart-note">{WEAK_NOTE}</p>
         )}
       </figure>
-
-      <details className="table-view">
-        <summary>Show the weekly aspect numbers ({noun} reviews)</summary>
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Week of</th>
-                <th scope="col">Scored</th>
-                {aspects.codes.map((code) => (
-                  <th scope="col" key={code}>
-                    {aspectLabel(code)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {[...weeks].reverse().map((week) => (
-                <tr key={week.start}>
-                  <td>{formatDate(week.start)}</td>
-                  <td>{formatCount(week.n)}</td>
-                  {week.shares.map((share, i) => (
-                    <td key={aspects.codes[i]}>{formatShare(share)}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </details>
     </>
   );
 }

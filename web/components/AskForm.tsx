@@ -9,10 +9,12 @@ import {
   MAX_QUESTION_CHARS,
   SUGGESTIONS,
   WARM_DELAY_MS,
+  WORKING,
   apiBase,
 } from "@/lib/ask";
 import type { PublicReport } from "@/lib/types";
 
+import { AskWait } from "./AskWait";
 import { ReportView } from "./ReportView";
 
 const NO_ANSWER = "The analysis service didn't answer. Try again in a minute.";
@@ -109,9 +111,7 @@ export function AskForm({
     }
   }
 
-  const status = busy
-    ? "Working on it: the analyst reads the data and the reviews, which takes up to a minute."
-    : message;
+  const status = busy ? WORKING : message;
 
   return (
     <div className="ask">
@@ -179,15 +179,17 @@ export function AskForm({
           service&apos;s address. The patch reports are on each game&apos;s page.
         </p>
       )}
-      {warming && (
+      {warming && !busy && (
         <p className="ask-warming">
           Warming up the analysis service: the first question after a quiet spell takes up to half
           a minute.
         </p>
       )}
-      <p className="ask-status" role="status">
+      {/* While busy it speaks to screen readers only: the wait below shows the same to the eye. */}
+      <p className={busy ? "ask-status visually-hidden" : "ask-status"} role="status">
         {status}
       </p>
+      {busy && <AskWait />}
 
       {answer && (
         <section className="ask-answer" aria-label="Answer">

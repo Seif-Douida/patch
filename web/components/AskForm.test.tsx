@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { askableGames } from "@/lib/ask";
@@ -93,6 +93,70 @@ describe("AskForm", () => {
     expect(await screen.findByText(/^Warming up the analysis service/)).toBeTruthy();
     wake(json(200, { status: "ok" }));
     await waitFor(() => expect(screen.queryByText(/^Warming up/)).toBeNull());
+  });
+
+  it("shows_the_wait_until_the_answer", async () => {
+    let answer: (response: Response) => void = () => undefined;
+    const { fetcher } = api({ ask: () => new Promise<Response>((resolve) => (answer = resolve)) });
+    const { container } = render(<AskForm games={GAMES} apiUrl={API} fetcher={fetcher} />);
+
+    ask("Did the latest patch help?");
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Working on your answer."));
+    expect(screen.getByText("Reading your question")).toBeTruthy();
+    expect(container.textContent).not.toContain("Working on it");
+
+    answer(json(200, { data_version: 42, report: REPORT }));
+
+    expect(await screen.findByRole("region", { name: "Answer" })).toBeTruthy();
+    expect(container.querySelector(".ask-wait")).toBeNull();
+  });
+
+  it("the_warming_notice_never_shows_beside_the_wait", async () => {
+    const { fetcher } = api({ health: () => new Promise<Response>(() => undefined), ask: () => new Promise<Response>(() => undefined) });
+    const { container } = render(
+      <AskForm games={GAMES} apiUrl={API} fetcher={fetcher} warmDelayMs={0} />,
+    );
+
+    ask("Did the latest patch help?");
+    await new Promise((resolve) => setTimeout(resolve, 20)); // the slow-wake timer has fired
+
+    expect(container.querySelector(".ask-wait")).not.toBeNull();
+    expect(screen.queryByText(/^Warming up/)).toBeNull();
+  });
+
+  it("a_second_question_starts_the_wait_again", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let asked = 0;
+      let answer: (response: Response) => void = () => undefined;
+      const { fetcher } = api({
+        ask: () => {
+          asked += 1;
+          return asked === 1
+            ? new Promise<Response>((resolve) => (answer = resolve))
+            : new Promise<Response>(() => undefined);
+        },
+      });
+      const { container } = render(<AskForm games={GAMES} apiUrl={API} fetcher={fetcher} />);
+
+      ask("Did the latest patch help?");
+      await waitFor(() => expect(container.querySelector(".ask-wait")).not.toBeNull());
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(screen.getByText("Pulling the review numbers")).toBeTruthy();
+      answer(json(200, { data_version: 42, report: REPORT }));
+      await screen.findByRole("region", { name: "Answer" });
+
+      ask("What do players complain about?");
+
+      await waitFor(() => expect(container.querySelector(".ask-wait")).not.toBeNull());
+      expect(screen.getByText("Reading your question")).toBeTruthy();
+      expect(screen.getByText("0 s")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders_the_answer_as_a_report", async () => {

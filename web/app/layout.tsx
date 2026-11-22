@@ -3,8 +3,10 @@ import { Atkinson_Hyperlegible_Next } from "next/font/google";
 import type { ReactNode } from "react";
 
 import { Footer } from "@/components/Footer";
+import { HeaderTitleProvider } from "@/components/HeaderTitle";
 import { SiteHeader } from "@/components/SiteHeader";
 import { loadIndex } from "@/lib/data";
+import { SITE_DESCRIPTION } from "@/lib/site";
 
 import "./globals.css";
 
@@ -18,7 +20,7 @@ const sans = Atkinson_Hyperlegible_Next({
 
 export const metadata: Metadata = {
   title: { default: "PatchPulse", template: "%s | PatchPulse" },
-  description: "How players' Steam reviews moved around each game's patches, updated every other night.",
+  description: SITE_DESCRIPTION,
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -26,13 +28,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en-GB" className={sans.className}>
       <body>
-        <SiteHeader />
-        <main>{children}</main>
-        <Footer
-          attribution={index.attribution}
-          generatedAt={index.generated_at}
-          dataVersion={index.data_version}
-        />
+        <HeaderTitleProvider>
+          <SiteHeader />
+          <main className="site-main">{children}</main>
+          <Footer
+            attribution={index.attribution}
+            generatedAt={index.generated_at}
+            dataVersion={index.data_version}
+          />
+        </HeaderTitleProvider>
       </body>
     </html>
   );

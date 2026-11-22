@@ -52,8 +52,8 @@ function coloursByShare(): Map<string, string> {
 describe("AspectHeatmap", () => {
   afterEach(cleanup);
 
-  it("heatmap_has_ten_rows_and_a_table_view", () => {
-    renderHeatmap();
+  it("heatmap_has_ten_rows_and_no_table", () => {
+    const { container } = renderHeatmap();
 
     const grid = screen.getByRole("grid", { name: /negative reviews/i });
     expect(within(grid).getAllByRole("row")).toHaveLength(10);
@@ -62,18 +62,19 @@ describe("AspectHeatmap", () => {
     );
     expect(within(grid).getAllByRole("gridcell")).toHaveLength(30);
     expect(grid.querySelectorAll("[data-thin]")).toHaveLength(10); // the thin week, every row
-    const table = screen.getByRole("table");
-    expect(table.closest("details")).not.toBeNull();
-    expect(within(table).getAllByRole("columnheader")).toHaveLength(2 + CODES.length);
-    expect(within(table).getAllByRole("row")).toHaveLength(1 + 3);
+    // The weekly table is gone (design F6): the grid's cells carry the same numbers by name.
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(container.querySelector("details.table-view")).toBeNull();
   });
 
-  it("toggle_changes_data_not_colours", () => {
+  it("toggle_switches_the_ramp_and_keeps_the_levels", () => {
     renderHeatmap();
     const negative = screen.getByRole("button", { name: "Negative reviews" });
     const positive = screen.getByRole("button", { name: "Positive reviews" });
     expect(negative.getAttribute("aria-pressed")).toBe("true");
-    const legend = screen.getByLabelText("Colour key").innerHTML;
+    // Negative reviews are drawn in the red ramp, positive ones in the blue (design F5).
+    expect(screen.getByRole("grid").getAttribute("data-polarity")).toBe("neg");
+    expect(screen.getByLabelText("Colour key").getAttribute("data-polarity")).toBe("neg");
     const before = coloursByShare();
     const performance = document.querySelector<HTMLElement>(
       '[data-aspect-row="performance"] [data-week="2026-09-28"]',
@@ -89,8 +90,9 @@ describe("AspectHeatmap", () => {
       '[data-aspect-row="performance"] [data-week="2026-09-28"]',
     );
     expect(after?.dataset.share).toBe("0");
-    // The scale is fixed: the key is unchanged, and a share keeps its colour across the toggle.
-    expect(screen.getByLabelText("Colour key").innerHTML).toBe(legend);
+    expect(screen.getByRole("grid").getAttribute("data-polarity")).toBe("pos");
+    expect(screen.getByLabelText("Colour key").getAttribute("data-polarity")).toBe("pos");
+    // The scale is fixed: a share keeps its level across the toggle; only the hue changes.
     for (const [share, level] of coloursByShare()) {
       if (before.has(share)) expect(level).toBe(before.get(share));
     }
