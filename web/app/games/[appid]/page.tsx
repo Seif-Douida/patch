@@ -2,11 +2,12 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { GameCharts } from "@/components/GameCharts";
+import { WatchedTitle } from "@/components/HeaderTitle";
 import { EstimateNote, MethodNote } from "@/components/MethodNote";
-import { PatchAspectTables } from "@/components/PatchAspectTable";
+import { PatchList } from "@/components/PatchList";
 import { weakAspects } from "@/lib/aspects";
 import { loadGame, loadIndex } from "@/lib/data";
-import { PATCH_LABELS, formatCount, formatDate, formatShare } from "@/lib/series";
+import { formatCount, formatShare } from "@/lib/series";
 
 type Props = { params: Promise<{ appid: string }> };
 
@@ -27,7 +28,6 @@ export default async function GamePage({ params }: Props) {
   const index = loadIndex();
   const latest = index.games.find((g) => g.appid === game.appid)?.latest ?? null;
   const aspects = game.aspects && game.aspects.days.length > 0 ? game.aspects : null;
-  const posts = [...game.patches].reverse();
   // The first day with a price snapshot: discounts before it aren't known.
   const discountsFrom = game.series.find((day) => day.discount !== null)?.date ?? null;
 
@@ -37,7 +37,9 @@ export default async function GamePage({ params }: Props) {
         <Link href="/">All games</Link>
       </nav>
       <header className="game-header">
-        <h1>{game.name}</h1>
+        <WatchedTitle name={game.name}>
+          <h1>{game.name}</h1>
+        </WatchedTitle>
         <p className="game-genres">{game.genres.join(", ")}</p>
         {latest && (
           <p className="game-latest">
@@ -56,62 +58,21 @@ export default async function GamePage({ params }: Props) {
         weak={[...weakAspects(index.aspect_model)]}
       />
 
-      {aspects && (
-        <>
-          <PatchAspectTables
-            appid={game.appid}
-            aspects={aspects}
-            patches={game.patches}
-            model={index.aspect_model}
-            causal={index.causal ?? null}
-            discountsFrom={discountsFrom}
-          />
-          <div className="method-notes">
-            <EstimateNote causal={index.causal} />
-            <MethodNote model={index.aspect_model} />
-          </div>
-        </>
-      )}
+      <PatchList
+        appid={game.appid}
+        patches={game.patches}
+        aspects={aspects}
+        model={index.aspect_model ?? null}
+        causal={index.causal ?? null}
+        discountsFrom={discountsFrom}
+      />
 
-      <section className="posts">
-        <h2>Patches and posts</h2>
-        {posts.length === 0 ? (
-          <p>No official posts in this period.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Date</th>
-                <th scope="col">Post</th>
-                <th scope="col">Kind</th>
-              </tr>
-            </thead>
-            <tbody>
-              {posts.map((post) => (
-                <tr key={`${post.date}-${post.url}`}>
-                  <td>{formatDate(post.date)}</td>
-                  <td>
-                    <a href={post.url} rel="noopener noreferrer">
-                      {post.title}
-                    </a>
-                  </td>
-                  <td>
-                    <span
-                      className={post.treatment ? "kind kind-treatment" : "kind"}
-                      aria-hidden="true"
-                    />
-                    {PATCH_LABELS[post.type]}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        <p className="method-note">
-          Each post is labelled by its title. Major updates and patches are the ones PatchPulse
-          tests for an effect on reviews; the rest are shown for context.
-        </p>
-      </section>
+      {aspects && (
+        <div className="method-notes">
+          <EstimateNote causal={index.causal} />
+          <MethodNote model={index.aspect_model} />
+        </div>
+      )}
     </>
   );
 }

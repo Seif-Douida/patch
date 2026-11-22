@@ -13,19 +13,33 @@
   --axis: #c3c4bd;
   --pulse: #2a78d6;
   --pulse-wash: rgb(42 120 214 / 0.16);
-  --volume: #aeb1aa;
+  /* Reviews per day, a thin grey line (design F4): 3.22:1 on --surface, so a 2 px line reads
+     (3:1 for graphics), and lighter than the post markers. */
+  --volume: #8a8f87;
   --marker: #4b5260;
   --marker-soft: #b8bbb4;
-  --sale: #ecebe4;
+  /* A Steam sale (design F3): a green wash with a solid green top edge and the word "Sale".
+     Validator (22 Nov) with the pulse blue on --surface: ALL CHECKS PASS, colour-blind ΔE 23.6
+     (protan), normal 24.6, both 3:1 or more. The wash is solid (the edge at 18%) so the blue line
+     keeps 3.53:1 where it crosses a sale. */
+  --sale-edge: #3f9a52;
+  --sale-wash: #daeadd;
   --chip: #ecedea;
   --focus: #2a78d6;
-  /* Aspect heatmap: the validated blue sequential ramp (steps 250-650), light to dark as the
-     share grows. Checked with the dataviz validator (--ordinal) against --surface. */
+  /* Aspect heatmap (design F5): darker is more. Positive reviews in the blue sequential ramp
+     (steps 250-650), negative ones in a red ramp matched to it in OKLab lightness. Validator
+     (--ordinal, against --surface, 22 Nov): both ALL CHECKS PASS; light ends 2.06:1 (blue) and
+     2.18:1 (red). */
   --heat-1: #86b6ef;
   --heat-2: #5598e7;
   --heat-3: #2a78d6;
   --heat-4: #1c5cab;
   --heat-5: #104281;
+  --heat-neg-1: #f89189;
+  --heat-neg-2: #e06e68;
+  --heat-neg-3: #ca4442;
+  --heat-neg-4: #a1302f;
+  --heat-neg-5: #791d1e;
   --hatch: #c3c4bd;
   /* A report's explanation statuses (always with their words): supported in the pulse family,
      inconclusive in a muted amber, ruled out in the neutral chip. */
@@ -36,6 +50,13 @@
   /* A failed night (Phase 7): the status palette's critical step, fixed in both modes and always
      beside a cross and the word; checked against the pulse blue with the dataviz validator. */
   --critical: #d03b3b;
+  /* A patch's estimate (design F7): filled blue when the whole 90% range is above zero, filled
+     red when it's all below, hollow grey otherwise. Validator (22 Nov) on --surface: ALL CHECKS
+     PASS, colour-blind ΔE 22.7 (protan), normal 30.1, both 3:1 or more. */
+  --up: var(--pulse);
+  --down: #ca4442;
+  /* The header bar's shadow once the page has scrolled under it. */
+  --bar-shadow: 0 1px 0 var(--hairline), 0 6px 16px rgb(21 26 33 / 0.08);
 
   --step--1: 0.875rem;
   --step-0: 1.0625rem;
@@ -56,23 +77,38 @@
     --axis: #40444b;
     --pulse: #3987e5;
     --pulse-wash: rgb(57 135 229 / 0.24);
-    --volume: #646a72;
+    --volume: #646a72; /* 3.12:1 on --surface */
     --marker: #c4c7cd;
     --marker-soft: #565b63;
-    --sale: #24272c;
+    /* Validator (22 Nov) with the dark pulse blue on --surface: ALL CHECKS PASS, colour-blind
+       ΔE 23.3 (protan), normal 24.2; the edge is 5.73:1. The mockup's #5cb068 failed the dark
+       lightness band (0.686). The wash (the edge at 22%) keeps the blue line at 3.30:1. */
+    --sale-edge: #52a75f;
+    --sale-wash: #263b2e;
     --chip: #25282d;
     --focus: #6da7ec;
-    /* The ramp's anchor flips: a small share recedes into the dark surface (steps 600-200). */
-    --heat-1: #184f95;
-    --heat-2: #256abf;
+    /* Darker is more here too (Seif, 21 Nov): the lightest step is the smallest share, so the
+       biggest shares sit closest to the page colour; the 2 px gaps keep each cell a tile.
+       Validator (--ordinal, against --surface, 22 Nov): both ALL CHECKS PASS; dark ends 2.11:1
+       (blue) and 2.13:1 (red, re-stepped from #8c2828, which was 1.99:1). */
+    --heat-1: #9ec5f4;
+    --heat-2: #6da7ec;
     --heat-3: #3987e5;
-    --heat-4: #6da7ec;
-    --heat-5: #9ec5f4;
+    --heat-4: #256abf;
+    --heat-5: #184f95;
+    --heat-neg-1: #ffa69f;
+    --heat-neg-2: #e8827b;
+    --heat-neg-3: #da5450;
+    --heat-neg-4: #b43b3a;
+    --heat-neg-5: #932b2b;
     --hatch: #4b5059;
     --status-yes: #b9d5f6;
     --status-yes-wash: #1d3350;
     --status-open: #e3cf94;
     --status-open-wash: #37301f;
+    --bar-shadow: 0 1px 0 var(--hairline), 0 6px 16px rgb(0 0 0 / 0.35);
+    /* Validator (22 Nov) with the dark pulse blue: ALL CHECKS PASS, ΔE 22.4 (protan), 29.9. */
+    --down: #da5450;
   }
 }
 
@@ -85,15 +121,24 @@
 html {
   background: var(--page);
   color: var(--ink);
+  /* Keeps whatever is focused or scrolled to clear of the 56 px header bar. */
+  scroll-padding-top: 64px;
 }
 
 body {
-  margin: 0 auto;
-  max-width: 68rem;
-  padding: 0 clamp(16px, 4vw, 40px);
+  margin: 0;
   font-size: var(--step-0);
   line-height: 1.5;
   background: var(--page);
+}
+
+/* The page's width. The header bar and the footer's band run full width; their content doesn't. */
+.site-header-inner,
+.site-main,
+.site-footer-inner {
+  max-width: 68rem;
+  margin-inline: auto;
+  padding-inline: clamp(16px, 4vw, 40px);
 }
 
 h1,
@@ -144,22 +189,85 @@ a:hover {
 
 /* Header and footer */
 
+/* The bar stays at the top (design F1); its height is BAR_HEIGHT_PX in HeaderTitle.tsx. */
 .site-header {
-  padding: 1.25rem 0 0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: 56px;
+  background: var(--page);
+  border-bottom: 1px solid var(--hairline);
+  transition: box-shadow 160ms ease;
+}
+
+.site-header[data-scrolled="true"] {
+  box-shadow: var(--bar-shadow);
+}
+
+.site-header-inner {
+  height: 100%;
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
   gap: 1rem;
 }
 
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: var(--step-1);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* The favicon's pulse line (PulseMark): beside the wordmark, and beating on the Ask page. */
+.pulse-mark {
+  display: block;
+  width: 1.375rem;
+  aspect-ratio: 26 / 16;
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pulse-line,
+.pulse-beat {
+  stroke: var(--pulse);
+}
+
+.pulse-bed {
+  stroke: var(--hairline);
+}
+
+/* "/ Helldivers 2" once the game's title has scrolled away; hidden from screen readers. */
+.header-here {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+}
+
+.header-here b {
+  color: var(--ink);
+}
+
 .site-menu {
+  margin-left: auto;
   display: flex;
   gap: 1.25rem;
+  height: 100%;
 }
 
 .site-menu a {
+  position: relative;
+  display: flex;
+  align-items: center;
   color: var(--ink-2);
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .site-menu a:hover {
@@ -168,21 +276,101 @@ a:hover {
   text-decoration-color: currentColor;
 }
 
-.wordmark {
+.site-menu a[aria-current="page"] {
+  color: var(--ink);
   font-weight: 700;
-  font-size: var(--step-1);
-  text-decoration: none;
 }
 
+.site-menu a[aria-current="page"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--pulse);
+}
+
+@media (max-width: 40rem) {
+  .header-here {
+    display: none;
+  }
+
+  .site-header-inner {
+    gap: 0.75rem;
+  }
+
+  .wordmark {
+    font-size: var(--step-0);
+  }
+
+  .site-menu {
+    gap: 0.9rem;
+    font-size: var(--step--1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-header {
+    transition: none;
+  }
+}
+
+/* The footer (design F2): a full-width band, three columns, then the data's source and age. */
 .site-footer {
   margin: 4rem 0 0;
-  padding: 1.5rem 0 2.5rem;
+  padding: 1.75rem 0 1.25rem;
+  background: var(--surface);
   border-top: 1px solid var(--hairline);
   color: var(--ink-2);
   font-size: var(--step--1);
+}
+
+.footer-columns {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1.4fr;
+  gap: 1.5rem;
+}
+
+.footer-heading {
+  margin-bottom: 0.5rem;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.footer-about p:not(.footer-heading) {
+  max-width: 34ch;
+  color: var(--ink-3);
+}
+
+.site-footer ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.footer-base {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem 2rem;
+  justify-content: space-between;
+  gap: 0.4rem 1.5rem;
+  margin-top: 1.5rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--hairline);
+  color: var(--ink-3);
+}
+
+@media (max-width: 40rem) {
+  .footer-columns {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .footer-about {
+    grid-column: 1 / -1;
+  }
 }
 
 /* Home */
@@ -459,9 +647,9 @@ a:hover {
 .key-sale {
   width: 14px;
   height: 14px;
-  background: var(--sale);
-  border: 1px solid var(--axis);
-  border-radius: 3px;
+  background: var(--sale-wash);
+  border-top: 3px solid var(--sale-edge);
+  border-radius: 2px;
 }
 
 /* Recharts: its default colours are replaced through its class names. */
@@ -503,7 +691,14 @@ a:hover {
   stroke-width: 2;
 }
 
-.volume-bar .recharts-bar-rectangle path {
+.volume-line .recharts-line-curve {
+  stroke: var(--volume);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.recharts-active-dot circle.volume-dot {
   fill: var(--volume);
 }
 
@@ -522,20 +717,30 @@ a:hover {
 .sale-band .recharts-reference-area-rect,
 .sale-band rect,
 .sale-band path {
-  fill: var(--sale);
+  fill: var(--sale-wash);
   fill-opacity: 1;
   stroke: none;
+}
+
+.sale-edge {
+  stroke: var(--sale-edge);
+  stroke-width: 3;
+}
+
+/* A halo in the chart's surface keeps the word readable where the share line crosses it. */
+.sale-label {
+  fill: var(--ink-2);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 
 .chart .recharts-tooltip-cursor {
   stroke: var(--ink-3);
   stroke-width: 1;
-}
-
-.chart-volume .recharts-tooltip-cursor {
-  fill: var(--ink-3);
-  fill-opacity: 0.12;
-  stroke: none;
 }
 
 /* Aspect heatmap: one grid row per aspect, one column per week; a 2px surface gap between
@@ -597,6 +802,13 @@ a:hover {
 .heat-4 { background: var(--heat-4); }
 .heat-5 { background: var(--heat-5); }
 
+/* Negative reviews: the red ramp, for the cells and the key alike. */
+[data-polarity="neg"] .heat-1 { background: var(--heat-neg-1); }
+[data-polarity="neg"] .heat-2 { background: var(--heat-neg-2); }
+[data-polarity="neg"] .heat-3 { background: var(--heat-neg-3); }
+[data-polarity="neg"] .heat-4 { background: var(--heat-neg-4); }
+[data-polarity="neg"] .heat-5 { background: var(--heat-neg-5); }
+
 .heat-thin {
   background: repeating-linear-gradient(135deg, var(--hatch) 0 1px, transparent 1px 5px);
 }
@@ -652,12 +864,12 @@ a:hover {
 }
 
 @media (max-width: 640px) {
-  .patch-aspect table {
+  .aspect-shift table {
     font-size: 0.8125rem;
   }
 
-  .patch-aspect th,
-  .patch-aspect td {
+  .aspect-shift th,
+  .aspect-shift td {
     padding-right: 0.6rem;
   }
 
@@ -679,40 +891,178 @@ a:hover {
   }
 }
 
-/* Before and after each patch: one collapsible table per major update or patch. */
+/* The patch list (design F7): one row per estimate, newest first; a row opens to its details. */
 
-.patch-aspects {
+.patch-list {
   margin: 0 0 2.5rem;
 }
 
-.patch-aspects > .chart-note {
-  margin: 0.4rem 0 1rem;
+.patch-list > .chart-note {
+  margin: 0.4rem 0 0.75rem;
   max-width: 44rem;
 }
 
-.patch-aspect {
-  border-top: 1px solid var(--hairline);
-  padding: 0.75rem 0;
+.patch-views {
+  margin-bottom: 0.75rem;
 }
 
-.patch-aspect:last-of-type {
+.patch-key {
+  margin-bottom: 0.4rem;
+}
+
+.key-dot {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.patch-key-note {
+  color: var(--ink-3);
+}
+
+.patch-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   border-bottom: 1px solid var(--hairline);
 }
 
-/* The summary keeps its list-item display, so the browser's open/closed marker stays. */
-.patch-aspect summary {
+.patch-rows > li {
+  border-top: 1px solid var(--hairline);
+}
+
+.patch-row {
+  display: grid;
+  grid-template-columns: 1rem 6.5rem minmax(0, 1fr) minmax(10rem, 260px);
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.45rem 0;
+  font: inherit;
+  font-size: var(--step--1);
+  color: var(--ink);
+  text-align: left;
+  background: none;
+  border: 0;
   cursor: pointer;
 }
 
-.patch-aspect-title {
+.patch-row:hover .patch-title {
+  text-decoration: underline;
+  text-decoration-color: var(--axis);
+}
+
+.patch-head {
+  padding-bottom: 0.15rem;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.patch-date {
+  color: var(--ink-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.patch-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.patch-row[aria-expanded="true"] .patch-title {
   font-weight: 700;
 }
 
-.patch-aspect-date {
-  margin-left: 0.75rem;
+.patch-caret {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: var(--ink-3);
+  stroke-width: 1.5;
+  transition: transform 120ms ease;
+}
+
+.patch-row[aria-expanded="true"] .patch-caret {
+  transform: rotate(90deg);
+}
+
+.patch-panel {
+  margin: 0 0 0.75rem 1.75rem;
+  padding: 0.75rem 1rem;
+  border-left: 2px solid var(--axis);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface);
+}
+
+.patch-panel .patch-effect {
+  margin: 0;
+}
+
+/* The verdict in words, leading the opened row in the text's ink, never a series colour. */
+.patch-verdict {
+  margin: 0 0 0.2rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.patch-posts {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  font-size: var(--step--1);
+}
+
+.patch-post-date {
+  color: var(--ink-3);
+}
+
+.patch-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.75rem;
   font-size: var(--step--1);
   color: var(--ink-3);
-  white-space: nowrap;
+}
+
+.patch-more button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--chip);
+  border: 1px solid var(--axis);
+  border-radius: 999px;
+  padding: 0.3rem 0.9rem;
+  cursor: pointer;
+}
+
+@media (max-width: 40rem) {
+  .patch-row {
+    grid-template-columns: 1rem auto minmax(0, 1fr);
+    row-gap: 0.25rem;
+  }
+
+  /* Full row width on a phone: the drawing scales with the row instead of shrinking to its
+     22 px height. */
+  .patch-row .estimate-mark,
+  .patch-head .scale-axis {
+    grid-column: 1 / -1;
+    max-width: none;
+    height: auto;
+  }
+
+  .patch-panel {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .patch-caret {
+    transition: none;
+  }
 }
 
 .method-notes {
@@ -750,47 +1100,205 @@ a:hover {
   color: var(--ink-2);
 }
 
-.patch-aspect table {
+/* A patch row's estimate (EstimateMark): a dot and its 90% range on the shared −100 to +100
+   scale. Filled when clear, hollow grey otherwise; the ring keeps the dot off its line. */
+.estimate-mark,
+.scale-axis {
+  display: block;
   width: 100%;
-  margin-top: 0.5rem;
+  max-width: 260px;
+}
+
+.estimate-mark {
+  height: 22px;
+}
+
+.scale-axis {
+  height: 14px;
+  fill: var(--ink-3);
+  font-size: 10px;
+}
+
+.mark-zero {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
+.mark-range {
+  stroke-width: 2;
+  stroke-linecap: butt;
+}
+
+.mark-open {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mark-up {
+  stroke: var(--up);
+}
+
+.mark-down {
+  stroke: var(--down);
+}
+
+.mark-unclear {
+  stroke: var(--ink-3);
+}
+
+circle.mark-up,
+circle.mark-down {
+  stroke: var(--page);
+  stroke-width: 2;
+}
+
+circle.mark-up {
+  fill: var(--up);
+}
+
+circle.mark-down {
+  fill: var(--down);
+}
+
+circle.mark-unclear {
+  fill: var(--page);
+  stroke-width: 2;
+}
+
+.mark-none {
+  fill: var(--ink-3);
+  font-size: 11px;
+}
+
+/* What negative reviews mention before and after (AspectShift): neutral ink, labels as page
+   text, one strip of dots per aspect. Rows whose change could be chance are faded. */
+.aspect-shift {
+  margin-top: 0.9rem;
+}
+
+.shift-figure {
+  margin: 0.4rem 0 0.3rem;
+  max-width: 40rem;
+}
+
+.shift-figure figcaption {
+  margin-top: 0.3rem;
+  font-size: var(--step--1);
+  color: var(--ink-3);
+}
+
+/* The strip's column can shrink to nothing (minmax(0, ...)): an SVG's default 300 px width would
+   otherwise push a phone's page sideways. */
+.shift-row {
+  display: grid;
+  grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr) 4rem;
+  align-items: center;
+  gap: 0.5rem;
   font-size: var(--step--1);
 }
 
-.patch-aspect caption {
+.shift-label {
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shift-change {
+  text-align: right;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.shift-strip {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: visible;
+}
+
+.shift-ticks {
+  position: relative;
+  height: 1.1rem;
+}
+
+.shift-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.shift-grid {
+  stroke: var(--hairline);
+}
+
+.shift-link {
+  stroke: var(--ink-2);
+  stroke-width: 2;
+}
+
+.shift-before {
+  fill: var(--page);
+  stroke: var(--ink-3);
+  stroke-width: 1.5;
+}
+
+.shift-after {
+  fill: var(--ink);
+}
+
+.shift-row[data-faded="true"] .shift-label,
+.shift-row[data-faded="true"] .shift-change {
+  color: var(--ink-3);
+}
+
+.shift-row[data-faded="true"] .shift-link {
+  stroke: var(--axis);
+}
+
+.shift-row[data-faded="true"] .shift-after {
+  fill: var(--ink-3);
+}
+
+@media (max-width: 40rem) {
+  .shift-row {
+    grid-template-columns: minmax(5.5rem, 7.5rem) minmax(0, 1fr) 3.25rem;
+  }
+
+  /* Long aspect names wrap onto two lines rather than being cut off. */
+  .shift-label {
+    white-space: normal;
+    line-height: 1.15;
+  }
+}
+
+/* The opened row's folded table of the exact numbers. */
+.aspect-shift .table-view {
+  margin: 0.5rem 0 0;
+}
+
+.aspect-shift .table-scroll {
+  max-height: none;
+}
+
+.aspect-shift caption {
   caption-side: top;
   text-align: left;
   padding-bottom: 0.4rem;
   color: var(--ink-3);
 }
 
-.patch-aspect .table-scroll {
-  max-height: none;
-}
-
-.patch-aspect th,
-.patch-aspect td {
-  text-align: left;
-  padding: 0.45rem 1rem 0.45rem 0;
-  border-bottom: 1px solid var(--hairline);
-  font-variant-numeric: tabular-nums;
-}
-
-.patch-aspect td {
+.aspect-shift td {
   white-space: nowrap;
 }
 
-.patch-aspect th:last-child,
-.patch-aspect td:last-child {
-  padding-right: 0;
-}
-
-.patch-aspect thead th,
-.patch-aspect tbody th {
+.aspect-shift tbody th {
   font-weight: 400;
-  color: var(--ink-3);
-}
-
-.patch-aspect tbody th {
   color: var(--ink-2);
 }
 
@@ -848,20 +1356,27 @@ a:hover {
   margin-top: 0.75rem;
 }
 
+/* The posts list pages itself ("Show 10 more"): it grows with the page instead of scrolling
+   inside a box, and only scrolls sideways on a narrow screen. */
+.table-scroll.post-table {
+  max-height: none;
+  overflow: auto hidden;
+}
+
 table {
   border-collapse: collapse;
 }
 
 .table-view table,
-.posts table {
+.post-table table {
   width: 100%;
   font-size: var(--step--1);
 }
 
 .table-view th,
 .table-view td,
-.posts th,
-.posts td {
+.post-table th,
+.post-table td {
   text-align: left;
   padding: 0.5rem 1rem 0.5rem 0;
   border-bottom: 1px solid var(--hairline);
@@ -870,7 +1385,7 @@ table {
 }
 
 .table-view thead th,
-.posts thead th {
+.post-table thead th {
   color: var(--ink-3);
   font-weight: 400;
   position: sticky;
@@ -878,15 +1393,7 @@ table {
   background: var(--page);
 }
 
-.posts {
-  margin-top: 1rem;
-}
-
-.posts h2 {
-  margin-bottom: 1rem;
-}
-
-.posts td:first-child {
+.post-table td:first-child {
   white-space: nowrap;
 }
 
@@ -1236,6 +1743,80 @@ table {
   max-width: 52rem;
   margin: 1rem 0 0;
   color: var(--ink-2);
+}
+
+/* The wait between the click and the answer (design F8): the pulse line beating like a monitor
+   trace, a phrase that changes every 2.8 s, and the seconds so far. */
+.ask-wait {
+  max-width: 52rem;
+  margin: 1.25rem 0 0;
+  min-height: 4.5rem;
+}
+
+.ask-wait-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.ask-pulse {
+  width: 2.75rem;
+  stroke-width: 1.6;
+}
+
+/* The favicon's line is about 43 units long: a 14-unit beat with a 46-unit gap crosses it once
+   every 1.6 s and is on the line almost all the time. */
+.pulse-beat {
+  stroke-dasharray: 14 46;
+  animation: pulse-sweep 1.6s linear infinite;
+}
+
+@keyframes pulse-sweep {
+  from {
+    stroke-dashoffset: 14;
+  }
+
+  to {
+    stroke-dashoffset: -46;
+  }
+}
+
+.ask-phrase {
+  color: var(--ink);
+  animation: phrase-in 260ms ease;
+}
+
+@keyframes phrase-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.ask-seconds {
+  color: var(--ink-3);
+  font-size: var(--step--1);
+  font-variant-numeric: tabular-nums;
+}
+
+.ask-slow {
+  margin-top: 0.4rem;
+  color: var(--ink-3);
+  font-size: var(--step--1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-beat {
+    stroke-dasharray: none;
+    animation: none;
+  }
+
+  .ask-phrase {
+    animation: none;
+  }
 }
 
 .ask-answer {

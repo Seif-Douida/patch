@@ -39,7 +39,8 @@ describe("Monitoring", () => {
     expect(screen.getByText(/aspect-classifier v3/)).toBeTruthy();
     expect(screen.getAllByRole("figure").length).toBeGreaterThanOrEqual(5 + 1 + 1 + 2);
     expect(screen.getByText(/Kept the champion/)).toBeTruthy();
-  });
+    // The whole page with every chart: ~1.6 s alone, up to ~5.6 s with the suite in parallel.
+  }, 15_000);
 
   it("shows_the_empty_states_without_data", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "monitoring-"));

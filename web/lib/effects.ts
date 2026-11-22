@@ -40,7 +40,7 @@ export function plainReason(reason: string): string {
   return PLAIN.find(([start]) => reason.startsWith(start))?.[1] ?? reason;
 }
 
-type Estimated = HorizonEffect & {
+export type EstimatedHorizon = HorizonEffect & {
   effect: number;
   lo90: number;
   hi90: number;
@@ -48,7 +48,7 @@ type Estimated = HorizonEffect & {
 };
 
 // An effect is only shown with its range.
-function isEstimated(horizon: HorizonEffect | undefined): horizon is Estimated {
+function isEstimated(horizon: HorizonEffect | undefined): horizon is EstimatedHorizon {
   return (
     horizon !== undefined &&
     horizon.effect !== null &&
@@ -108,6 +108,15 @@ function flagNotes(flags: readonly string[], discountsFrom: string | null): stri
   return notes; // `binned` (quiet days grouped in threes) changes nothing a reader acts on
 }
 
+/** The estimate a patch shows: the 14-day one, or the 7-day one when there's no 14-day estimate,
+ * or null. The patch list's dot and the sentence both use it, so they never disagree. */
+export function shownHorizon(effect: PatchEffect | null | undefined): EstimatedHorizon | null {
+  if (!effect) return null;
+  const seven = effect.horizons.find((horizon) => horizon.days === 7);
+  const fourteen = effect.horizons.find((horizon) => horizon.days === 14);
+  return isEstimated(fourteen) ? fourteen : isEstimated(seven) ? seven : null;
+}
+
 /**
  * The 14-day estimate, or the 7-day one when there's no 14-day estimate; without either, why.
  * `discountsFrom` is the first day the game's price is known (its first price snapshot).
@@ -118,7 +127,7 @@ export function describeEffect(
 ): EffectText {
   const seven = effect.horizons.find((horizon) => horizon.days === 7);
   const fourteen = effect.horizons.find((horizon) => horizon.days === 14);
-  const shown = isEstimated(fourteen) ? fourteen : isEstimated(seven) ? seven : null;
+  const shown = shownHorizon(effect);
   const notes: string[] = [];
   let line: string;
   if (shown === null) {

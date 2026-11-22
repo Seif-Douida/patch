@@ -3,11 +3,10 @@
 import { useMemo, useState } from "react";
 import {
   Area,
-  Bar,
-  BarChart,
   CartesianGrid,
   ComposedChart,
   Line,
+  LineChart,
   ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
@@ -39,7 +38,7 @@ const RANGES: { label: string; days: number | null }[] = [
 
 type Row = DayPoint & { band: [number, number] | null; marker: Marker | null };
 
-function DayDetails({ row }: { row: Row }) {
+export function DayDetails({ row }: { row: Row }) {
   return (
     <div className="day-details">
       <p className="day-date">{formatDate(row.date)}</p>
@@ -82,7 +81,60 @@ function ShareTooltip({
   return <DayDetails row={row} />;
 }
 
-function Key() {
+/** The reviews chart's own readout (design F4): the day, its count, and a sale. */
+export function VolumeDetails({ row }: { row: DayPoint }) {
+  return (
+    <div className="day-details">
+      <p className="day-date">{formatDate(row.date)}</p>
+      <p>
+        <strong>{formatCount(row.n)}</strong> {row.n === 1 ? "review" : "reviews"}
+      </p>
+      {row.sale && (
+        <p className="day-quiet">Steam sale{row.discount ? `, ${row.discount}% off` : ""}</p>
+      )}
+    </div>
+  );
+}
+
+function VolumeTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: readonly { payload?: Row }[];
+}) {
+  const row = payload?.[0]?.payload;
+  if (!active || !row) return null;
+  return <VolumeDetails row={row} />;
+}
+
+// The word fits a band this wide (px); a narrower band keeps only its edge.
+const SALE_LABEL_MIN_WIDTH = 32;
+
+/**
+ * A sale band's marks (design F3), drawn as the ReferenceArea's label: a solid edge along its top,
+ * and "Sale" when the band is wide enough to hold the word.
+ */
+export function SaleMark({
+  viewBox,
+}: {
+  viewBox?: { x: number; y: number; width: number; height: number };
+}) {
+  if (!viewBox) return null;
+  const { x, y, width } = viewBox;
+  return (
+    <g className="sale-mark">
+      <line className="sale-edge" x1={x} x2={x + width} y1={y + 1.5} y2={y + 1.5} />
+      {width >= SALE_LABEL_MIN_WIDTH && (
+        <text className="sale-label" x={x + 5} y={y + 15}>
+          Sale
+        </text>
+      )}
+    </g>
+  );
+}
+
+export function Key() {
   return (
     <ul className="chart-key" aria-label="Chart key">
       <li>
@@ -145,7 +197,8 @@ export function GameCharts({
     return <p>No reviews have been collected for this game yet. They appear after the next update.</p>;
   }
 
-  // Both charts get the same calendar ticks, so their dates line up.
+  // Both charts get the same calendar ticks, so their dates line up; each keeps its own readout
+  // (no syncId: hovering one never moves the other).
   const xAxis = (
     <XAxis
       dataKey="date"
@@ -164,6 +217,7 @@ export function GameCharts({
         x2={s.to}
         className="sale-band"
         ifOverflow="hidden"
+        label={<SaleMark />}
       />
     )),
     ...markers.map((m) => (
@@ -197,7 +251,7 @@ export function GameCharts({
         </figcaption>
         <div className="chart-frame chart-frame-share">
           <ResponsiveContainer>
-            <ComposedChart data={rows} syncId="pulse" margin={{ top: 8, right: 12, left: 0 }}>
+            <ComposedChart data={rows} margin={{ top: 8, right: 12, left: 0 }}>
               <CartesianGrid vertical={false} />
               {decorations}
               {xAxis}
@@ -241,7 +295,7 @@ export function GameCharts({
         </figcaption>
         <div className="chart-frame chart-frame-volume">
           <ResponsiveContainer>
-            <BarChart data={rows} syncId="pulse" margin={{ top: 8, right: 12, left: 0 }}>
+            <LineChart data={rows} margin={{ top: 8, right: 12, left: 0 }}>
               <CartesianGrid vertical={false} />
               {decorations}
               {xAxis}
@@ -252,15 +306,19 @@ export function GameCharts({
                 tickFormatter={(n: number) => formatCount(n)}
                 allowDecimals={false}
               />
-              <Bar
+              <Line
                 dataKey="n"
-                className="volume-bar"
-                maxBarSize={24}
-                radius={[2, 2, 0, 0]}
+                className="volume-line"
+                dot={false}
+                activeDot={{ r: 4, className: "volume-dot" }}
                 isAnimationActive={false}
               />
-              <Tooltip content={() => null} cursor={{ className: "crosshair" }} />
-            </BarChart>
+              <Tooltip
+                content={VolumeTooltip}
+                cursor={{ className: "crosshair" }}
+                isAnimationActive={false}
+              />
+            </LineChart>
           </ResponsiveContainer>
         </div>
       </figure>
@@ -275,7 +333,7 @@ export function GameCharts({
       )}
 
       <details className="table-view">
-        <summary>Show the daily numbers for this range</summary>
+        <summary>Show these charts as a table</summary>
         <div className="table-scroll">
           <table>
             <thead>

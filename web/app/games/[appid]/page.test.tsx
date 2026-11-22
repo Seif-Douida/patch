@@ -80,7 +80,7 @@ describe("GamePage", () => {
       expect(screen.getByRole("heading", { level: 1 }).textContent).toBe(
         "Example Arena (sample data)",
       );
-      expect(screen.getByText("Patches and posts")).toBeTruthy();
+      expect(screen.getByRole("heading", { level: 2, name: "Patches" })).toBeTruthy();
       cleanup();
     }
   });
