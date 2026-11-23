@@ -1,9 +1,10 @@
 """The bundle built from the marts (plan Task 2) under `dbt build` on the SQL Server container.
 
 Two tracked games and a comparison game: reviews over three days and today, aspect scores, two
-patches in one bundle and an event post, a price snapshot, and estimates stored over two runs. The
-bundle must hold exactly the marts' rows up to yesterday and the latest estimate of each key, for
-the tracked games only, and never a review's text.
+patches in one bundle and an event post, price snapshots every other day, and estimates stored over
+two runs. The bundle must hold the marts' rows up to yesterday (a day between two equal prices
+takes theirs) and the latest estimate of each key, for the tracked games only, and never a review's
+text.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from patchpulse.ingest.load import (
 )
 from patchpulse.ingest.models import NewsItem, PriceSnapshot, ReviewRecord
 from patchpulse.ingest.patches import classify
+from patchpulse.ingest.prices import fill_one_day_gaps
 from patchpulse.labeling.taxonomy import ASPECTS
 from patchpulse.pipeline.dbt import run_dbt
 
@@ -46,6 +48,8 @@ pytestmark = pytest.mark.integration
 
 TODAY = datetime.now(UTC).replace(hour=1, minute=0, second=0, microsecond=0)
 DAY1, DAY2, DAY3 = (TODAY - timedelta(days=d) for d in (6, 5, 4))
+PRICE_DAYS = [(TODAY - timedelta(days=d)).date() for d in (6, 4, 2, 0)]
+UNPRICED_DAYS = [(TODAY - timedelta(days=d)).date() for d in (5, 3, 1)]
 GAME_A, GAME_B, DONOR = 553850, 949230, 1086940
 WRITER_PASSWORD = "Writer-Bundle-1"
 SCORER = "s0-20261013T000000Z"
@@ -190,12 +194,19 @@ def built(new_database: Callable[[], Settings], tmp_path_factory: pytest.TempPat
         upsert_reviews(connection, REVIEWS, run_id=1)
         upsert_news(connection, NEWS, run_id=1)
         upsert_classifications(connection, {i.gid: classify(i) for i in NEWS}, run_id=1)
-        upsert_prices(
-            connection,
-            {GAME_A: PriceSnapshot(currency="USD", initial=3999, final=1999, discount_percent=50)},
-            snapshot_date=DAY1.date(),
-            run_id=1,
-        )
+        # Every other day, as the nightly takes them since 5 Nov 2026: DAY2, three days ago and
+        # yesterday have no price, and the bundle fills them from their neighbours.
+        for snapshot_day in PRICE_DAYS:
+            upsert_prices(
+                connection,
+                {
+                    GAME_A: PriceSnapshot(
+                        currency="USD", initial=3999, final=1999, discount_percent=50
+                    )
+                },
+                snapshot_date=snapshot_day,
+                run_id=1,
+            )
         connection.execute(
             insert(tables.review_aspect_score),
             [
@@ -255,11 +266,12 @@ def test_bundle_matches_the_marts(built: Built) -> None:
     ]
     games = {g.appid: g for g in bundle.games}
 
+    # Through today: today's price fills yesterday, then the bundle stops at yesterday.
     days = by_game(
         built.rows(
             "SELECT game_key, [date], n_positive, n_reviews, is_sale, discount_pct "
             "FROM mart.daily_game_sentiment WHERE date_key <= :last",
-            last=yesterday,
+            last=int(TODAY.strftime("%Y%m%d")),
         ),
         "date",
         "n_positive",
@@ -268,13 +280,19 @@ def test_bundle_matches_the_marts(built: Built) -> None:
         "discount_pct",
     )
     for appid, game in games.items():
+        filled = fill_one_day_gaps({row[0]: row[-1] for row in days[appid]})
         assert {(d.date, d.positives, d.totals, d.sale, d.discount) for d in game.days} == {
-            (day, positives, totals, bool(sale), discount)
-            for day, positives, totals, sale, discount in days[appid]
+            (day, positives, totals, bool(sale), filled[day])
+            for day, positives, totals, sale, _ in days[appid]
+            if day < TODAY.date()
         }
+    mart_a = {row[0]: row[-1] for row in days[GAME_A]}
+    assert [mart_a[day] for day in UNPRICED_DAYS] == [None, None, None]
     a_days = {d.date: d for d in games[GAME_A].days}
     assert (a_days[DAY1.date()].positives, a_days[DAY1.date()].totals) == (2, 4)
-    assert a_days[DAY1.date()].discount == 50
+    assert {day: d.discount for day, d in a_days.items() if day >= DAY1.date()} == {
+        DAY1.date() + timedelta(days=i): 50 for i in range(6)
+    }
     assert TODAY.date() not in a_days  # days up to yesterday
 
     aspects = by_game(

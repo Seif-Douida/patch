@@ -153,6 +153,21 @@ def test_floats_are_rounded_and_dates_are_iso() -> None:
     }
 
 
+def test_series_fills_a_one_day_price_gap() -> None:
+    def discounts(*values: int | None) -> list[int | None]:
+        days = [
+            day(553850, D1 + timedelta(days=i), 2, 1, sale=True, discount=value)
+            for i, value in enumerate(values)
+        ]
+        series = load(export([HD2], days, []), "games/553850.json")["series"]
+        return [point["discount"] for point in series]
+
+    # The nightly runs every other night: the day between two equal prices takes theirs.
+    assert discounts(30, None, 30) == [30, 30, 30]
+    # A discount ended there: the day stays unknown, never "0% off".
+    assert discounts(30, None, 0) == [30, None, 0]
+
+
 def test_latest_summary_covers_the_last_30_days() -> None:
     last = D1 + timedelta(days=40)
     days = [

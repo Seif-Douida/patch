@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import gzip
 import json
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ from sqlalchemy import Connection, text
 from patchpulse.causal import bundles as patch_bundles
 from patchpulse.causal.config import CAUSAL_CONFIG_PATH, CausalConfig, read_causal_config
 from patchpulse.causal.store import StoredEstimate, all_latest_estimates
+from patchpulse.ingest.prices import fill_one_day_gaps
 
 BUNDLE_SCHEMA = 1
 # The orphan branch the nightly job publishes the bundle and reports.json to, for the API.
@@ -35,7 +36,8 @@ REPORTS_FILE = "reports.json"
 @dataclass(frozen=True)
 class DayRow:
     """A game's day: its reviews and positive reviews, a Steam sale, and the game's discount in
-    percent (None where no price snapshot was taken that day)."""
+    percent (None where no price snapshot was taken that day and the days either side don't show
+    the same discount: `ingest.prices.fill_one_day_gaps`)."""
 
     date: date
     positives: int
@@ -216,17 +218,19 @@ def build_bundle(
             text("SELECT appid, name, genres FROM core.dim_game WHERE role <> 'donor'")
         )
     }
-    days: dict[int, list[DayRow]] = {a: [] for a in games}
+    # Through today: the nightly takes today's price before this stage, and it fills yesterday
+    # (the nightly runs every other night, so yesterday has no price of its own).
+    with_today: dict[int, list[DayRow]] = {a: [] for a in games}
     for r in connection.execute(
         text(
             "SELECT game_key, date_key, n_positive, n_reviews, is_sale, discount_pct "
-            "FROM mart.daily_game_sentiment WHERE date_key <= :last"
+            "FROM mart.daily_game_sentiment WHERE date_key <= :today"
         ),
-        through,
+        {"today": _key(today)},
     ):
-        if int(r.game_key) in days:
+        if int(r.game_key) in with_today:
             discount = None if r.discount_pct is None else int(r.discount_pct)
-            days[int(r.game_key)].append(
+            with_today[int(r.game_key)].append(
                 DayRow(
                     date=_day(r.date_key),
                     positives=int(r.n_positive),
@@ -235,6 +239,10 @@ def build_bundle(
                     discount=discount,
                 )
             )
+    days: dict[int, list[DayRow]] = {}
+    for appid, rows in with_today.items():
+        filled = fill_one_day_gaps({d.date: d.discount for d in rows})
+        days[appid] = [replace(d, discount=filled[d.date]) for d in rows if d.date < today]
     aspects: dict[int, list[AspectRow]] = {a: [] for a in games}
     for r in connection.execute(
         text(

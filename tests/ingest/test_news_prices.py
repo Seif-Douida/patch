@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -10,7 +10,7 @@ import httpx2
 
 from patchpulse.ingest.http import RateLimiter, SteamHttp
 from patchpulse.ingest.news import fetch_news
-from patchpulse.ingest.prices import PRICE_BATCH_SIZE, fetch_prices
+from patchpulse.ingest.prices import PRICE_BATCH_SIZE, fetch_prices, fill_one_day_gaps
 
 
 class Recorder:
@@ -142,3 +142,49 @@ def test_free_game_has_no_price_but_is_not_a_failure() -> None:
 
     assert fetched.snapshots[999] is None
     assert fetched.failed == frozenset()
+
+
+def days_from(first: date, *discounts: int | None) -> dict[date, int | None]:
+    """Consecutive days from `first`, one per discount."""
+    return {first + timedelta(days=i): value for i, value in enumerate(discounts)}
+
+
+NOV7 = date(2026, 11, 7)
+
+
+def test_fill_one_day_gaps_takes_equal_neighbours() -> None:
+    # 0% on both sides fills 0: a truthiness check would skip it.
+    assert fill_one_day_gaps(days_from(NOV7, 0, None, 0)) == days_from(NOV7, 0, 0, 0)
+    assert fill_one_day_gaps(days_from(NOV7, 20, None, 20)) == days_from(NOV7, 20, 20, 20)
+
+
+def test_fill_one_day_gaps_leaves_differing_neighbours() -> None:
+    # A discount started there: the day itself is unknown.
+    assert fill_one_day_gaps(days_from(NOV7, 0, None, 25)) == days_from(NOV7, 0, None, 25)
+
+
+def test_fill_one_day_gaps_leaves_longer_gaps() -> None:
+    # A failed night leaves two days or more: a short discount could hide in them.
+    gap = days_from(NOV7, 0, None, None, 0)
+    assert fill_one_day_gaps(gap) == gap
+
+
+def test_fill_one_day_gaps_needs_both_neighbours() -> None:
+    nov10 = NOV7 + timedelta(days=3)
+    discounts = {
+        NOV7: None,  # first day: nothing before it
+        NOV7 + timedelta(days=1): 0,
+        # 9 Nov absent from the mapping: 10 Nov has a price after it, not one before
+        nov10: None,
+        NOV7 + timedelta(days=4): 0,
+        NOV7 + timedelta(days=5): 0,
+        NOV7 + timedelta(days=6): None,  # last day: nothing after it
+    }
+    before = dict(discounts)
+
+    filled = fill_one_day_gaps(discounts)
+
+    assert filled == before  # nothing fills, and days with a price keep it
+    assert list(filled) == list(before)  # the same keys, in the same order
+    assert discounts == before  # the input is untouched
+    assert filled is not discounts
