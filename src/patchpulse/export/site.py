@@ -49,7 +49,7 @@ import json
 import logging
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,7 @@ from patchpulse.causal.config import CAUSAL_CONFIG_PATH, read_causal_config
 from patchpulse.causal.estimate import EFFECTS_VERSION, HORIZONS, Method, Sample
 from patchpulse.causal.its import POSITIVE_SHARE
 from patchpulse.causal.store import latest_estimates, serve
+from patchpulse.ingest.prices import fill_one_day_gaps
 from patchpulse.labeling.taxonomy import ASPECTS
 
 log = logging.getLogger("patchpulse.export")
@@ -330,6 +331,9 @@ def shape_site_export(
     series_by_game: dict[int, list[DayRow]] = defaultdict(list)
     for row in sorted(days, key=lambda d: (d.appid, d.date)):
         series_by_game[row.appid].append(row)
+    for appid, rows in series_by_game.items():  # the nightly runs every other night
+        filled = fill_one_day_gaps({d.date: d.discount_pct for d in rows})
+        series_by_game[appid] = [replace(d, discount_pct=filled[d.date]) for d in rows]
     patches_by_game: dict[int, list[PatchRow]] = defaultdict(list)
     for patch in sorted(patches, key=lambda p: (p.appid, p.published_at, p.title)):
         patches_by_game[patch.appid].append(patch)

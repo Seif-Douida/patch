@@ -7,8 +7,9 @@ candidate; the analysis only uses `discount_percent`, and the currency is record
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from patchpulse.ingest.http import SteamHttp
 from patchpulse.ingest.models import PriceSnapshot, RawPage
@@ -48,3 +49,23 @@ def fetch_prices(http: SteamHttp, appids: Sequence[int], *, cc: str = PRICE_COUN
             overview = data.get("price_overview") if isinstance(data, dict) else None
             snapshots[appid] = PriceSnapshot.model_validate(overview) if overview else None
     return PriceFetch(raws, snapshots, frozenset(failed))
+
+
+def fill_one_day_gaps(discounts: Mapping[date, int | None]) -> dict[date, int | None]:
+    """A game's discount by day, with each single day lacking a price given the discount of the
+    day before and the day after when both have one and they are equal.
+
+    The nightly runs every other night since 5 Nov 2026, so every second day has no price
+    snapshot. Anything else stays None: a gap of two days or more (a failed night), neighbours
+    that differ (a discount began or ended there), and a day whose calendar neighbour isn't in
+    `discounts`. The cost: a discount that starts and ends between two snapshots is missed.
+    Returns a new dict with the same keys in the same order."""
+    filled = dict(discounts)
+    for day, discount in discounts.items():
+        if discount is not None:
+            continue
+        before = discounts.get(day - timedelta(days=1))
+        after = discounts.get(day + timedelta(days=1))
+        if before is not None and before == after:
+            filled[day] = before
+    return filled
